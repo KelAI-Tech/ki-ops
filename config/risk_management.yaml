@@ -1,0 +1,35 @@
+# Risk Management Settings
+risk_management:
+  enabled: true
+
+  # Position limits
+  max_position_size: 10000  # USD per position
+  max_portfolio_value: 100000  # Total portfolio limit
+  max_daily_loss: 2000  # Maximum daily loss before shutdown
+  max_position_concentration: 0.2  # Max 20% in any single position
+
+  # Volatility controls
+  max_position_volatility: 0.3  # Maximum position volatility
+  volatility_lookback: 30  # Days for volatility calculation
+
+  # Stop losses (disabled for first pass)
+  use_stop_losses: false
+  default_stop_loss: 0.05  # 5% stop loss
+  trailing_stop: true
+  trailing_stop_distance: 0.02  # 2% trailing distance
+
+  # Order size limits
+  min_order_size: 100  # Minimum order value
+  max_order_size: 5000  # Maximum single order value
+  max_orders_per_minute: 10
+
+  # Market hours enforcement (disabled for first pass)
+  enforce_market_hours: false
+  pre_market_trading: false
+  after_hours_trading: false
+
+  # Turnover (pre-trade safety)
+  max_turnover: 0.25  # Max 25% of portfolio traded in a batch
+
+  # Shorting
+  allow_shorts: true  # Permit sells that exceed current holdings
