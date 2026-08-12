@@ -124,9 +124,10 @@ def check_market_hours(orders: Sequence[Order], settings: RiskManagementSettings
 def check_sell_availability(
     portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings
 ) -> list[CheckViolation]:
+    """When shorts are disallowed, only sell up to current long qty (max(qty, 0))."""
     if settings.allow_shorts:
         return []
-    avail = {s: h.quantity for s, h in portfolio.holdings.items()}
+    avail = {s: max(h.quantity, Decimal("0")) for s, h in portfolio.holdings.items()}
     out = []
     for o in orders:
         if o.side is Side.BUY:
@@ -135,7 +136,7 @@ def check_sell_availability(
         if o.side is Side.SELL:
             have = avail.get(o.symbol, Decimal("0"))
             if o.quantity > have:
-                out.append(block("INSUFFICIENT_HOLDINGS", f"sell {o.quantity} > {have}", o.symbol))
+                out.append(block("INSUFFICIENT_HOLDINGS", f"sell {o.quantity} > long {have}", o.symbol))
             else:
                 avail[o.symbol] = have - o.quantity
     return out

@@ -95,6 +95,7 @@ def load_symbol_volatilities(*paths: str | Path) -> dict[str, Decimal]:
 
 
 def load_sod_positions_csv(path: str | Path, *, cash=None) -> Portfolio:
+    """Load start-of-day positions. ``quantity`` may be negative for shorts."""
     rows = _rows(Path(path))
     holdings = []
     file_cash = None
@@ -108,7 +109,7 @@ def load_sod_positions_csv(path: str | Path, *, cash=None) -> Portfolio:
         holdings.append(
             Holding(
                 sym,
-                Decimal(row["quantity"]),
+                Decimal(row["quantity"]),  # negative = short
                 Decimal(row["market_price"]),
                 Decimal(row["cost_basis"]) if row.get("cost_basis") else None,
             )

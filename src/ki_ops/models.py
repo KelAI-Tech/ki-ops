@@ -25,6 +25,8 @@ def _utc(ts: datetime | None = None) -> datetime:
 
 @dataclass(frozen=True)
 class Holding:
+    """Position lot. ``quantity`` may be negative (short)."""
+
     symbol: str
     quantity: Decimal
     market_price: Decimal
@@ -114,8 +116,15 @@ class Portfolio:
 
     @property
     def total_value(self) -> Decimal:
+        """Net equity + cash (shorts reduce equity)."""
         equity = sum((h.market_value for h in self.holdings.values()), Decimal("0"))
         return equity + self.cash
+
+    @property
+    def gross_exposure(self) -> Decimal:
+        """Σ|position MV| + cash — stable denominator for long/short turnover."""
+        gmv = sum((abs(h.market_value) for h in self.holdings.values()), Decimal("0"))
+        return gmv + self.cash
 
     def get(self, symbol: str) -> Holding | None:
         return self.holdings.get(symbol.upper())
