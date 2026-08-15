@@ -61,19 +61,19 @@ def project_orders(portfolio: Portfolio, orders: Iterable[Order]) -> Portfolio:
 
 
 def turnover_ratio(portfolio: Portfolio, orders: Iterable[Order]) -> Decimal:
-    """Gross turnover with shorts:
+    """One-way turnover with shorts:
 
-    (abs buy notional + abs sell notional) / (Σ|position MV| + cash)
+    (abs buy notional + abs sell notional) / 2 / (Σ|position MV| + cash)
 
-    Numerator: buys and sells both count (covers, short opens, long trims, etc.).
-    Denominator: gross exposure, not net NAV — so a dollar-neutral book does not
-    collapse the base to cash-only and inflate turnover.
-    For long-only books this matches (equity + cash) / same as total_value.
+    Buys and sells both enter the notional sum (covers, short opens, long trims),
+    then ÷2 so a full book replace (exit + enter) reads as 100%, not 200%.
+    Denominator is gross exposure, not net NAV — so a dollar-neutral book does
+    not collapse the base to cash-only and inflate turnover.
     """
     buy_amt = sum((abs(o.notional) for o in orders if o.side is Side.BUY), Decimal("0"))
     sell_amt = sum((abs(o.notional) for o in orders if o.side is Side.SELL), Decimal("0"))
-    gross = buy_amt + sell_amt
+    traded = buy_amt + sell_amt
     base = portfolio.gross_exposure
     if base <= 0:
-        return Decimal("0") if gross == 0 else Decimal("Infinity")
-    return gross / base
+        return Decimal("0") if traded == 0 else Decimal("Infinity")
+    return (traded / Decimal("2")) / base

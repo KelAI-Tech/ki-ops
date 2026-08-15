@@ -45,13 +45,14 @@ def check_position_and_portfolio_limits(
     out = []
     if projected.total_value > settings.max_portfolio_value:
         out.append(block("MAX_PORTFOLIO_VALUE", f"{projected.total_value} > {settings.max_portfolio_value}"))
-    total = projected.total_value
+    # Use gross exposure so dollar-neutral books are not inflated by tiny net NAV.
+    base = projected.gross_exposure
     for symbol, h in projected.holdings.items():
         abs_value = abs(h.market_value)
         if abs_value > settings.max_position_size:
             out.append(block("MAX_POSITION_SIZE", f"{abs_value} > {settings.max_position_size}", symbol))
-        if total > 0:
-            conc = abs_value / total
+        if base > 0:
+            conc = abs_value / base
             if conc > settings.max_position_concentration:
                 out.append(
                     block(

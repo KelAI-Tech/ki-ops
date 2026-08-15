@@ -11,3 +11,5 @@ dist/
 build/
 .DS_Store
 .idea/
+.ipynb_checkpoints/
+*.pkl

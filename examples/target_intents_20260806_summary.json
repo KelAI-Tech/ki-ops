@@ -1,0 +1,22 @@
+{
+  "scale_k": "444.7732308337636146560784831",
+  "target_turnover": "0.12",
+  "realized_turnover": "0.1200000000000000000000000001",
+  "sod_gross": "86840327.770531568544666",
+  "trade_long_notional": "16601824.45587382781736410470",
+  "trade_short_notional": "-4239854.209053748633355735317",
+  "gross_traded": "20841678.66492757645071984002",
+  "one_way_notional": "10420839.33246378822535992001",
+  "n_live": 731,
+  "n_buy": 498,
+  "n_sell": 233,
+  "sod_date": "2026-08-05",
+  "target_date": "2026-08-06",
+  "px_date": "2026-08-06",
+  "px_source": "yahoo_open",
+  "target_csv": "examples/target_intents_20260806.csv",
+  "turnover_band": [
+    0.1,
+    0.15
+  ]
+}

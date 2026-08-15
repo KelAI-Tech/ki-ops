@@ -1,0 +1,15 @@
+symbol,sector,industry,beta_spx,beta_qqq,factor_value,factor_momentum,factor_size,factor_quality,factor_lowvol,factor_growth,factor_leverage
+AAPL,Information Technology,Technology Hardware,1.20,1.10,-0.40,0.30,-1.80,0.80,0.40,0.60,-0.50
+MSFT,Information Technology,Software,1.05,1.00,-0.30,0.20,-1.90,1.00,0.50,0.50,-0.40
+NVDA,Information Technology,Semiconductors,1.70,1.55,-1.20,1.80,-1.50,0.60,-1.60,1.90,-0.30
+JPM,Financials,Banks,1.10,0.70,0.80,0.10,-1.00,0.30,0.20,-0.40,1.20
+AMZN,Consumer Discretionary,Internet Retail,1.25,1.20,-0.60,0.40,-1.70,0.20,-0.30,0.80,0.20
+V,Financials,Financial Services,0.95,0.85,-0.10,0.10,-1.20,1.10,0.70,0.30,-0.60
+META,Communication Services,Interactive Media,1.35,1.30,-0.20,0.60,-1.40,0.50,-0.50,0.70,-0.40
+TSLA,Consumer Discretionary,Automobiles,1.90,1.70,-0.80,0.90,-0.90,-0.40,-2.00,1.20,0.50
+BA,Industrials,Aerospace & Defense,1.15,0.80,0.60,-0.50,-0.60,-0.80,-0.70,-0.30,1.50
+XOM,Energy,Oil Gas & Consumable Fuels,0.85,0.45,1.20,-0.20,-0.80,0.40,0.10,-0.90,0.30
+AVGO,Information Technology,Semiconductors,1.40,1.35,-0.50,1.20,-1.10,0.70,-0.40,1.00,0.40
+ORCL,Information Technology,Software,1.10,1.05,0.10,0.80,-1.00,0.40,0.00,0.40,0.80
+AMD,Information Technology,Semiconductors,1.80,1.65,-0.70,0.50,-0.70,0.10,-1.40,1.10,-0.20
+COIN,Financials,Capital Markets,2.40,2.10,-0.30,0.70,0.20,-0.60,-2.20,0.90,-0.10

@@ -9,6 +9,7 @@ from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.engine import PreTradeEngine
 from ki_ops.intents import TargetIntent
 from ki_ops.models import Holding, Order, Portfolio, Side
+from ki_ops.risk import SecurityRecord, build_risk_snapshot, universe_from_records
 
 
 def create_app(settings: RiskManagementSettings | None = None):
@@ -39,6 +40,13 @@ def create_app(settings: RiskManagementSettings | None = None):
         limit_price: Decimal
         order_id: str | None = None
 
+    class SecurityIn(BaseModel):
+        symbol: str
+        sector: str = "Unknown"
+        industry: str = "Unknown"
+        betas: dict[str, Decimal] = Field(default_factory=dict)
+        factors: dict[str, Decimal] = Field(default_factory=dict)
+
     class EvaluateRequest(BaseModel):
         holdings: list[HoldingIn] = Field(default_factory=list)
         cash: Decimal = Decimal("0")
@@ -52,6 +60,13 @@ def create_app(settings: RiskManagementSettings | None = None):
         targets: list[TargetIn]
         realized_daily_pnl: Decimal = Decimal("0")
         volatilities: dict[str, Decimal] = Field(default_factory=dict)
+        flatten_missing_targets: bool = True
+
+    class RiskSnapshotRequest(BaseModel):
+        holdings: list[HoldingIn] = Field(default_factory=list)
+        cash: Decimal = Decimal("0")
+        universe: list[SecurityIn]
+        targets: list[TargetIn] | None = None
         flatten_missing_targets: bool = True
 
     def _portfolio(rows: list[HoldingIn], cash: Decimal) -> Portfolio:
@@ -84,6 +99,24 @@ def create_app(settings: RiskManagementSettings | None = None):
             targets,
             realized_daily_pnl=body.realized_daily_pnl,
             volatilities=body.volatilities,
+            flatten_missing_targets=body.flatten_missing_targets,
+        ).to_dict()
+
+    @app.post("/v1/risk/snapshot")
+    def risk_snapshot(body: RiskSnapshotRequest) -> dict[str, Any]:
+        universe = universe_from_records(
+            SecurityRecord(s.symbol, s.sector, s.industry, betas=s.betas, factors=s.factors)
+            for s in body.universe
+        )
+        targets = (
+            None
+            if body.targets is None
+            else [TargetIntent(t.symbol, t.quantity, t.market_price) for t in body.targets]
+        )
+        return build_risk_snapshot(
+            _portfolio(body.holdings, body.cash),
+            universe,
+            targets=targets,
             flatten_missing_targets=body.flatten_missing_targets,
         ).to_dict()
 

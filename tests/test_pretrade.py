@@ -235,19 +235,21 @@ def test_concentration_blocks_overweight_buy():
 def test_turnover_limit():
     portfolio = portfolio_from_holdings([], cash=10000)
     orders = [Order("MSFT", Side.BUY, 20, 100, TS)]
-    assert turnover_ratio(portfolio, orders) == Decimal("0.2")
-    result = PreTradeEngine(settings=loose(max_turnover=Decimal("0.10"))).evaluate(portfolio, orders)
+    # one-way: (2000/2)/10000 = 0.10
+    assert turnover_ratio(portfolio, orders) == Decimal("0.1")
+    result = PreTradeEngine(settings=loose(max_turnover=Decimal("0.05"))).evaluate(portfolio, orders)
     assert any(v.code == "MAX_TURNOVER" for v in result.violations)
 
 
 def test_turnover_adds_buys_and_sells_does_not_net():
-    """Buy $1k + sell $1k on a $10k book => 0.20 gross, not 0 (net)."""
+    """Buy $1k + sell $1k on a $10k book => one-way 0.10, not 0 (net)."""
     portfolio = portfolio_from_holdings([Holding("AAPL", 10, 100)], cash=9000)
     orders = [
         Order("MSFT", Side.BUY, 10, 100, TS),   # +1000
         Order("AAPL", Side.SELL, 10, 100, TS),  # +1000
     ]
-    assert turnover_ratio(portfolio, orders) == Decimal("0.2")
+    # (2000/2)/10000 = 0.10
+    assert turnover_ratio(portfolio, orders) == Decimal("0.1")
 
 
 def test_turnover_uses_gross_exposure_with_shorts():
@@ -265,8 +267,8 @@ def test_turnover_uses_gross_exposure_with_shorts():
         Order("AAPL", Side.SELL, 10, 100, TS),  # 1000
         Order("TSLA", Side.BUY, 5, 200, TS),    # 1000 cover
     ]
-    # 2000 / 25000 = 0.08 — not 2000/5000 = 0.4
-    assert turnover_ratio(sod, orders) == Decimal("0.08")
+    # one-way: (2000/2)/25000 = 0.04 — not (2000/2)/5000 = 0.2
+    assert turnover_ratio(sod, orders) == Decimal("0.04")
 
 
 def test_order_size_bounds():

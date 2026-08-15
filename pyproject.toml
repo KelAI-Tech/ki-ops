@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ki-ops"
 version = "0.1.0"
-description = "Deterministic KI Ops library for trade analysis, portfolio holdings, and pre-trade risk checks"
+description = "Deterministic KI Ops library for trade analysis, portfolio holdings, pre-trade checks, and market-neutral risk snapshots"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Proprietary" }
@@ -15,6 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+alpha = [
+  "pandas>=2.0",
+  "pyarrow>=14",
+]
 api = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
@@ -22,6 +26,8 @@ api = [
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
+  "pandas>=2.0",
+  "pyarrow>=14",
 ]
 
 [project.scripts]

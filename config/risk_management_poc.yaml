@@ -1,0 +1,29 @@
+# Risk limits sized for the ~$90M GMV alpha dollar panel POC (July 2026).
+risk_management:
+  enabled: true
+
+  # Position limits (USD market value)
+  max_position_size: 1500000       # ~1.7% of ~$90M GMV
+  max_portfolio_value: 5000000     # net NAV / cash residual
+  max_daily_loss: 2000000
+  max_position_concentration: 0.03 # 3% of gross exposure
+
+  max_position_volatility: 0.3
+  volatility_lookback: 30
+
+  use_stop_losses: false
+  default_stop_loss: 0.05
+  trailing_stop: true
+  trailing_stop_distance: 0.02
+
+  # Day-over-day alpha rebalance touches thousands of names
+  min_order_size: 1
+  max_order_size: 750000
+  max_orders_per_minute: 100000
+
+  enforce_market_hours: false
+  pre_market_trading: false
+  after_hours_trading: false
+
+  max_turnover: 0.25  # one-way: (buys+sells)/2 / GMV
+  allow_shorts: true

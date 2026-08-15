@@ -29,7 +29,7 @@ risk_management:
   after_hours_trading: false
 
   # Turnover (pre-trade safety)
-  max_turnover: 0.25  # Max 25% of portfolio traded in a batch
+  max_turnover: 0.25  # Max 25% one-way: (buys+sells)/2 / gross exposure
 
   # Shorting
   allow_shorts: true  # Permit sells that exceed current holdings
