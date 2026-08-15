@@ -13,3 +13,6 @@ build/
 .idea/
 .ipynb_checkpoints/
 *.pkl
+examples/*_with_px.csv
+examples/alpha_panel_turnover.csv
+Untitled.ipynb

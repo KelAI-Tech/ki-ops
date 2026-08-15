@@ -87,29 +87,19 @@ ki-ops derive-trades examples/sod_positions.csv examples/target_intents.csv
 
 Exit code `2` means pre-trade checks blocked the batch.
 
-### Alpha dollar panel POC (July 2026)
+### Alpha dollar panel
 
-Derive theoretical SOD/targets from prior-day alpha **dollar** notionals (parquet: dates × security ids), run day-over-day pre-trade checks, and report **one-way** turnover \((Σ|Δ\$|/2) / GMV\). Without a price feed, unit price `1` is used so quantity equals dollars. Security ids act as symbols.
-
-```bash
-# Defaults: examples/poc_2026_07_alpha_dollars_active.parquet + config/risk_management_poc.yaml
-ki-ops poc-alpha
-
-# Optional date slice / report path
-ki-ops poc-alpha examples/poc_2026_07_alpha_dollars_active.parquet \
-  --start 2026-07-01 --end 2026-07-31 \
-  --report-csv examples/poc_2026_07_turnover_report.csv
-```
-
-### EMS trade intents vs parquet SOD
-
-SOD is the latest **parquet** dollar row strictly before `--as-of`. Trade intents are the headerless EMS drop (`ticker,qty,algo`). Missing marks: `px ≈ |SOD alpha $| / |qty|` when a `security_id,symbol` map is provided. No pickle file is used.
+SOD comes from the LSEG parquet (dates × security ids, dollar notionals). Unit price is `1` so quantity equals dollars. One-way turnover is \((\Sigma|\Delta\$|/2) / GMV\).
 
 ```bash
-# Pretend the drop is for 2026-08-06; SOD = 2026-08-05 parquet row
+# Day-over-day checks on the panel (optional --start/--end)
+ki-ops poc-alpha --start 2026-07-01 --end 2026-07-31
+
+# SOD = 2026-08-05 row; EMS drop dated 2026-08-06
 ki-ops check-ems --as-of 2026-08-06
-ki-ops check-ems examples/Portfolio_20260806.csv --as-of 2026-08-06 --id-map path/to/id_ticker_map.csv
 ```
+
+Theoretical LSEG 8/6 trades (12% one-way vs 8/5 SOD): `sod_lseg_20260805.csv`, `trade_intents_lseg_20260806.csv`, `target_intents_lseg_20260806.csv`.
 
 ### Risk snapshot (factor / sector / beta)
 
@@ -168,6 +158,11 @@ examples/
   sod_positions.csv
   target_intents.csv
   security_master.csv
-  poc_2026_07_alpha_dollars_active.parquet
-  poc_2026_07_turnover_report.csv
+  sample_orders.csv
+  sample_trades.csv
+  Portfolio_20260806.csv
+  sod_lseg_20260805.csv
+  trade_intents_lseg_20260806.csv
+  target_intents_lseg_20260806.csv
+  df_combo_lseg_*_nosv.parquet
 ```

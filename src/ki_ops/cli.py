@@ -29,11 +29,11 @@ DEFAULT_TARGETS = ROOT / "examples" / "target_intents.csv"
 DEFAULT_UNIVERSE = ROOT / "examples" / "security_master.csv"
 DEFAULT_CONFIG = ROOT / "config" / "risk_management.yaml"
 DEFAULT_POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
-DEFAULT_POC_ALPHA = ROOT / "examples" / "poc_2026_07_alpha_dollars_active.parquet"
-DEFAULT_ALPHA_PANEL = ROOT / "examples" / (
+DEFAULT_POC_ALPHA = ROOT / "examples" / (
     "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
     "_neut_C5_cap125_nosv.parquet"
 )
+DEFAULT_ALPHA_PANEL = DEFAULT_POC_ALPHA
 DEFAULT_EMS_INTENTS = ROOT / "examples" / "Portfolio_20260806.csv"
 
 
@@ -104,7 +104,7 @@ def _parser() -> argparse.ArgumentParser:
         "--report-csv",
         type=Path,
         default=None,
-        help="write daily turnover/risk CSV (default: examples/poc_2026_07_turnover_report.csv)",
+        help="write daily turnover/risk CSV (default: examples/alpha_panel_turnover.csv)",
     )
 
     px = sub.add_parser(
@@ -133,7 +133,7 @@ def _parser() -> argparse.ArgumentParser:
         "--out",
         type=Path,
         default=None,
-        help="enriched intents CSV (default: examples/Portfolio_YYYYMMDD_with_px.csv)",
+        help="enriched intents CSV (default: next to the EMS file as *_with_px.csv)",
     )
     px.add_argument(
         "--config",
@@ -196,7 +196,7 @@ def _poc_alpha(args) -> int:
 
     report = args.report_csv
     if report is None:
-        report = ROOT / "examples" / "poc_2026_07_turnover_report.csv"
+        report = ROOT / "examples" / "alpha_panel_turnover.csv"
     write_turnover_csv(days, report)
     summary["report_csv"] = str(report)
     summary["alpha_parquet"] = str(args.alpha_parquet)
@@ -229,7 +229,7 @@ def _check_ems(args) -> int:
     enriched = summary.pop("_enriched")
     out = args.out
     if out is None:
-        out = ROOT / "examples" / "Portfolio_20260806_with_px.csv"
+        out = args.intents_csv.with_name(f"{args.intents_csv.stem}_with_px.csv")
     write_enriched_intents_csv(enriched, out)
     summary["out_csv"] = str(out)
     summary["config"] = str(args.poc_config)

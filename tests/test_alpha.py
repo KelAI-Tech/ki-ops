@@ -21,7 +21,10 @@ from ki_ops.engine import PreTradeEngine
 
 TS = datetime(2026, 7, 2, 14, 30, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[1]
-JULY_ACTIVE = ROOT / "examples" / "poc_2026_07_alpha_dollars_active.parquet"
+ALPHA_PARQUET = ROOT / "examples" / (
+    "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
+    "_neut_C5_cap125_nosv.parquet"
+)
 
 
 def _tiny_panel() -> pd.DataFrame:
@@ -72,13 +75,12 @@ def test_day_over_day_turnover_on_tiny_panel():
     assert summary["n_allowed"] == 2
 
 
-def test_load_july_active_panel_if_present():
-    if not JULY_ACTIVE.is_file():
-        pytest.skip("July POC parquet not present")
-    panel = load_alpha_dollar_panel(JULY_ACTIVE)
-    assert len(panel.index) == 22
-    assert panel.index.min() == pd.Timestamp("2026-07-01")
-    assert panel.index.max() == pd.Timestamp("2026-07-31")
+def test_load_august5_panel_if_present():
+    if not ALPHA_PARQUET.is_file():
+        pytest.skip("alpha parquet not present")
+    panel = load_alpha_dollar_panel(ALPHA_PARQUET, start="2026-08-05", end="2026-08-05")
+    assert len(panel.index) == 1
+    assert panel.index.max() == pd.Timestamp("2026-08-05")
 
 
 def test_construct_lseg_trades_hits_12pct_turnover():
