@@ -32,6 +32,18 @@ def test_parse_asof_and_headerless_load(tmp_path: Path):
     assert rows[2].quantity == Decimal("-4")
 
 
+def test_load_ems_header_and_infocode(tmp_path: Path):
+    p = tmp_path / "Portfolio_20260806.csv"
+    p.write_text(
+        "ticker,quantity,algo,infocode\nAAPL,10,VWAP,13407\nMSFT,0,VWAP,\n",
+        encoding="utf-8",
+    )
+    rows = load_ems_trade_intents_csv(p)
+    assert [r.symbol for r in rows] == ["AAPL", "MSFT"]
+    assert rows[0].security_id == "13407"
+    assert rows[1].security_id is None
+
+
 def test_px_is_abs_dollars_over_abs_qty():
     assert approx_px_from_alpha_dollars(Decimal("10"), Decimal("1910")) == Decimal("191")
     assert approx_px_from_alpha_dollars(Decimal("-5"), Decimal("-1000")) == Decimal("200")

@@ -102,15 +102,20 @@ def load_sod_positions_csv(path: str | Path, *, cash=None) -> Portfolio:
     for row in rows:
         if row.get("cash") and file_cash is None:
             file_cash = Decimal(row["cash"])
-        sym = row["symbol"].upper()
+        sym = (row.get("symbol") or row.get("infocode") or "").upper()
         if sym in {"CASH", "__CASH__"}:
-            file_cash = Decimal(row["quantity"])
+            file_cash = Decimal(row.get("quantity") or row.get("notional") or "0")
             continue
+        if row.get("notional") and not row.get("market_price"):
+            qty, px = Decimal(row["notional"]), Decimal("1")
+        else:
+            qty = Decimal(row["quantity"])
+            px = Decimal(row["market_price"])
         holdings.append(
             Holding(
                 sym,
-                Decimal(row["quantity"]),  # negative = short
-                Decimal(row["market_price"]),
+                qty,  # negative = short; if notional-only, qty is dollars at px=1
+                px,
                 Decimal(row["cost_basis"]) if row.get("cost_basis") else None,
             )
         )
@@ -122,8 +127,17 @@ def load_target_intents_csv(path: str | Path) -> list[TargetIntent]:
     targets = []
     for row in _rows(Path(path)):
         price = row.get("market_price") or row.get("price") or None
+        if row.get("notional") and not row.get("quantity"):
+            qty, px = Decimal(row["notional"]), Decimal("1")
+        else:
+            qty = Decimal(row["quantity"])
+            px = Decimal(price) if price else None
         targets.append(
-            TargetIntent(row["symbol"], Decimal(row["quantity"]), Decimal(price) if price else None)
+            TargetIntent(
+                row.get("symbol") or row.get("infocode") or "",
+                qty,
+                px,
+            )
         )
     return targets
 

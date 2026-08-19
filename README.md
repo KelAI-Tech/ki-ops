@@ -101,6 +101,15 @@ ki-ops check-ems --as-of 2026-08-06
 
 Theoretical LSEG 8/6 trades (12% one-way vs 8/5 SOD): `sod_lseg_20260805.csv`, `trade_intents_lseg_20260806.csv`, `target_intents_lseg_20260806.csv`.
 
+```bash
+# SOD = 2026-08-05 parquet row; trades = 8/6 POC file
+ki-ops run-perturb
+
+# Breach scenarios (8/5 parquet SOD + examples/trade_intents_lseg_20260806.csv)
+ki-ops run-perturb-turnover    # scale trades to ~26% one-way (25% cap)
+ki-ops run-perturb-order-size  # unscaled trades; ARX trips max_order_size
+```
+
 ### Risk snapshot (factor / sector / beta)
 
 PM view of a market-neutral book. Weights are signed market value / position GMV (cash excluded) so dollar-neutral NAV does not inflate percentages.

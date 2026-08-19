@@ -2,11 +2,11 @@
 risk_management:
   enabled: true
 
-  # Position limits
-  max_position_size: 10000  # USD per position
-  max_portfolio_value: 100000  # Total portfolio limit
+  # max_position_size = max_portfolio_value / 2 × max_position_concentration / 5
+  max_position_size: 4000
+  max_portfolio_value: 200000  # Max GMV: long $ + |short $| + cash
   max_daily_loss: 2000  # Maximum daily loss before shutdown
-  max_position_concentration: 0.2  # Max 20% in any single position
+  max_position_concentration: 0.2  # Max 20% of GMV in any single name
 
   # Volatility controls
   max_position_volatility: 0.3  # Maximum position volatility

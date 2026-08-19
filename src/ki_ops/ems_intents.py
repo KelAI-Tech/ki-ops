@@ -60,21 +60,30 @@ def parse_asof_from_filename(path: str | Path) -> date | None:
     return datetime.strptime(m.group(1), "%Y%m%d").date()
 
 
+_EMS_HEADER = {"ticker", "symbol"}
+
+
 def load_ems_trade_intents_csv(path: str | Path) -> list[EmsIntent]:
-    """Load headerless ``ticker,qty,algo`` rows. First row is data, not a header."""
+    """Load ``ticker,qty,algo[,infocode]``. Optional header row is skipped."""
     path = Path(path)
     out: list[EmsIntent] = []
     with path.open(encoding="utf-8", newline="") as fh:
+        first = True
         for raw in csv.reader(fh):
             if not raw or not any(c.strip() for c in raw):
                 continue
+            if first and raw[0].strip().lower() in _EMS_HEADER:
+                first = False
+                continue
+            first = False
             if len(raw) < 2:
-                raise ValueError(f"Expected ticker,qty[,algo] in {path}: {raw!r}")
+                raise ValueError(f"Expected ticker,qty[,algo[,infocode]] in {path}: {raw!r}")
             sym, qty = raw[0].strip(), raw[1].strip()
             if not sym:
                 continue
             algo = raw[2].strip() if len(raw) > 2 else ""
-            out.append(EmsIntent(sym, Decimal(qty), algo))
+            sid = raw[3].strip() if len(raw) > 3 and raw[3].strip() else None
+            out.append(EmsIntent(sym, Decimal(qty), algo, security_id=sid))
     return out
 
 
@@ -91,7 +100,12 @@ def load_security_id_ticker_map(path: str | Path | None) -> dict[str, str]:
         if not reader.fieldnames:
             return {}
         fields = {str(k).strip().lower(): k for k in reader.fieldnames if k}
-        sid_key = fields.get("security_id") or fields.get("id") or fields.get("sid")
+        sid_key = (
+            fields.get("security_id")
+            or fields.get("infocode")
+            or fields.get("id")
+            or fields.get("sid")
+        )
         sym_key = fields.get("symbol") or fields.get("ticker")
         if not sid_key or not sym_key:
             raise ValueError(f"id-map CSV needs security_id and symbol columns: {path}")

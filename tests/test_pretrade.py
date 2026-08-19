@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from ki_ops.cli import _load_orders
 from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.engine import PreTradeEngine
 from ki_ops.intents import (
@@ -19,6 +23,7 @@ from ki_ops.trades import load_trades_csv, summarize_trades
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config" / "risk_management.yaml"
+POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 EXAMPLES = ROOT / "examples"
 TS = datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)
 
@@ -40,12 +45,14 @@ def loose(**kwargs) -> RiskManagementSettings:
 
 def test_load_risk_settings_matches_yaml():
     s = load_risk_settings(CONFIG)
-    assert s.max_position_size == Decimal("10000")
     assert s.max_position_volatility == Decimal("0.3")
     assert s.volatility_lookback == 30
     assert s.use_stop_losses is False
     assert s.enforce_market_hours is False
     assert s.allow_shorts is True
+    assert s.max_position_size == Decimal("4000")
+    assert s.max_turnover == Decimal("0.25")
+    assert s.max_portfolio_value == Decimal("200000")
 
 
 def test_volatility_blocks_when_above_limit():
@@ -239,6 +246,126 @@ def test_turnover_limit():
     assert turnover_ratio(portfolio, orders) == Decimal("0.1")
     result = PreTradeEngine(settings=loose(max_turnover=Decimal("0.05"))).evaluate(portfolio, orders)
     assert any(v.code == "MAX_TURNOVER" for v in result.violations)
+
+
+def test_yaml_turnover_limit_blocks_over_25pct():
+    """30% one-way must trip max_turnover 0.25 without other limits."""
+    settings = loose(max_turnover=Decimal("0.25"), max_order_size=Decimal("5000"))
+    portfolio = portfolio_from_holdings([], cash=20000)
+    # 3 × $4,000 buys stay inside max_order_size $5k; (12000/2)/20000 = 0.30
+    orders = [
+        Order("AAPL", Side.BUY, 40, 100, TS),
+        Order("MSFT", Side.BUY, 40, 100, TS),
+        Order("GOOG", Side.BUY, 40, 100, TS),
+    ]
+    assert turnover_ratio(portfolio, orders) == Decimal("0.3")
+    result = PreTradeEngine(settings=settings).evaluate(portfolio, orders)
+    assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
+
+
+def test_max_position_size_blocks_over_yaml_cap():
+    result = PreTradeEngine(settings=load_risk_settings(CONFIG)).evaluate(
+        portfolio_from_holdings([Holding("BIG", 1, 5000)], cash=0),
+        [],
+    )
+    assert result.allowed is False
+    assert any(v.code == "MAX_POSITION_SIZE" for v in result.violations)
+
+
+def test_max_portfolio_value_uses_gross_exposure():
+    """Dollar-neutral book: GMV cap, not net NAV."""
+    sod = portfolio_from_holdings(
+        [
+            Holding("AAPL", 100, 100),   # +10000
+            Holding("TSLA", -50, 200),  # -10000
+        ],
+        cash=5000,
+    )
+    assert sod.total_value == Decimal("5000")
+    assert sod.gross_exposure == Decimal("25000")
+    # Short open adds $10k gross; projected GMV 35000 > cap 30000
+    result = PreTradeEngine(settings=loose(max_portfolio_value=Decimal("30000"))).evaluate(
+        sod,
+        [Order("MSFT", Side.SELL, 100, 100, TS)],
+    )
+    assert result.allowed is False
+    assert any(v.code == "MAX_PORTFOLIO_VALUE" for v in result.violations)
+    assert result.projected_portfolio_value == Decimal("45000")
+
+
+def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
+    """Parquet-style SOD + POC trade CSV: 30% one-way trips YAML max_turnover 0.25.
+
+    SOD matches ``examples/sod_lseg_*.csv`` (infocode, ticker, integer notional).
+    Trades match ``examples/trade_intents_lseg_*.csv`` (ticker, infocode, signed qty).
+    Uses the POC YAML so a long/short book does not also trip retail order caps.
+    """
+    settings = load_risk_settings(POC_CONFIG)
+    assert settings.max_turnover == Decimal("0.25")
+    assert settings.max_position_size == Decimal("300000")
+
+    # 20 long + 20 short at $10k: GMV $400k; each name 2.5% < POC 3% concentration.
+    seed_long = [("36100", "CSCO"), ("39988", "MSFT"), ("42241", "BAP"), ("46092", "CAT")]
+    seed_short = [("6347", "SCCO"), ("39985", "ORCL"), ("40142", "C"), ("45293", "AMZN")]
+    longs = seed_long + [(str(81000 + i), f"L{i:02d}") for i in range(16)]
+    shorts = seed_short + [(str(82000 + i), f"S{i:02d}") for i in range(16)]
+    sod_n, trade_n = 10000, 6000  # gross $240k → one-way 30% of $400k GMV
+
+    sod_path = tmp_path / "sod_lseg_20260805.csv"
+    sod_path.write_text(
+        "infocode,ticker,notional\n"
+        + "".join(f"{sid},{tic},{sod_n}\n" for sid, tic in longs)
+        + "".join(f"{sid},{tic},{-sod_n}\n" for sid, tic in shorts),
+        encoding="utf-8",
+    )
+    # Mix of +qty / −qty like the 8/6 POC file. All trades add to |position|
+    # so projected concentration stays 2.5% (POC cap is 3%).
+    trd_path = tmp_path / "trade_intents_lseg_20260806.csv"
+    lines = ["ticker,infocode,quantity\n"]
+    for sid, tic in longs:
+        lines.append(f"{tic},{sid},{trade_n}\n")
+    for sid, tic in shorts:
+        lines.append(f"{tic},{sid},{-trade_n}\n")
+    trd_path.write_text("".join(lines), encoding="utf-8")
+
+    sod = load_sod_positions_csv(sod_path)
+    orders = _load_orders(trd_path)
+    assert sod.gross_exposure == Decimal("400000")
+    assert turnover_ratio(sod, orders) == Decimal("0.3")
+    result = PreTradeEngine(settings=settings).evaluate(sod, orders)
+    assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
+
+
+def test_real_lseg_examples_breach_max_turnover():
+    """Real 8/5 SOD + 8/6 POC trades (~12% TO) scaled up to breach YAML 25%."""
+    sod_path = EXAMPLES / "sod_lseg_20260805.csv"
+    trd_path = EXAMPLES / "trade_intents_lseg_20260806.csv"
+    if not sod_path.is_file() or not trd_path.is_file():
+        pytest.skip("LSEG example CSVs not present")
+
+    sod = load_sod_positions_csv(sod_path)
+    orders = _load_orders(trd_path)
+    base_to = turnover_ratio(sod, orders)
+    assert base_to < Decimal("0.25")
+
+    # Same trade mix as the saved POC file, scaled to ~26% one-way vs 8/5 GMV.
+    scale = Decimal("0.26") / base_to
+    scaled = [replace(o, quantity=o.quantity * scale) for o in orders]
+    assert turnover_ratio(sod, scaled) > Decimal("0.25")
+
+    settings = replace(
+        load_risk_settings(POC_CONFIG),
+        max_order_size=Decimal("100000000"),
+        max_portfolio_value=Decimal("1000000000"),
+        max_position_size=Decimal("100000000"),
+        max_position_concentration=Decimal("1"),
+    )
+    assert settings.max_turnover == Decimal("0.25")
+    result = PreTradeEngine(settings=settings).evaluate(sod, scaled)
+    assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
 def test_turnover_adds_buys_and_sells_does_not_net():

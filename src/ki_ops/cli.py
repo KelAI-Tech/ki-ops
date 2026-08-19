@@ -35,6 +35,7 @@ DEFAULT_POC_ALPHA = ROOT / "examples" / (
 )
 DEFAULT_ALPHA_PANEL = DEFAULT_POC_ALPHA
 DEFAULT_EMS_INTENTS = ROOT / "examples" / "Portfolio_20260806.csv"
+DEFAULT_POC_TRADES = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -141,6 +142,93 @@ def _parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_POC_CONFIG),
         help="risk YAML (defaults to config/risk_management_poc.yaml)",
     )
+
+    rp = sub.add_parser(
+        "run-perturb",
+        aliases=["perturb"],
+        help="SOD from parquet date, trade intents from POC CSV (default: 8/5 row + 8/6 trades)",
+    )
+    rp.add_argument(
+        "alpha_parquet",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_POC_ALPHA,
+        help="wide panel: dates × security_id dollars",
+    )
+    rp.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
+    rp.add_argument(
+        "--trades",
+        type=Path,
+        default=DEFAULT_POC_TRADES,
+        help="trade-intent CSV (ticker,infocode,signed quantity)",
+    )
+    rp.add_argument("--cash", default="0")
+    rp.add_argument(
+        "--config",
+        dest="poc_config",
+        default=str(DEFAULT_POC_CONFIG),
+        help="risk YAML (defaults to config/risk_management_poc.yaml)",
+    )
+
+    pt = sub.add_parser(
+        "run-perturb-turnover",
+        aliases=["perturb-turnover", "perturb-to"],
+        help="8/5 parquet SOD + scaled 8/6 POC trades to breach max_turnover",
+    )
+    pt.add_argument(
+        "alpha_parquet",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_POC_ALPHA,
+        help="wide panel: dates × security_id dollars",
+    )
+    pt.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
+    pt.add_argument(
+        "--trades",
+        type=Path,
+        default=DEFAULT_POC_TRADES,
+        help="trade-intent CSV (ticker,infocode,signed quantity)",
+    )
+    pt.add_argument("--cash", default="0")
+    pt.add_argument(
+        "--config",
+        dest="poc_config",
+        default=str(DEFAULT_POC_CONFIG),
+        help="risk YAML (defaults to config/risk_management_poc.yaml)",
+    )
+    pt.add_argument(
+        "--target-turnover",
+        default="0.26",
+        help="scaled one-way turnover target (default 0.26 vs 0.25 cap)",
+    )
+
+    po = sub.add_parser(
+        "run-perturb-order-size",
+        aliases=["perturb-order-size", "perturb-os"],
+        help="8/5 parquet SOD + unscaled 8/6 POC trades to breach max_order_size",
+    )
+    po.add_argument(
+        "alpha_parquet",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_POC_ALPHA,
+        help="wide panel: dates × security_id dollars",
+    )
+    po.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
+    po.add_argument(
+        "--trades",
+        type=Path,
+        default=DEFAULT_POC_TRADES,
+        help="trade-intent CSV (ticker,infocode,signed quantity)",
+    )
+    po.add_argument("--cash", default="0")
+    po.add_argument(
+        "--config",
+        dest="poc_config",
+        default=str(DEFAULT_POC_CONFIG),
+        help="risk YAML (defaults to config/risk_management_poc.yaml)",
+    )
+
     return p
 
 
@@ -152,12 +240,20 @@ def _load_orders(path: Path) -> list[Order]:
             if not any(row.values()):
                 continue
             ts = row.get("timestamp")
+            qty_raw = Decimal(row["quantity"])
+            side_raw = (row.get("side") or "").upper()
+            if side_raw in {"BUY", "SELL"}:
+                side = Side(side_raw)
+                qty = abs(qty_raw)
+            else:
+                side = Side.BUY if qty_raw >= 0 else Side.SELL
+                qty = abs(qty_raw)
             orders.append(
                 Order(
-                    row["symbol"],
-                    Side(row["side"].upper()),
-                    Decimal(row["quantity"]),
-                    Decimal(row.get("price") or row.get("limit_price") or "0"),
+                    row.get("symbol") or row.get("infocode") or "",
+                    side,
+                    qty,
+                    Decimal(row.get("price") or row.get("limit_price") or "1"),
                     datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else datetime.now(timezone.utc),
                     order_id=row.get("order_id") or None,
                 )
@@ -237,6 +333,43 @@ def _check_ems(args) -> int:
     return 0 if summary.get("allowed") else 2
 
 
+def _run_perturb(args) -> int:
+    from ki_ops.alpha import evaluate_parquet_sod_vs_trade_intents
+
+    settings = load_risk_settings(args.poc_config)
+    engine = PreTradeEngine(settings=settings)
+    orders = _load_orders(args.trades)
+    out = evaluate_parquet_sod_vs_trade_intents(
+        args.alpha_parquet,
+        orders,
+        engine,
+        sod_date=args.sod_date,
+        cash=Decimal(args.cash),
+        trades_csv=args.trades,
+        config_path=args.poc_config,
+    )
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if out.get("allowed") else 2
+
+
+def _run_perturb_breach(args, *, scenario: str) -> int:
+    from ki_ops.alpha import run_lseg_perturb
+
+    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "max-turnover" else Decimal("0.26")
+    out = run_lseg_perturb(
+        args.alpha_parquet,
+        args.trades,
+        _load_orders(args.trades),
+        scenario=scenario,
+        sod_date=args.sod_date,
+        cash=Decimal(args.cash),
+        config_path=args.poc_config,
+        target_turnover=target,
+    )
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if out.get("allowed") else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     command = args.command or "run"
@@ -249,6 +382,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "approx-px":
         return _check_ems(args)
+
+    if command in {"run-perturb", "perturb"}:
+        return _run_perturb(args)
+
+    if command in {"run-perturb-turnover", "perturb-turnover", "perturb-to"}:
+        return _run_perturb_breach(args, scenario="max-turnover")
+
+    if command in {"run-perturb-order-size", "perturb-order-size", "perturb-os"}:
+        return _run_perturb_breach(args, scenario="max-order-size")
 
     settings = load_risk_settings(args.config)
     engine = PreTradeEngine(settings=settings)

@@ -98,4 +98,120 @@ def test_construct_lseg_trades_hits_12pct_turnover():
     assert abs(to - Decimal("0.12")) < Decimal("0.0000001")
     assert built["prior_template_date"] == "2026-08-04"
     assert Decimal(built["scale_k"]) > 0
+    mapped = construct_lseg_trades_for_turnover(
+        panel,
+        sod_date="2026-08-05",
+        target_turnover=Decimal("0.12"),
+        ticker_by_infocode={"1001": "AAA", "1002": "BBB"},
+    )
+    by = {r["infocode"]: r["ticker"] for r in mapped["trade_rows"]}
+    assert by["1001"] == "AAA"
+    assert by["1002"] == "BBB"
+    assert mapped["n_trades_with_ticker"] == 2
+    priced = construct_lseg_trades_for_turnover(
+        panel,
+        sod_date="2026-08-05",
+        target_turnover=Decimal("0.12"),
+        ticker_by_infocode={"1001": "AAA", "1002": "BBB"},
+        price_by_infocode={"1001": Decimal("10"), "1002": Decimal("5")},
+    )
+    assert abs(Decimal(priced["realized_turnover"]) - Decimal("0.12")) < Decimal("0.0000001")
+    byp = {r["infocode"]: r for r in priced["trade_rows"]}
+    assert Decimal(byp["1001"]["price"]) == Decimal("10")
+    assert Decimal(byp["1001"]["notional"]) == Decimal(byp["1001"]["signed_quantity"]) * Decimal("10")
+    assert priced["n_trades_with_px"] == 2
+
+
+def test_run_perturb_uses_parquet_sod_and_trade_csv(tmp_path: Path, capsys):
+    import json
+
+    from ki_ops.cli import main
+
+    panel = pd.DataFrame(
+        {"1001": [100.0], "1002": [-100.0]},
+        index=pd.to_datetime(["2026-08-05"]),
+    )
+    pq = tmp_path / "alpha.parquet"
+    panel.to_parquet(pq)
+    trades = tmp_path / "trade_intents_lseg_20260806.csv"
+    trades.write_text(
+        "ticker,infocode,quantity\nAAA,1001,20\nBBB,1002,-20\n",
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "risk.yaml"
+    cfg.write_text(
+        "risk_management:\n"
+        "  max_turnover: 0.25\n"
+        "  max_position_size: 1000000\n"
+        "  max_portfolio_value: 1000000\n"
+        "  max_position_concentration: 1\n"
+        "  min_order_size: 1\n"
+        "  max_order_size: 1000000\n"
+        "  max_orders_per_minute: 100000\n"
+        "  allow_shorts: true\n"
+        "  enforce_market_hours: false\n",
+        encoding="utf-8",
+    )
+    rc = main(
+        [
+            "run-perturb",
+            str(pq),
+            "--sod-date",
+            "2026-08-05",
+            "--trades",
+            str(trades),
+            "--config",
+            str(cfg),
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["sod_source"] == "parquet"
+    assert out["sod_date"] == "2026-08-05"
+    assert out["n_sod_names"] == 2
+    assert out["n_orders"] == 2
+    assert Decimal(out["turnover"]) == Decimal("0.1")
+    assert out["allowed"] is True
+
+
+def test_run_perturb_turnover_breach(capsys):
+    import json
+
+    from ki_ops.cli import main
+
+    parquet = ROOT / "examples" / (
+        "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
+        "_neut_C5_cap125_nosv.parquet"
+    )
+    trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
+    if not parquet.is_file() or not trades.is_file():
+        pytest.skip("LSEG parquet / trade CSV not present")
+
+    rc = main(["run-perturb-turnover", str(parquet), "--trades", str(trades)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert out["perturb"] == "max-turnover"
+    assert Decimal(out["turnover"]) > Decimal("0.25")
+    assert out["violation_codes"] == ["MAX_TURNOVER"]
+
+
+def test_run_perturb_order_size_breach(capsys):
+    import json
+
+    from ki_ops.cli import main
+
+    parquet = ROOT / "examples" / (
+        "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
+        "_neut_C5_cap125_nosv.parquet"
+    )
+    trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
+    if not parquet.is_file() or not trades.is_file():
+        pytest.skip("LSEG parquet / trade CSV not present")
+
+    rc = main(["run-perturb-order-size", str(parquet), "--trades", str(trades)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert out["perturb"] == "max-order-size"
+    assert out["violation_codes"] == ["MAX_ORDER_SIZE"]
+
 

@@ -24,8 +24,8 @@ INTS = {"volatility_lookback", "max_orders_per_minute"}
 @dataclass(frozen=True)
 class RiskManagementSettings:
     enabled: bool = True
-    max_position_size: Decimal = Decimal("10000")
-    max_portfolio_value: Decimal = Decimal("100000")
+    max_position_size: Decimal = Decimal("4000")
+    max_portfolio_value: Decimal = Decimal("200000")  # GMV cap (long + |short| + cash)
     max_daily_loss: Decimal = Decimal("2000")
     max_position_concentration: Decimal = Decimal("0.2")
     max_position_volatility: Decimal = Decimal("0.3")

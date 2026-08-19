@@ -2,11 +2,11 @@
 risk_management:
   enabled: true
 
-  # Position limits (USD market value)
-  max_position_size: 1500000       # ~1.7% of ~$90M GMV
-  max_portfolio_value: 5000000     # net NAV / cash residual
+  # max_position_size = max_portfolio_value / 2 × max_position_concentration / 5
+  max_position_size: 300000
+  max_portfolio_value: 100000000   # max GMV (~$90M book + headroom)
   max_daily_loss: 2000000
-  max_position_concentration: 0.03 # 3% of gross exposure
+  max_position_concentration: 0.03 # 3% of GMV
 
   max_position_volatility: 0.3
   volatility_lookback: 30

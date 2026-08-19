@@ -60,7 +60,7 @@ class PreTradeEngine:
             return PreTradeResult(
                 allowed=True,
                 turnover=turnover_ratio(portfolio, order_list),
-                projected_portfolio_value=projected.total_value,
+                projected_portfolio_value=projected.gross_exposure,
                 trade_intents=tuple(order_list),
             )
 
@@ -72,7 +72,7 @@ class PreTradeEngine:
             violations=blocks,
             warnings=warnings,
             turnover=turnover_ratio(portfolio, order_list),
-            projected_portfolio_value=projected.total_value,
+            projected_portfolio_value=projected.gross_exposure,
             trade_intents=tuple(order_list),
         )
 

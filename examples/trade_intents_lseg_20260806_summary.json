@@ -11,7 +11,10 @@
   "n_sod_names": 2236,
   "n_targets": 2236,
   "n_trades": 2236,
+  "n_trades_with_ticker": 2236,
+  "n_trades_with_px": 2236,
   "sod_csv": "examples/sod_lseg_20260805.csv",
   "target_csv": "examples/target_intents_lseg_20260806.csv",
-  "trade_csv": "examples/trade_intents_lseg_20260806.csv"
+  "trade_csv": "examples/trade_intents_lseg_20260806.csv",
+  "verified_turnover": "0.1199999999999999794032269808"
 }

@@ -43,10 +43,10 @@ def check_position_and_portfolio_limits(
 ) -> list[CheckViolation]:
     projected = project_orders(portfolio, orders)
     out = []
-    if projected.total_value > settings.max_portfolio_value:
-        out.append(block("MAX_PORTFOLIO_VALUE", f"{projected.total_value} > {settings.max_portfolio_value}"))
-    # Use gross exposure so dollar-neutral books are not inflated by tiny net NAV.
-    base = projected.gross_exposure
+    gmv = projected.gross_exposure
+    if gmv > settings.max_portfolio_value:
+        out.append(block("MAX_PORTFOLIO_VALUE", f"GMV {gmv} > max {settings.max_portfolio_value}"))
+    base = gmv
     for symbol, h in projected.holdings.items():
         abs_value = abs(h.market_value)
         if abs_value > settings.max_position_size:
