@@ -79,24 +79,6 @@ print(result.to_dict())  # "passed", violations, warnings, turnover, …
 
 Exit code `2` means a **blocking** check failed.
 
-## Optional: alpha panel / extras
-
-Day-over-day parquet checks need a local alpha dollar panel (not shipped — pass the path as the first argument):
-
-```bash
-ki-ops poc-alpha path/to/panel.parquet --start 2026-07-01 --end 2026-07-31
-```
-
-Sidecars:
-
-```bash
-ki-ops extras check-ems --as-of 2026-08-06
-ki-ops extras summarize-trades path/to/fills.csv
-ki-ops extras risk-snapshot
-```
-
-Extras live under `ki_ops.extras` with inputs in `examples/extras/`.
-
 ## Layout
 
 ```
