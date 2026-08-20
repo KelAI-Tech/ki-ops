@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Mapping, Sequence
 
 from ki_ops.checks import CheckViolation
@@ -13,6 +13,22 @@ from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.intents import TargetIntent, TradeIntentBatch, annotate_display_labels, build_trade_intent_batch
 from ki_ops.models import Order, Portfolio
 from ki_ops.portfolio import project_orders, turnover_ratio
+
+_TWOPLACES = Decimal("0.01")
+
+
+def format_decimal(value: Decimal | float | int | str, *, places: Decimal = _TWOPLACES) -> str:
+    """Format a number for CLI/JSON stdout (default 2 decimal places)."""
+    return str(Decimal(str(value)).quantize(places, rounding=ROUND_HALF_UP))
+
+
+def passed_status(allowed: bool, warnings: Sequence | None = None) -> bool | str:
+    """Stdout ``passed`` value: True, False, or ``\"with warnings\"``."""
+    if not allowed:
+        return False
+    if warnings:
+        return "with warnings"
+    return True
 
 
 @dataclass(frozen=True)
@@ -26,11 +42,11 @@ class PreTradeResult:
 
     def to_dict(self) -> dict:
         return {
-            "allowed": self.allowed,
+            "passed": passed_status(self.allowed, self.warnings),
             "violations": [v.to_dict() for v in self.violations],
             "warnings": [v.to_dict() for v in self.warnings],
-            "turnover": str(self.turnover),
-            "projected_portfolio_value": str(self.projected_portfolio_value),
+            "turnover": format_decimal(self.turnover),
+            "projected_portfolio_value": format_decimal(self.projected_portfolio_value),
             "trade_intents": [o.to_dict() for o in self.trade_intents],
         }
 

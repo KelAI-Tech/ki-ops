@@ -122,20 +122,20 @@ def test_construct_lseg_trades_hits_12pct_turnover():
     assert priced["n_trades_with_px"] == 2
 
 
-def test_run_perturb_uses_parquet_sod_and_trade_csv(tmp_path: Path, capsys):
+def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     import json
 
     from ki_ops.cli import main
 
-    panel = pd.DataFrame(
-        {"1001": [100.0], "1002": [-100.0]},
-        index=pd.to_datetime(["2026-08-05"]),
+    sod = tmp_path / "sod_lseg_20260805.csv"
+    sod.write_text(
+        "infocode,ticker,notional\n1001,AAA,100\n1002,BBB,-100\n",
+        encoding="utf-8",
     )
-    pq = tmp_path / "alpha.parquet"
-    panel.to_parquet(pq)
     trades = tmp_path / "trade_intents_lseg_20260806.csv"
+    # quantity is share qty: 2×$10 + 4×$5 = $40 gross → one-way 10% of $200 GMV
     trades.write_text(
-        "ticker,infocode,quantity\nAAA,1001,20\nBBB,1002,-20\n",
+        "ticker,infocode,quantity\nAAA,1001,2\nBBB,1002,-4\n",
         encoding="utf-8",
     )
     cfg = tmp_path / "risk.yaml"
@@ -152,26 +152,50 @@ def test_run_perturb_uses_parquet_sod_and_trade_csv(tmp_path: Path, capsys):
         "  enforce_market_hours: false\n",
         encoding="utf-8",
     )
+    px = tmp_path / "px.csv"
+    px.write_text("infocode,close\n1001,10\n1002,5\n", encoding="utf-8")
     rc = main(
         [
             "run-perturb",
-            str(pq),
-            "--sod-date",
-            "2026-08-05",
+            "--sod",
+            str(sod),
             "--trades",
             str(trades),
             "--config",
             str(cfg),
+            "--prices",
+            str(px),
         ]
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert out["sod_source"] == "parquet"
-    assert out["sod_date"] == "2026-08-05"
+    assert out["sod_source"] == "csv"
+    assert out["perturb"] == "baseline"
     assert out["n_sod_names"] == 2
     assert out["n_orders"] == 2
-    assert Decimal(out["turnover"]) == Decimal("0.1")
-    assert out["allowed"] is True
+    assert Decimal(out["turnover"]) == Decimal("0.10")
+    assert out["passed"] is True
+
+
+def test_real_lseg_baseline_allows_without_position_or_order_size(capsys):
+    """Real POC CSVs: ~12% TO, no MAX_POSITION_SIZE / MAX_ORDER_SIZE."""
+    import json
+
+    from ki_ops.cli import main
+
+    sod = ROOT / "examples" / "sod_lseg_20260805.csv"
+    trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
+    if not sod.is_file() or not trades.is_file():
+        pytest.skip("LSEG example CSVs not present")
+
+    rc = main(["run-perturb", "--sod", str(sod), "--trades", str(trades)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["passed"] is True
+    assert Decimal(out["turnover"]) < Decimal("0.25")
+    assert "MAX_POSITION_SIZE" not in out["violation_codes"]
+    assert "MAX_ORDER_SIZE" not in out["violation_codes"]
+    assert "MIN_ORDER_SIZE" not in out["violation_codes"]
 
 
 def test_run_perturb_turnover_breach(capsys):
@@ -179,39 +203,51 @@ def test_run_perturb_turnover_breach(capsys):
 
     from ki_ops.cli import main
 
-    parquet = ROOT / "examples" / (
-        "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
-        "_neut_C5_cap125_nosv.parquet"
-    )
+    sod = ROOT / "examples" / "sod_lseg_20260805.csv"
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
-    if not parquet.is_file() or not trades.is_file():
-        pytest.skip("LSEG parquet / trade CSV not present")
+    if not sod.is_file() or not trades.is_file():
+        pytest.skip("LSEG example CSVs not present")
 
-    rc = main(["run-perturb-turnover", str(parquet), "--trades", str(trades)])
+    rc = main(["run-perturb-turnover", "--sod", str(sod), "--trades", str(trades)])
     out = json.loads(capsys.readouterr().out)
     assert rc == 2
     assert out["perturb"] == "max-turnover"
-    assert Decimal(out["turnover"]) > Decimal("0.25")
+    assert out["sod_source"] == "csv"
+    assert out["passed"] is False
+    assert Decimal(out["turnover"]) >= Decimal("0.25")
+    gmv = Decimal(out["projected_portfolio_value"])
+    assert Decimal("89500000") <= gmv <= Decimal("90500000")
     assert out["violation_codes"] == ["MAX_TURNOVER"]
+    assert out["prices_csv"] and Path(out["prices_csv"]).name == "ds2_px_20260804.csv"
+    scaled = Path(out["trade_intents_file"])
+    assert scaled.name == "trade_intents_lseg_20260806_scaled.csv"
+    assert scaled.is_file()
+    assert scaled.read_text(encoding="utf-8").startswith("ticker,infocode,quantity")
 
 
-def test_run_perturb_order_size_breach(capsys):
+def test_run_perturb_zero_turnover(capsys):
     import json
 
     from ki_ops.cli import main
 
-    parquet = ROOT / "examples" / (
-        "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
-        "_neut_C5_cap125_nosv.parquet"
-    )
+    sod = ROOT / "examples" / "sod_lseg_20260805.csv"
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
-    if not parquet.is_file() or not trades.is_file():
-        pytest.skip("LSEG parquet / trade CSV not present")
+    if not sod.is_file() or not trades.is_file():
+        pytest.skip("LSEG example CSVs not present")
 
-    rc = main(["run-perturb-order-size", str(parquet), "--trades", str(trades)])
+    rc = main(["run-perturb-zero", "--sod", str(sod), "--trades", str(trades)])
     out = json.loads(capsys.readouterr().out)
-    assert rc == 2
-    assert out["perturb"] == "max-order-size"
-    assert out["violation_codes"] == ["MAX_ORDER_SIZE"]
-
+    assert rc == 0
+    assert out["perturb"] == "zero-turnover"
+    assert Decimal(out["turnover"]) == Decimal("0.00")
+    assert out["passed"] == "with warnings"
+    assert out["violation_codes"] == []
+    assert "MAX_TURNOVER" not in out["violation_codes"]
+    assert "MAX_POSITION_SIZE" in out["warning_codes"]
+    zero = Path(out["trade_intents_file"])
+    assert zero.name == "trade_intents_lseg_20260806_zero.csv"
+    assert zero.is_file()
+    body = zero.read_text(encoding="utf-8").strip().splitlines()
+    assert body[0] == "ticker,infocode,quantity"
+    assert all(line.endswith(",0") for line in body[1:])
 

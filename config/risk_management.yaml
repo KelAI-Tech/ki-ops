@@ -2,7 +2,7 @@
 risk_management:
   enabled: true
 
-  # max_position_size = max_portfolio_value / 2 × max_position_concentration / 5
+  # Max abs share quantity per name (not dollar notional)
   max_position_size: 4000
   max_portfolio_value: 200000  # Max GMV: long $ + |short $| + cash
   max_daily_loss: 2000  # Maximum daily loss before shutdown
@@ -18,9 +18,10 @@ risk_management:
   trailing_stop: true
   trailing_stop_distance: 0.02  # 2% trailing distance
 
-  # Order size limits
+  # Order size limits (checks off for now)
+  enforce_order_size_limits: false
   min_order_size: 100  # Minimum order value
-  max_order_size: 5000  # Maximum single order value
+  max_order_size: 5000  # abs(trade_intent qty) × trade-time px (when enforced)
   max_orders_per_minute: 10
 
   # Market hours enforcement (disabled for first pass)

@@ -1,0 +1,7 @@
+# LSEG POC input files (paths relative to repo root unless absolute).
+sod: examples/sod_lseg_20260805.csv
+trades: examples/trade_intents_lseg_20260806.csv
+# Datastream2 CLOSE 2026-08-04 (latest available px for 8/6 trade intents).
+prices: examples/ds2_px_20260804.csv
+# INFOCODE → TICKER (KELAI.LSEG.SECURITY_MASTER_DT export).
+ticker_map: examples/lseg_security_master.csv

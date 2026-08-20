@@ -17,12 +17,16 @@ ET = ZoneInfo("America/New_York")
 
 
 def check_order_size(orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
+    """Per-ticket cap: abs(trade_intent qty) × trade-time px vs min/max_order_size."""
+    if not settings.enforce_order_size_limits:
+        return []
     out = []
     for o in orders:
-        if o.notional < settings.min_order_size:
-            out.append(block("MIN_ORDER_SIZE", f"{o.notional} < min {settings.min_order_size}", o.symbol))
-        if o.notional > settings.max_order_size:
-            out.append(block("MAX_ORDER_SIZE", f"{o.notional} > max {settings.max_order_size}", o.symbol))
+        size = abs(o.quantity) * o.limit_price
+        if size < settings.min_order_size:
+            out.append(block("MIN_ORDER_SIZE", f"{size} < min {settings.min_order_size}", o.symbol))
+        if size > settings.max_order_size:
+            out.append(block("MAX_ORDER_SIZE", f"{size} > max {settings.max_order_size}", o.symbol))
     return out
 
 
@@ -48,9 +52,11 @@ def check_position_and_portfolio_limits(
         out.append(block("MAX_PORTFOLIO_VALUE", f"GMV {gmv} > max {settings.max_portfolio_value}"))
     base = gmv
     for symbol, h in projected.holdings.items():
+        abs_qty = abs(h.quantity)
         abs_value = abs(h.market_value)
-        if abs_value > settings.max_position_size:
-            out.append(block("MAX_POSITION_SIZE", f"{abs_value} > {settings.max_position_size}", symbol))
+        # Share qty (= dollar notional / trade-time px when SOD is dollar-denominated).
+        if abs_qty > settings.max_position_size:
+            out.append(warn("MAX_POSITION_SIZE", f"{abs_qty} > {settings.max_position_size}", symbol))
         if base > 0:
             conc = abs_value / base
             if conc > settings.max_position_concentration:

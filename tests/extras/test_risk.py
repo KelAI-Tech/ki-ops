@@ -6,7 +6,7 @@ from pathlib import Path
 from ki_ops.intents import TargetIntent, load_sod_positions_csv, load_target_intents_csv
 from ki_ops.models import Holding
 from ki_ops.portfolio import portfolio_from_holdings
-from ki_ops.risk import (
+from ki_ops.extras.risk import (
     SecurityRecord,
     build_risk_snapshot,
     load_security_master_csv,
@@ -14,8 +14,9 @@ from ki_ops.risk import (
     universe_from_records,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "examples"
+EXTRAS = EXAMPLES / "extras"
 
 
 def _u(*rows: SecurityRecord):
@@ -77,7 +78,7 @@ def test_missing_universe_flagged_and_bucketed_unknown():
 
 
 def test_security_master_csv_parses_prefixes():
-    uni = load_security_master_csv(EXAMPLES / "security_master.csv")
+    uni = load_security_master_csv(EXTRAS / "security_master.csv")
     aapl = uni.get("AAPL")
     assert aapl.sector == "Information Technology"
     assert aapl.industry == "Technology Hardware"
@@ -89,7 +90,7 @@ def test_security_master_csv_parses_prefixes():
 
 def test_example_sod_snapshot_is_dollar_neutral():
     sod = load_sod_positions_csv(EXAMPLES / "sod_positions.csv")
-    uni = load_security_master_csv(EXAMPLES / "security_master.csv")
+    uni = load_security_master_csv(EXTRAS / "security_master.csv")
     book = snapshot_book(sod, uni)
     assert book.nmv == Decimal("0")
     assert book.net_pct_gmv == Decimal("0")
@@ -102,7 +103,7 @@ def test_example_sod_snapshot_is_dollar_neutral():
 def test_sod_vs_target_delta_includes_new_shorts():
     sod = load_sod_positions_csv(EXAMPLES / "sod_positions.csv")
     targets = load_target_intents_csv(EXAMPLES / "target_intents.csv")
-    uni = load_security_master_csv(EXAMPLES / "security_master.csv")
+    uni = load_security_master_csv(EXTRAS / "security_master.csv")
     snap = build_risk_snapshot(sod, uni, targets=targets)
     assert snap.projected is not None
     payload = snap.to_dict()

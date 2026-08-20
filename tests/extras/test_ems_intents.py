@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from ki_ops.config import RiskManagementSettings
-from ki_ops.ems_intents import (
+from ki_ops.extras.ems_intents import (
     EmsIntent,
     approx_px_from_alpha_dollars,
     approximate_ems_prices_from_alpha,
@@ -129,10 +129,12 @@ def test_evaluate_parquet_sod_vs_ems_intents(tmp_path: Path):
     assert out["n_sod_names"] == 2
     assert out["sod_source"] == "parquet"
     assert out["n_orders"] == 1
-    assert Decimal(out["sod_gross"]) == Decimal("2710")
-    assert Decimal(out["turnover"]) == Decimal("1910") / Decimal("2") / Decimal("2710")
+    assert Decimal(out["sod_gmv"]) == Decimal("2710")
+    assert Decimal(out["turnover"]) == Decimal("0.35")
+
+
 def test_scale_ems_targets_hits_turnover_band(tmp_path: Path):
-    from ki_ops.ems_intents import scale_ems_targets_to_turnover, write_target_intents_csv
+    from ki_ops.extras.ems_intents import scale_ems_targets_to_turnover, write_target_intents_csv
 
     intents = [
         EmsIntent("AAA", 10, "VWAP"),

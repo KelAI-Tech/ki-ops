@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+import csv
 
 import pytest
 
@@ -19,7 +20,6 @@ from ki_ops.intents import (
 )
 from ki_ops.models import Holding, Order, Side
 from ki_ops.portfolio import portfolio_from_holdings, turnover_ratio
-from ki_ops.trades import load_trades_csv, summarize_trades
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config" / "risk_management.yaml"
@@ -55,6 +55,20 @@ def test_load_risk_settings_matches_yaml():
     assert s.max_portfolio_value == Decimal("200000")
 
 
+def test_poc_data_manifest_resolves():
+    from ki_ops.poc_data import load_poc_data_paths
+
+    poc = load_poc_data_paths(POC_CONFIG.parent / "poc_pos_and_px.yaml")
+    assert poc.sod.is_file()
+    assert poc.trades.is_file()
+    assert poc.prices.is_file()
+    assert poc.ticker_map.is_file()
+    assert poc.sod.name == "sod_lseg_20260805.csv"
+    assert poc.trades.name == "trade_intents_lseg_20260806.csv"
+    assert poc.prices.name == "ds2_px_20260804.csv"
+    assert poc.ticker_map.name == "lseg_security_master.csv"
+
+
 def test_volatility_blocks_when_above_limit():
     result = PreTradeEngine(settings=loose(max_position_volatility=Decimal("0.3"))).evaluate(
         portfolio_from_holdings([], cash=10000),
@@ -62,7 +76,8 @@ def test_volatility_blocks_when_above_limit():
         volatilities={"AAPL": Decimal("0.45")},
     )
     assert result.allowed is False
-    assert any(v.code == "MAX_POSITION_VOLATILITY" and v.symbol == "AAPL" for v in result.violations)
+    assert {v.code for v in result.violations} == {"MAX_POSITION_VOLATILITY"}
+    assert any(v.symbol == "AAPL" for v in result.violations)
 
 
 def test_volatility_allows_when_at_or_below_limit():
@@ -104,7 +119,7 @@ def test_shorts_blocked_when_disabled():
         [Order("AAPL", Side.SELL, 10, 100, TS)],
     )
     assert result.allowed is False
-    assert any(v.code == "INSUFFICIENT_HOLDINGS" for v in result.violations)
+    assert {v.code for v in result.violations} == {"INSUFFICIENT_HOLDINGS"}
 
 
 def test_negative_target_derives_short_intent():
@@ -227,16 +242,26 @@ def test_example_files_block_on_max_position_volatility():
 
     vol_blocks = [v for v in result.violations if v.code == "MAX_POSITION_VOLATILITY"]
     assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_POSITION_VOLATILITY"}
     assert {v.symbol for v in vol_blocks} >= {"TSLA", "NVDA", "AMD", "BA", "COIN"}
 
 
 def test_concentration_blocks_overweight_buy():
+    """Buy that pushes one name above max_position_concentration blocks."""
+    # Cash-only SOD is under the cap; $25k AAPL → 25% of $100k GMV > 20%.
+    sod = portfolio_from_holdings([], cash=100000)
+    assert PreTradeEngine(settings=loose(max_position_concentration=Decimal("0.2"))).evaluate(
+        sod, []
+    ).allowed is True
+
     result = PreTradeEngine(settings=loose(max_position_concentration=Decimal("0.2"))).evaluate(
-        portfolio_from_holdings([Holding("CASHLIKE", 1, 80000)], cash=20000),
-        [Order("AAPL", Side.BUY, 400, 50, TS)],
+        sod,
+        [Order("AAPL", Side.BUY, 500, 50, TS)],  # $25k
     )
     assert result.allowed is False
-    assert any(v.code == "MAX_POSITION_CONCENTRATION" for v in result.violations)
+    conc = [v for v in result.violations if v.code == "MAX_POSITION_CONCENTRATION"]
+    assert {v.symbol for v in conc} == {"AAPL"}
+    assert result.projected_portfolio_value == Decimal("100000")
 
 
 def test_turnover_limit():
@@ -245,14 +270,15 @@ def test_turnover_limit():
     # one-way: (2000/2)/10000 = 0.10
     assert turnover_ratio(portfolio, orders) == Decimal("0.1")
     result = PreTradeEngine(settings=loose(max_turnover=Decimal("0.05"))).evaluate(portfolio, orders)
-    assert any(v.code == "MAX_TURNOVER" for v in result.violations)
+    assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
 def test_yaml_turnover_limit_blocks_over_25pct():
     """30% one-way must trip max_turnover 0.25 without other limits."""
-    settings = loose(max_turnover=Decimal("0.25"), max_order_size=Decimal("5000"))
+    settings = loose(max_turnover=Decimal("0.25"))
     portfolio = portfolio_from_holdings([], cash=20000)
-    # 3 × $4,000 buys stay inside max_order_size $5k; (12000/2)/20000 = 0.30
+    # 3 × $4,000 buys → one-way (12000/2)/20000 = 0.30
     orders = [
         Order("AAPL", Side.BUY, 40, 100, TS),
         Order("MSFT", Side.BUY, 40, 100, TS),
@@ -264,17 +290,26 @@ def test_yaml_turnover_limit_blocks_over_25pct():
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
-def test_max_position_size_blocks_over_yaml_cap():
-    result = PreTradeEngine(settings=load_risk_settings(CONFIG)).evaluate(
-        portfolio_from_holdings([Holding("BIG", 1, 5000)], cash=0),
+def test_max_position_size_warns_over_yaml_cap():
+    # Cap is abs share qty — warn only, does not block.
+    result = PreTradeEngine(
+        settings=loose(max_position_size=Decimal("4000"), max_position_concentration=Decimal("1"))
+    ).evaluate(
+        portfolio_from_holdings([Holding("BIG", 5000, 1)], cash=0),
         [],
     )
-    assert result.allowed is False
-    assert any(v.code == "MAX_POSITION_SIZE" for v in result.violations)
+    assert result.allowed is True
+    assert not any(v.code == "MAX_POSITION_SIZE" for v in result.violations)
+    assert any(v.code == "MAX_POSITION_SIZE" for v in result.warnings)
 
 
 def test_max_portfolio_value_uses_gross_exposure():
-    """Dollar-neutral book: GMV cap, not net NAV."""
+    """Dollar-neutral book: GMV cap, not net NAV.
+
+    SOD GMV = |AAPL| + |TSLA| + cash = 10k + 10k + 5k = 25k (net still 5k).
+    Short-open MSFT $10k: new |MSFT| 10k and cash +10k → GMV 45k > 30k cap.
+    Net equity stays 5k, so a NAV-based cap would not trip.
+    """
     sod = portfolio_from_holdings(
         [
             Holding("AAPL", 100, 100),   # +10000
@@ -284,14 +319,13 @@ def test_max_portfolio_value_uses_gross_exposure():
     )
     assert sod.total_value == Decimal("5000")
     assert sod.gross_exposure == Decimal("25000")
-    # Short open adds $10k gross; projected GMV 35000 > cap 30000
     result = PreTradeEngine(settings=loose(max_portfolio_value=Decimal("30000"))).evaluate(
         sod,
         [Order("MSFT", Side.SELL, 100, 100, TS)],
     )
     assert result.allowed is False
-    assert any(v.code == "MAX_PORTFOLIO_VALUE" for v in result.violations)
-    assert result.projected_portfolio_value == Decimal("45000")
+    assert {v.code for v in result.violations} == {"MAX_PORTFOLIO_VALUE"}
+    assert result.projected_portfolio_value == Decimal("45000")  # GMV, not net
 
 
 def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
@@ -340,13 +374,21 @@ def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
 
 def test_real_lseg_examples_breach_max_turnover():
     """Real 8/5 SOD + 8/6 POC trades (~12% TO) scaled up to breach YAML 25%."""
+    from ki_ops.alpha import (
+        apply_trade_time_prices,
+        load_infocode_price_map,
+        portfolio_at_trade_time_prices,
+    )
+
     sod_path = EXAMPLES / "sod_lseg_20260805.csv"
     trd_path = EXAMPLES / "trade_intents_lseg_20260806.csv"
-    if not sod_path.is_file() or not trd_path.is_file():
+    px_path = EXAMPLES / "ds2_px_20260804.csv"
+    if not sod_path.is_file() or not trd_path.is_file() or not px_path.is_file():
         pytest.skip("LSEG example CSVs not present")
 
-    sod = load_sod_positions_csv(sod_path)
-    orders = _load_orders(trd_path)
+    prices = load_infocode_price_map(px_path, field="close")
+    sod = portfolio_at_trade_time_prices(load_sod_positions_csv(sod_path), prices)
+    orders = apply_trade_time_prices(_load_orders(trd_path), prices)
     base_to = turnover_ratio(sod, orders)
     assert base_to < Decimal("0.25")
 
@@ -361,11 +403,53 @@ def test_real_lseg_examples_breach_max_turnover():
         max_portfolio_value=Decimal("1000000000"),
         max_position_size=Decimal("100000000"),
         max_position_concentration=Decimal("1"),
+        min_order_size=Decimal("0"),
     )
     assert settings.max_turnover == Decimal("0.25")
     result = PreTradeEngine(settings=settings).evaluate(sod, scaled)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
+
+
+def test_real_lseg_examples_zero_trades_have_zero_turnover(tmp_path: Path):
+    """Real 8/5 SOD + 8/6 trade names with quantity 0 → one-way turnover 0.
+
+    Applies Datastream2 px so share qty = SOD $ / px (same as the POC perturb path).
+    """
+    from ki_ops.alpha import (
+        apply_trade_time_prices,
+        load_infocode_price_map,
+        portfolio_at_trade_time_prices,
+    )
+
+    sod_path = EXAMPLES / "sod_lseg_20260805.csv"
+    trd_path = EXAMPLES / "trade_intents_lseg_20260806.csv"
+    px_path = EXAMPLES / "ds2_px_20260804.csv"
+    if not sod_path.is_file() or not trd_path.is_file() or not px_path.is_file():
+        pytest.skip("LSEG example CSVs not present")
+
+    zero_path = tmp_path / "trade_intents_lseg_20260806_zero.csv"
+    with trd_path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    with zero_path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["ticker", "infocode", "quantity"])
+        w.writeheader()
+        for r in rows:
+            w.writerow({"ticker": r["ticker"], "infocode": r["infocode"], "quantity": "0"})
+
+    prices = load_infocode_price_map(px_path, field="close")
+    sod = portfolio_at_trade_time_prices(load_sod_positions_csv(sod_path), prices)
+    orders = apply_trade_time_prices(_load_orders(zero_path), prices)
+    assert len(orders) == len(rows)
+    assert all(o.quantity == 0 for o in orders)
+    assert turnover_ratio(sod, orders) == Decimal("0")
+
+    result = PreTradeEngine(settings=load_risk_settings(POC_CONFIG)).evaluate(sod, orders)
+    assert result.turnover == Decimal("0")
+    assert result.allowed is True
+    assert not any(v.code == "MAX_TURNOVER" for v in result.violations)
+    # Share-based position cap warns on oversized SOD names; does not block.
+    assert any(v.code == "MAX_POSITION_SIZE" for v in result.warnings)
 
 
 def test_turnover_adds_buys_and_sells_does_not_net():
@@ -398,11 +482,53 @@ def test_turnover_uses_gross_exposure_with_shorts():
     assert turnover_ratio(sod, orders) == Decimal("0.04")
 
 
+def test_max_order_size_is_abs_qty_times_trade_px():
+    """Order size = abs(trade_intent qty) × trade-time px (when checks enabled)."""
+    from ki_ops.alpha import apply_trade_time_prices
+
+    # 10 shares × $80 = $800 > $500 cap
+    result = PreTradeEngine(
+        settings=loose(enforce_order_size_limits=True, max_order_size=Decimal("500"))
+    ).evaluate(
+        portfolio_from_holdings([], cash=10000),
+        [Order("AAPL", Side.BUY, 10, 80, TS)],
+    )
+    assert result.allowed is False
+    assert any(v.code == "MAX_ORDER_SIZE" for v in result.violations)
+    assert {v.code for v in result.violations} == {"MAX_ORDER_SIZE"}
+
+    # Share intent 10 @ $80; size $800. Legacy dollar rows need intents_are_dollars.
+    priced = apply_trade_time_prices(
+        [Order("1001", Side.SELL, 10, 1, TS)],
+        {"1001": Decimal("80")},
+    )
+    assert priced[0].quantity == Decimal("10")
+    assert priced[0].limit_price == Decimal("80")
+    assert priced[0].notional == Decimal("800")
+    dollar_legacy = apply_trade_time_prices(
+        [Order("1001", Side.SELL, 800, 1, TS)],
+        {"1001": Decimal("80")},
+        intents_are_dollars=True,
+    )
+    assert dollar_legacy[0].quantity == Decimal("10")
+    assert dollar_legacy[0].notional == Decimal("800")
+
+
 def test_order_size_bounds():
-    engine = PreTradeEngine(settings=loose(min_order_size=Decimal("100"), max_order_size=Decimal("5000")))
+    engine = PreTradeEngine(
+        settings=loose(
+            enforce_order_size_limits=True,
+            min_order_size=Decimal("100"),
+            max_order_size=Decimal("5000"),
+        )
+    )
     portfolio = portfolio_from_holdings([], cash=50000)
-    assert engine.evaluate(portfolio, [Order("X", Side.BUY, 1, 10, TS)]).allowed is False
-    assert engine.evaluate(portfolio, [Order("Y", Side.BUY, 200, 30, TS)]).allowed is False
+    too_small = engine.evaluate(portfolio, [Order("X", Side.BUY, 1, 10, TS)])  # $10
+    too_big = engine.evaluate(portfolio, [Order("Y", Side.BUY, 200, 30, TS)])  # $6000
+    assert too_small.allowed is False
+    assert {v.code for v in too_small.violations} == {"MIN_ORDER_SIZE"}
+    assert too_big.allowed is False
+    assert {v.code for v in too_big.violations} == {"MAX_ORDER_SIZE"}
 
 
 def test_daily_loss_shutdown():
@@ -411,17 +537,5 @@ def test_daily_loss_shutdown():
         [Order("Z", Side.BUY, 2, 100, TS)],
         realized_daily_pnl=Decimal("-2500"),
     )
-    assert any(v.code == "MAX_DAILY_LOSS" for v in result.violations)
-
-
-def test_load_sample_trades(tmp_path: Path):
-    path = tmp_path / "trades.csv"
-    path.write_text(
-        "trade_id,symbol,side,quantity,price,timestamp,fees\n"
-        "1,AAPL,BUY,10,100,2026-08-11T14:00:00Z,1\n"
-        "2,AAPL,SELL,4,110,2026-08-11T15:00:00Z,1\n",
-        encoding="utf-8",
-    )
-    summary = summarize_trades(load_trades_csv(path))
-    assert summary["count"] == 2
-    assert summary["gross_notional"] == "1440"
+    assert result.allowed is False
+    assert {v.code for v in result.violations} == {"MAX_DAILY_LOSS"}

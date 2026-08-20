@@ -19,14 +19,13 @@ from ki_ops.intents import (
     load_target_intents_csv,
 )
 from ki_ops.models import Holding, Order, Side
+from ki_ops.poc_data import DEFAULT_POC_DATA, load_poc_data_paths
 from ki_ops.portfolio import portfolio_from_holdings
-from ki_ops.risk import build_risk_snapshot, load_security_master_csv
-from ki_ops.trades import load_trades_csv, summarize_trades
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
 DEFAULT_TARGETS = ROOT / "examples" / "target_intents.csv"
-DEFAULT_UNIVERSE = ROOT / "examples" / "security_master.csv"
+DEFAULT_UNIVERSE = ROOT / "examples" / "extras" / "security_master.csv"
 DEFAULT_CONFIG = ROOT / "config" / "risk_management.yaml"
 DEFAULT_POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 DEFAULT_POC_ALPHA = ROOT / "examples" / (
@@ -34,8 +33,8 @@ DEFAULT_POC_ALPHA = ROOT / "examples" / (
     "_neut_C5_cap125_nosv.parquet"
 )
 DEFAULT_ALPHA_PANEL = DEFAULT_POC_ALPHA
-DEFAULT_EMS_INTENTS = ROOT / "examples" / "Portfolio_20260806.csv"
-DEFAULT_POC_TRADES = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
+DEFAULT_EMS_INTENTS = ROOT / "examples" / "extras" / "Portfolio_20260806.csv"
+_POC_DATA = load_poc_data_paths(DEFAULT_POC_DATA)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,8 +48,6 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--cash", default=None)
     run.add_argument("--daily-pnl", default="0")
     run.add_argument("--keep-unmentioned", action="store_true")
-
-    sub.add_parser("summarize-trades").add_argument("trades_csv", type=Path)
 
     for name, help_text in (
         ("derive-trades", "target − SOD"),
@@ -69,17 +66,6 @@ def _parser() -> argparse.ArgumentParser:
     legacy.add_argument("--holding", action="append", default=[])
     legacy.add_argument("--cash", default="0")
     legacy.add_argument("--daily-pnl", default="0")
-
-    risk = sub.add_parser(
-        "risk-snapshot",
-        help="factor / sector / beta exposures (SOD, optional target book)",
-    )
-    risk.add_argument("sod_csv", type=Path, nargs="?", default=None)
-    risk.add_argument("targets_csv", type=Path, nargs="?", default=None)
-    risk.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
-    risk.add_argument("--cash", default=None)
-    risk.add_argument("--keep-unmentioned", action="store_true")
-    risk.add_argument("--current-only", action="store_true", help="skip target book")
 
     poc = sub.add_parser(
         "poc-alpha",
@@ -108,9 +94,102 @@ def _parser() -> argparse.ArgumentParser:
         help="write daily turnover/risk CSV (default: examples/alpha_panel_turnover.csv)",
     )
 
-    px = sub.add_parser(
+    def _add_poc_csv_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--poc-data",
+            type=Path,
+            default=DEFAULT_POC_DATA,
+            help="POC manifest YAML: sod, trades, prices, ticker_map (default: config/poc_pos_and_px.yaml)",
+        )
+        parser.add_argument(
+            "--sod",
+            type=Path,
+            default=None,
+            help=f"SOD CSV (default: sod in POC manifest → {_POC_DATA.sod.relative_to(ROOT)})",
+        )
+        parser.add_argument(
+            "--trades",
+            type=Path,
+            default=None,
+            help=f"trade-intent CSV (default: trades in POC manifest → {_POC_DATA.trades.relative_to(ROOT)})",
+        )
+        parser.add_argument("--cash", default="0")
+        parser.add_argument(
+            "--config",
+            dest="poc_config",
+            default=str(DEFAULT_POC_CONFIG),
+            help="risk YAML (defaults to config/risk_management_poc.yaml)",
+        )
+        parser.add_argument(
+            "--prices",
+            type=Path,
+            default=None,
+            help=f"Datastream2 px CSV (default: prices in POC manifest → {_POC_DATA.prices.relative_to(ROOT)})",
+        )
+
+    rp = sub.add_parser(
+        "run-perturb",
+        aliases=["perturb"],
+        help="POC baseline: sod_lseg_20260805.csv + trade_intents_lseg_20260806.csv",
+    )
+    _add_poc_csv_args(rp)
+
+    pt = sub.add_parser(
+        "run-perturb-turnover",
+        aliases=["perturb-turnover", "perturb-to"],
+        help="same POC CSVs; scale trades to breach max_turnover",
+    )
+    _add_poc_csv_args(pt)
+    pt.add_argument(
+        "--target-turnover",
+        default="0.26",
+        help="scaled one-way turnover target (default 0.26 vs 0.25 cap)",
+    )
+    pt.add_argument(
+        "--target-gmv",
+        default="90000000",
+        help="projected GMV after scaled trades (default 90000000)",
+    )
+    pt.add_argument(
+        "--scaled-trades",
+        type=Path,
+        default=None,
+        help="write scaled trade-intent CSV (default: <trades>_scaled.csv)",
+    )
+
+    pz = sub.add_parser(
+        "run-perturb-zero",
+        aliases=["perturb-zero", "perturb-z"],
+        help="same POC CSVs; zero all trade quantities (turnover 0)",
+    )
+    _add_poc_csv_args(pz)
+    pz.add_argument(
+        "--scaled-trades",
+        type=Path,
+        default=None,
+        help="write zeroed trade-intent CSV (default: <trades>_zero.csv)",
+    )
+
+    # Sidecar features (EMS / filled trades / risk snapshot) — not the POC path
+    extras = sub.add_parser("extras", help="optional sidecars: EMS, filled trades, risk snapshot")
+    ex = extras.add_subparsers(dest="extras_command", required=True)
+
+    risk = ex.add_parser("risk-snapshot", help="factor / sector / beta exposures")
+    risk.add_argument("sod_csv", type=Path, nargs="?", default=None)
+    risk.add_argument("targets_csv", type=Path, nargs="?", default=None)
+    risk.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
+    risk.add_argument("--cash", default=None)
+    risk.add_argument("--keep-unmentioned", action="store_true")
+    risk.add_argument("--current-only", action="store_true", help="skip target book")
+
+    ex.add_parser("summarize-trades", help="summarize filled-trade CSV").add_argument(
+        "trades_csv", type=Path
+    )
+
+    px = ex.add_parser(
         "check-ems",
-        help="SOD from alpha parquet, trade intents from EMS drop; approx px from SOD $ / qty",
+        aliases=["approx-px"],
+        help="EMS drop vs alpha-parquet SOD; approx px from SOD $ / qty",
     )
     px.add_argument("intents_csv", type=Path, nargs="?", default=DEFAULT_EMS_INTENTS)
     px.add_argument(
@@ -137,92 +216,6 @@ def _parser() -> argparse.ArgumentParser:
         help="enriched intents CSV (default: next to the EMS file as *_with_px.csv)",
     )
     px.add_argument(
-        "--config",
-        dest="poc_config",
-        default=str(DEFAULT_POC_CONFIG),
-        help="risk YAML (defaults to config/risk_management_poc.yaml)",
-    )
-
-    rp = sub.add_parser(
-        "run-perturb",
-        aliases=["perturb"],
-        help="SOD from parquet date, trade intents from POC CSV (default: 8/5 row + 8/6 trades)",
-    )
-    rp.add_argument(
-        "alpha_parquet",
-        type=Path,
-        nargs="?",
-        default=DEFAULT_POC_ALPHA,
-        help="wide panel: dates × security_id dollars",
-    )
-    rp.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
-    rp.add_argument(
-        "--trades",
-        type=Path,
-        default=DEFAULT_POC_TRADES,
-        help="trade-intent CSV (ticker,infocode,signed quantity)",
-    )
-    rp.add_argument("--cash", default="0")
-    rp.add_argument(
-        "--config",
-        dest="poc_config",
-        default=str(DEFAULT_POC_CONFIG),
-        help="risk YAML (defaults to config/risk_management_poc.yaml)",
-    )
-
-    pt = sub.add_parser(
-        "run-perturb-turnover",
-        aliases=["perturb-turnover", "perturb-to"],
-        help="8/5 parquet SOD + scaled 8/6 POC trades to breach max_turnover",
-    )
-    pt.add_argument(
-        "alpha_parquet",
-        type=Path,
-        nargs="?",
-        default=DEFAULT_POC_ALPHA,
-        help="wide panel: dates × security_id dollars",
-    )
-    pt.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
-    pt.add_argument(
-        "--trades",
-        type=Path,
-        default=DEFAULT_POC_TRADES,
-        help="trade-intent CSV (ticker,infocode,signed quantity)",
-    )
-    pt.add_argument("--cash", default="0")
-    pt.add_argument(
-        "--config",
-        dest="poc_config",
-        default=str(DEFAULT_POC_CONFIG),
-        help="risk YAML (defaults to config/risk_management_poc.yaml)",
-    )
-    pt.add_argument(
-        "--target-turnover",
-        default="0.26",
-        help="scaled one-way turnover target (default 0.26 vs 0.25 cap)",
-    )
-
-    po = sub.add_parser(
-        "run-perturb-order-size",
-        aliases=["perturb-order-size", "perturb-os"],
-        help="8/5 parquet SOD + unscaled 8/6 POC trades to breach max_order_size",
-    )
-    po.add_argument(
-        "alpha_parquet",
-        type=Path,
-        nargs="?",
-        default=DEFAULT_POC_ALPHA,
-        help="wide panel: dates × security_id dollars",
-    )
-    po.add_argument("--sod-date", default="2026-08-05", help="parquet row used as SOD")
-    po.add_argument(
-        "--trades",
-        type=Path,
-        default=DEFAULT_POC_TRADES,
-        help="trade-intent CSV (ticker,infocode,signed quantity)",
-    )
-    po.add_argument("--cash", default="0")
-    po.add_argument(
         "--config",
         dest="poc_config",
         default=str(DEFAULT_POC_CONFIG),
@@ -306,12 +299,10 @@ def _poc_alpha(args) -> int:
 
 
 def _check_ems(args) -> int:
-    from ki_ops.config import load_risk_settings
-    from ki_ops.ems_intents import (
+    from ki_ops.extras.ems_intents import (
         evaluate_ems_against_alpha_sod,
         write_enriched_intents_csv,
     )
-    from ki_ops.engine import PreTradeEngine
 
     settings = load_risk_settings(args.poc_config)
     engine = PreTradeEngine(settings=settings)
@@ -330,76 +321,21 @@ def _check_ems(args) -> int:
     summary["out_csv"] = str(out)
     summary["config"] = str(args.poc_config)
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if summary.get("allowed") else 2
+    return 0 if summary.get("passed") else 2
 
 
-def _run_perturb(args) -> int:
-    from ki_ops.alpha import evaluate_parquet_sod_vs_trade_intents
-
-    settings = load_risk_settings(args.poc_config)
-    engine = PreTradeEngine(settings=settings)
-    orders = _load_orders(args.trades)
-    out = evaluate_parquet_sod_vs_trade_intents(
-        args.alpha_parquet,
-        orders,
-        engine,
-        sod_date=args.sod_date,
-        cash=Decimal(args.cash),
-        trades_csv=args.trades,
-        config_path=args.poc_config,
-    )
-    print(json.dumps(out, indent=2, default=str))
-    return 0 if out.get("allowed") else 2
-
-
-def _run_perturb_breach(args, *, scenario: str) -> int:
-    from ki_ops.alpha import run_lseg_perturb
-
-    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "max-turnover" else Decimal("0.26")
-    out = run_lseg_perturb(
-        args.alpha_parquet,
-        args.trades,
-        _load_orders(args.trades),
-        scenario=scenario,
-        sod_date=args.sod_date,
-        cash=Decimal(args.cash),
-        config_path=args.poc_config,
-        target_turnover=target,
-    )
-    print(json.dumps(out, indent=2, default=str))
-    return 0 if out.get("allowed") else 2
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    command = args.command or "run"
-
-    if command == "poc-alpha":
-        return _poc_alpha(args)
-
-    if command == "check-ems":
+def _extras(args) -> int:
+    cmd = args.extras_command
+    if cmd in {"check-ems", "approx-px"}:
         return _check_ems(args)
+    if cmd == "summarize-trades":
+        from ki_ops.extras.trades import load_trades_csv, summarize_trades
 
-    if command == "approx-px":
-        return _check_ems(args)
-
-    if command in {"run-perturb", "perturb"}:
-        return _run_perturb(args)
-
-    if command in {"run-perturb-turnover", "perturb-turnover", "perturb-to"}:
-        return _run_perturb_breach(args, scenario="max-turnover")
-
-    if command in {"run-perturb-order-size", "perturb-order-size", "perturb-os"}:
-        return _run_perturb_breach(args, scenario="max-order-size")
-
-    settings = load_risk_settings(args.config)
-    engine = PreTradeEngine(settings=settings)
-
-    if command == "summarize-trades":
         print(json.dumps(summarize_trades(load_trades_csv(args.trades_csv)), indent=2))
         return 0
+    if cmd == "risk-snapshot":
+        from ki_ops.extras.risk import build_risk_snapshot, load_security_master_csv
 
-    if command == "risk-snapshot":
         sod_csv = args.sod_csv or DEFAULT_SOD
         sod = load_sod_positions_csv(sod_csv, cash=args.cash)
         universe = load_security_master_csv(args.universe)
@@ -419,6 +355,75 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(snap.to_dict(), indent=2))
         return 0
+    return 2
+
+
+def _load_trade_time_prices(path: Path | None) -> dict[str, Decimal]:
+    if path is None or not Path(path).is_file():
+        return {}
+    from ki_ops.alpha import load_infocode_price_map
+
+    return load_infocode_price_map(path, field="close")
+
+
+def _run_perturb(args) -> int:
+    return _run_perturb_breach(args, scenario="baseline")
+
+
+def _resolve_poc_paths(args) -> tuple[Path, Path, Path]:
+    poc = load_poc_data_paths(getattr(args, "poc_data", None))
+    sod = args.sod or poc.sod
+    trades = args.trades or poc.trades
+    prices = args.prices or poc.prices
+    return sod, trades, prices
+
+
+def _run_perturb_breach(args, *, scenario: str) -> int:
+    from ki_ops.alpha import load_infocode_ticker_map, run_lseg_perturb
+
+    sod, trades, prices = _resolve_poc_paths(args)
+    poc = load_poc_data_paths(getattr(args, "poc_data", None))
+    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "max-turnover" else Decimal("0.26")
+    out = run_lseg_perturb(
+        _load_orders(trades),
+        scenario=scenario,  # type: ignore[arg-type]
+        sod_csv=sod,
+        trades_csv=trades,
+        cash=Decimal(args.cash),
+        config_path=args.poc_config,
+        target_turnover=target,
+        target_gmv=Decimal(getattr(args, "target_gmv", "90000000")),
+        prices_csv=prices,
+        price_by_infocode=_load_trade_time_prices(prices),
+        ticker_by_infocode=load_infocode_ticker_map(poc.ticker_map),
+        ticker_map_csv=poc.ticker_map,
+        scaled_trades_csv=getattr(args, "scaled_trades", None),
+    )
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if out.get("passed") else 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    command = args.command or "run"
+
+    if command == "poc-alpha":
+        return _poc_alpha(args)
+
+    if command == "extras":
+        return _extras(args)
+
+    if command in {"run-perturb", "perturb"}:
+        return _run_perturb(args)
+
+    if command in {"run-perturb-turnover", "perturb-turnover", "perturb-to"}:
+        return _run_perturb_breach(args, scenario="max-turnover")
+
+    if command in {"run-perturb-zero", "perturb-zero", "perturb-z"}:
+        return _run_perturb_breach(args, scenario="zero-turnover")
+
+    settings = load_risk_settings(args.config)
+    engine = PreTradeEngine(settings=settings)
 
     if command == "derive-trades":
         sod = load_sod_positions_csv(args.sod_csv, cash=args.cash)

@@ -88,7 +88,8 @@ class Order:
 
     @property
     def notional(self) -> Decimal:
-        return self.quantity * self.limit_price
+        """Order value for size/turnover: abs(quantity) × trade-time price."""
+        return abs(self.quantity) * self.limit_price
 
     def signed_quantity(self) -> Decimal:
         return self.quantity if self.side is Side.BUY else -self.quantity

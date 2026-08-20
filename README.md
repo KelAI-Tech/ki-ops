@@ -1,6 +1,6 @@
 # KI Ops
 
-Deterministic Python library for SOD/target rebalance analysis and pre-trade risk checks. Owned by Robert Bai. Script/library first; same engine can be exposed as an API later.
+Deterministic Python library for SOD/target rebalance analysis and pre-trade risk checks. Owned by Robert Bai. Script/library first.
 
 ## Core workflow
 
@@ -25,13 +25,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
-```
-
-Optional API extras:
-
-```bash
-pip install -e ".[api]"
-uvicorn ki_ops.api:create_app --factory --reload
 ```
 
 ## File formats
@@ -87,91 +80,71 @@ ki-ops derive-trades examples/sod_positions.csv examples/target_intents.csv
 
 Exit code `2` means pre-trade checks blocked the batch.
 
-### Alpha dollar panel
+### LSEG POC
 
-SOD comes from the LSEG parquet (dates × security ids, dollar notionals). Unit price is `1` so quantity equals dollars. One-way turnover is \((\Sigma|\Delta\$|/2) / GMV\).
+Theoretical LSEG 8/6 trades (12% one-way vs 8/5 SOD): `sod_lseg_20260805.csv` + `trade_intents_lseg_20260806.csv`. Trade `quantity` is **signed whole-share qty** (dollar Δ / Datastream2 CLOSE 2026-08-04, half-up).
 
 ```bash
-# Day-over-day checks on the panel (optional --start/--end)
+# Same SOD + trade CSVs for all POC risk checks
+ki-ops run-perturb                 # baseline (~12% TO; no active limit breaches)
+ki-ops run-perturb-zero            # same names, qty 0 → turnover 0; writes <trades>_zero.csv
+ki-ops run-perturb-turnover        # scale trades to ~26% one-way (25% cap); writes <trades>_scaled.csv
+```
+
+Defaults: `config/poc_pos_and_px.yaml` (SOD, trade intents, Datastream2 px, and INFOCODE→ticker map under `examples/`).
+Override individual files with `--sod`, `--trades`, `--prices`, or point at another manifest with `--poc-data`.
+
+Optional day-over-day parquet panel:
+
+```bash
 ki-ops poc-alpha --start 2026-07-01 --end 2026-07-31
-
-# SOD = 2026-08-05 row; EMS drop dated 2026-08-06
-ki-ops check-ems --as-of 2026-08-06
 ```
 
-Theoretical LSEG 8/6 trades (12% one-way vs 8/5 SOD): `sod_lseg_20260805.csv`, `trade_intents_lseg_20260806.csv`, `target_intents_lseg_20260806.csv`.
+### Extras (sidecars)
+
+EMS drop checks, filled-trade summaries, and factor/sector risk snapshots live under `ki_ops.extras` and `ki-ops extras …`:
 
 ```bash
-# SOD = 2026-08-05 parquet row; trades = 8/6 POC file
-ki-ops run-perturb
-
-# Breach scenarios (8/5 parquet SOD + examples/trade_intents_lseg_20260806.csv)
-ki-ops run-perturb-turnover    # scale trades to ~26% one-way (25% cap)
-ki-ops run-perturb-order-size  # unscaled trades; ARX trips max_order_size
+ki-ops extras check-ems --as-of 2026-08-06
+ki-ops extras summarize-trades path/to/fills.csv
+ki-ops extras risk-snapshot
 ```
 
-### Risk snapshot (factor / sector / beta)
-
-PM view of a market-neutral book. Weights are signed market value / position GMV (cash excluded) so dollar-neutral NAV does not inflate percentages.
-
-Loadings come from a security master CSV — export from Arcana, Barra, Axioma, Wolfe, or an internal model. The example file is illustrative, not a live risk model.
-
-```bash
-# Example SOD vs targets
-ki-ops risk-snapshot
-
-# Current book only
-ki-ops risk-snapshot path/to/sod.csv --universe path/to/security_master.csv
-
-# SOD vs proposed target book
-ki-ops risk-snapshot path/to/sod.csv path/to/targets.csv --universe path/to/security_master.csv
-```
-
-Security master columns: `symbol,sector,industry` plus `beta_*` (e.g. `beta_spx`) and `factor_*` (e.g. `factor_value`). A bare `beta` column is treated as `beta_spx`.
-
-Library usage:
-
-```python
-from ki_ops import build_risk_snapshot, load_security_master_csv, load_sod_positions_csv
-
-sod = load_sod_positions_csv("examples/sod_positions.csv")
-universe = load_security_master_csv("examples/security_master.csv")
-print(build_risk_snapshot(sod, universe).to_dict())
-```
-
-The JSON report includes book KPIs (NAV, GMV, net/gross, dollar beta), GMV-weighted factor / sector / industry / beta exposures with long/short split, per-name contributions, and a `delta` block when targets are supplied.
+Example inputs: `examples/extras/`.
 
 ## Config
 
 Risk limits live in [`config/risk_management.yaml`](config/risk_management.yaml).
+LSEG POC input paths (SOD, trades, px, ticker map) live in [`config/poc_pos_and_px.yaml`](config/poc_pos_and_px.yaml).
 
 ## Layout
 
 ```
 config/risk_management.yaml
 config/risk_management_poc.yaml
+config/poc_pos_and_px.yaml
 src/ki_ops/
   alpha.py       # alpha dollar panel → theoretical SOD / day-over-day POC
   intents.py     # SOD + targets → trade intents
   config.py
   models.py
-  trades.py
   portfolio.py
   engine.py
-  risk.py        # factor / sector / beta snapshot
+  poc_data.py
   checks/rules.py
   cli.py
-  api.py
+  extras/        # EMS, filled trades, risk snapshot (optional)
 tests/
+  extras/
 examples/
   sod_positions.csv
   target_intents.csv
-  security_master.csv
-  sample_orders.csv
-  sample_trades.csv
-  Portfolio_20260806.csv
   sod_lseg_20260805.csv
   trade_intents_lseg_20260806.csv
-  target_intents_lseg_20260806.csv
+  ds2_px_20260804.csv
+  lseg_security_master.csv
   df_combo_lseg_*_nosv.parquet
+  extras/
+    Portfolio_20260806.csv
+    security_master.csv
 ```

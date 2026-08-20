@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ki_ops.alpha import load_alpha_dollar_panel, portfolio_from_dollar_row
-from ki_ops.engine import PreTradeEngine
+from ki_ops.engine import PreTradeEngine, format_decimal, passed_status
 from ki_ops.models import D, Order, Side
 
 _ASOF_RE = re.compile(r"(20\d{6})")
@@ -311,14 +311,14 @@ def scale_ems_targets_to_turnover(
     gross = abs(long_n) + abs(short_n)
     to = (gross / Decimal("2")) / sod_gross
     stats = {
-        "scale_k": str(k),
-        "target_turnover": str(target_turnover),
-        "realized_turnover": str(to),
-        "sod_gross": str(sod_gross),
-        "trade_long_notional": str(long_n),
-        "trade_short_notional": str(short_n),
-        "gross_traded": str(gross),
-        "one_way_notional": str(gross / Decimal("2")),
+        "scale_k": format_decimal(k),
+        "target_turnover": format_decimal(target_turnover),
+        "realized_turnover": format_decimal(to),
+        "sod_gmv": format_decimal(sod_gross),
+        "trade_long_notional": format_decimal(long_n),
+        "trade_short_notional": format_decimal(short_n),
+        "gross_traded": format_decimal(gross),
+        "one_way_notional": format_decimal(gross / Decimal("2")),
         "n_live": sum(1 for i in scaled if i.quantity != 0),
         "n_buy": sum(1 for i in scaled if i.quantity > 0),
         "n_sell": sum(1 for i in scaled if i.quantity < 0),
@@ -416,12 +416,13 @@ def evaluate_ems_against_alpha_sod(
         "sod_source": "parquet",
         "trade_intents_file": str(intents_csv),
         "n_sod_names": len(sod.holdings),
-        "sod_gross": str(sod.gross_exposure),
-        "sod_net": str(sod.total_value),
-        "allowed": result.allowed,
-        "turnover": str(result.turnover),
+        "sod_gmv": format_decimal(sod.gross_exposure),
+        "sod_net_mv": format_decimal(sod.total_value),
+        "passed": passed_status(result.allowed, result.warnings),
+        "turnover": format_decimal(result.turnover),
         "n_orders": len(orders),
         "violations": [v.to_dict() for v in result.violations],
+        "warnings": [v.to_dict() for v in result.warnings],
         "px_coverage": coverage,
         "id_map_csv": str(id_map_csv) if id_map_csv else None,
         "_enriched": enriched,

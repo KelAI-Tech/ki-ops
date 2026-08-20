@@ -15,4 +15,6 @@ build/
 *.pkl
 examples/*_with_px.csv
 examples/alpha_panel_turnover.csv
+examples/*_scaled.csv
+examples/*_zero.csv
 Untitled.ipynb
