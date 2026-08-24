@@ -5,3 +5,5 @@ trades: examples/trade_intents_lseg_20260806.csv
 prices: examples/ds2_px_20260804.csv
 # INFOCODE → TICKER (KELAI.LSEG.SECURITY_MASTER_DT export).
 ticker_map: examples/lseg_security_master.csv
+# INFOCODE ADV snapshot from KELAI.LSEG_CANARY.BASE_DATA_US_DT (2026-08-04).
+adv: examples/base_data_us_adv_20260804.csv

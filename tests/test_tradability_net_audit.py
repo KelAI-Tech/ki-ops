@@ -6,10 +6,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from ki_ops.audit import settings_hash, sha256_file, write_json_out
-from ki_ops.checks.rules import check_net_exposure, check_tradability
+from ki_ops.checks.rules import check_adv_participation, check_net_exposure, check_tradability
 from ki_ops.config import RiskManagementSettings
 from ki_ops.engine import PreTradeEngine
-from ki_ops.listing import ListingStatus, load_listing_status
+from ki_ops.listing import ListingStatus, load_adv_map, load_listing_status
 from ki_ops.models import Holding, Order, Side
 from ki_ops.portfolio import portfolio_from_holdings
 
@@ -104,6 +104,68 @@ def test_untradable_ticket_is_dropped_rest_of_book_still_sends():
     assert [o.symbol for o in result.trade_intents] == ["6347"]
     assert "NOT_TRADABLE" in {w.code for w in result.warnings}
     assert result.warnings[0].symbol == "5029"
+
+
+def test_load_adv_prefers_adv20_adj(tmp_path: Path):
+    path = tmp_path / "adv.csv"
+    path.write_text(
+        "INFOCODE,ADV20,ADV20_ADJ,ADV63\n"
+        "1001,10,100,999\n"
+        "1002,,50,\n",
+        encoding="utf-8",
+    )
+    adv = load_adv_map(path)
+    assert adv["1001"] == Decimal("100")
+    assert adv["1002"] == Decimal("50")
+
+
+def test_adv_participation_warns_over_cap():
+    orders = [Order("1001", Side.BUY, Decimal("20"), 10, TS)]
+    adv = {"1001": Decimal("100")}
+    findings = check_adv_participation(
+        orders, adv, _settings(max_adv_participation=Decimal("0.10"))
+    )
+    assert findings[0].code == "MAX_ADV_PARTICIPATION"
+    assert findings[0].severity.value == "WARN"
+    sod = portfolio_from_holdings([Holding("1001", 10, 10)], cash=0)
+    result = PreTradeEngine(
+        settings=_settings(
+            max_adv_participation=Decimal("0.10"),
+            max_net_exposure=Decimal("1"),
+            max_turnover=Decimal("10"),
+        )
+    ).evaluate(sod, orders, adv=adv)
+    assert result.allowed is True
+    assert {v.code for v in result.violations} == set()
+    assert {w.code for w in result.warnings} == {"MAX_ADV_PARTICIPATION"}
+
+
+def test_missing_adv_warns_and_keeps_ticket():
+    orders = [Order("1001", Side.BUY, Decimal("5"), 10, TS)]
+    findings = check_adv_participation(
+        orders, {"999": Decimal("1000")}, _settings(max_adv_participation=Decimal("0.10"))
+    )
+    assert findings[0].code == "MISSING_ADV"
+    assert findings[0].severity.value == "WARN"
+    sod = portfolio_from_holdings([Holding("1001", 10, 10)], cash=0)
+    result = PreTradeEngine(
+        settings=_settings(
+            max_adv_participation=Decimal("0.10"),
+            max_net_exposure=Decimal("1"),
+            max_turnover=Decimal("10"),
+        )
+    ).evaluate(sod, orders, adv={"999": Decimal("1000")})
+    assert result.allowed is True
+    assert {w.code for w in result.warnings} == {"MISSING_ADV"}
+    assert [o.symbol for o in result.trade_intents] == ["1001"]
+
+
+def test_adv_check_off_when_cap_zero():
+    orders = [Order("1001", Side.BUY, Decimal("99"), 10, TS)]
+    findings = check_adv_participation(
+        orders, {"1001": Decimal("100")}, _settings(max_adv_participation=Decimal("0"))
+    )
+    assert findings == []
 
 
 def test_json_out_and_hashes(tmp_path: Path):

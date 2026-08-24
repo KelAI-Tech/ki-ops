@@ -83,9 +83,10 @@ Two explicit portfolio measures (`Portfolio.gmv` / `Portfolio.gmv_plus_cash`):
 - `max_position_concentration` — |MV| / position GMV; **blocks**
 - `max_position_size` — abs **share** qty (notional / px); **warning only** (does not block)
 - Tradability — live trade intents in inactive / delisted names (`ISACTIVE`, `STATUSCODE`, `DELISTDATE`) are **dropped** and **warned**; the rest of the book still sends. Unknown infocodes **warn** (ticket kept).
+- `max_adv_participation` — abs(order shares) / ADV (prefers `ADV20_ADJ`); **warning only** for now (does not block). `0` disables (small-book default). Missing ADV **warns** (`MISSING_ADV`); ticket kept. POC cap 0.10.
 - Order size min/max — off (`enforce_order_size_limits: false`)
 
-ADV / liquidity caps, point-in-time `TICKER_MAPPING_DT`, and Wolfe `h5` risk loadings are not wired yet (need those data files).
+Point-in-time `TICKER_MAPPING_DT` and Wolfe `h5` risk loadings are not wired yet.
 
 ### Decimal vs float
 

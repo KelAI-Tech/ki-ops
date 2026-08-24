@@ -63,6 +63,8 @@ class RiskManagementSettings:
     max_turnover: Decimal = Decimal("0.25")
     # |NMV|/GMV on the projected book. 1.0 = 100% (effectively off).
     max_net_exposure: Decimal = Decimal("1")
+    # Max abs(order shares) / ADV. 0 disables. Over-cap is a warning for now.
+    max_adv_participation: Decimal = Decimal("0")
     allow_shorts: bool = True
 
     @classmethod

@@ -192,6 +192,7 @@ def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     assert out["passed"] is True
     assert "config_hash" in out
     assert "sod" in out["input_hashes"]
+    assert out["adv"] is None
     json_path = tmp_path / "artifact.json"
     rc2 = main(
         [
@@ -216,21 +217,26 @@ def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     assert disk["passed"] is True
 
 
-def test_real_lseg_baseline_warns_and_drops_delisted_name(capsys):
-    """POC trades include infocode 56992 (delisted 2026-08-05); ticket is dropped, book still sends."""
+def test_real_lseg_baseline_warns_adv_and_drops_delisted_name(capsys):
+    """Delisted 56992 is dropped (warn); infocode 335446 exceeds 10% of ADV20_ADJ (warn)."""
     import json
 
     from ki_ops.cli import main
 
     sod = ROOT / "examples" / "sod_lseg_20260805.csv"
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
-    if not sod.is_file() or not trades.is_file():
+    adv = ROOT / "examples" / "base_data_us_adv_20260804.csv"
+    if not sod.is_file() or not trades.is_file() or not adv.is_file():
         pytest.skip("LSEG example CSVs not present")
 
     rc = main(["run-perturb", "--sod", str(sod), "--trades", str(trades)])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out["passed"] == "with warnings"
+    assert out["violation_codes"] == []
+    assert "MAX_ADV_PARTICIPATION" in out["warning_codes"]
+    assert Decimal(out["max_adv_participation"]) == Decimal("0.10")
+    assert Path(out["adv"]).name == "base_data_us_adv_20260804.csv"
     assert "NOT_TRADABLE" in out["warning_codes"]
     assert "NOT_TRADABLE" not in out["violation_codes"]
     assert Decimal(out["turnover"]) < Decimal("0.25")
@@ -249,6 +255,8 @@ def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
+    if not (ROOT / "examples" / "base_data_us_adv_20260804.csv").is_file():
+        pytest.skip("ADV snapshot CSV not present")
 
     out_csv = tmp_path / "trade_intents_lseg_20260806_scaled.csv"
     rc = main(
@@ -273,7 +281,9 @@ def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
     gmv = Decimal(out["projected_portfolio_value"])
     assert Decimal("89000000") <= gmv <= Decimal("91000000")
     assert Decimal(out["max_net_exposure"]) == Decimal("0.10")
+    assert Decimal(out["max_adv_participation"]) == Decimal("0.10")
     assert out["violation_codes"] == ["MAX_TURNOVER"]
+    assert "MAX_ADV_PARTICIPATION" in out["warning_codes"]
     assert "NOT_TRADABLE" in out["warning_codes"]
     assert out["prices_csv"] and Path(out["prices_csv"]).name == "ds2_px_20260804.csv"
     scaled = Path(out["trade_intents_file"])
@@ -291,6 +301,8 @@ def test_run_perturb_zero_turnover(tmp_path: Path, capsys):
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
+    if not (ROOT / "examples" / "base_data_us_adv_20260804.csv").is_file():
+        pytest.skip("ADV snapshot CSV not present")
 
     out_csv = tmp_path / "trade_intents_lseg_20260806_zero.csv"
     rc = main(

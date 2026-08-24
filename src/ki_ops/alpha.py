@@ -634,7 +634,11 @@ def turnover_breach_scale(
 
 
 def relax_settings_for_turnover_perturb(settings: RiskManagementSettings) -> RiskManagementSettings:
-    """Isolate MAX_TURNOVER — other POC limits are relaxed for this scenario."""
+    """Isolate MAX_TURNOVER — size/concentration/portfolio caps are relaxed.
+
+    ``max_adv_participation`` and ``max_net_exposure`` stay as configured so a
+    turnover stress still surfaces liquidity and market-neutral breaches.
+    """
     return replace(
         settings,
         max_order_size=Decimal("100000000"),
@@ -700,6 +704,7 @@ def run_lseg_perturb(
     price_by_infocode: Mapping[str, Decimal] | None = None,
     ticker_by_infocode: Mapping[str, str] | None = None,
     ticker_map_csv: str | Path | None = None,
+    adv_csv: str | Path | None = None,
     scaled_trades_csv: str | Path | None = None,
     as_of: date | None = None,
 ) -> dict[str, Any]:
@@ -708,7 +713,7 @@ def run_lseg_perturb(
 
     from ki_ops.audit import input_hashes, settings_hash
     from ki_ops.intents import load_sod_positions_csv
-    from ki_ops.listing import listing_csv_has_status_fields, load_listing_status
+    from ki_ops.listing import listing_csv_has_status_fields, load_adv_map, load_listing_status
 
     trade_as_of = as_of or date_cls(2026, 8, 6)
     settings = load_risk_settings(config_path)
@@ -750,9 +755,10 @@ def run_lseg_perturb(
     listing = None
     if ticker_map_csv and listing_csv_has_status_fields(ticker_map_csv):
         listing = load_listing_status(ticker_map_csv)
+    adv = load_adv_map(adv_csv) if adv_csv else None
 
     engine = PreTradeEngine(settings=settings)
-    result = engine.evaluate(sod, list(orders), listing=listing, as_of=trade_as_of)
+    result = engine.evaluate(sod, list(orders), listing=listing, as_of=trade_as_of, adv=adv)
     if price_by_infocode:
         findings = missing_price_findings(sod, list(orders), price_by_infocode)
         extra_blocks = tuple(v for v in findings if v.severity is Severity.BLOCK)
@@ -770,6 +776,7 @@ def run_lseg_perturb(
         {
             "config": config_path,
             "ticker_map": ticker_map_csv,
+            "adv": adv_csv,
             "prices": prices_csv,
             "sod": sod_csv,
             "trades": trades_csv,
@@ -784,11 +791,13 @@ def run_lseg_perturb(
         "config_hash": settings_hash(settings),
         "input_hashes": hashes,
         "ticker_map": str(ticker_map_csv) if ticker_map_csv else None,
+        "adv": str(adv_csv) if adv_csv else None,
         "prices_csv": str(prices_csv) if prices_csv else None,
         "sod_csv": str(sod_csv) if sod_csv else None,
         "trade_intents_file": str(trades_out) if trades_out else None,
         "max_turnover": format_decimal(settings.max_turnover),
         "max_net_exposure": format_decimal(settings.max_net_exposure),
+        "max_adv_participation": format_decimal(settings.max_adv_participation),
         "max_order_size": format_decimal(settings.max_order_size),
         "n_priced": sum(1 for o in orders if o.limit_price != UNIT_PRICE),
         "n_sod_names": len(sod.holdings),

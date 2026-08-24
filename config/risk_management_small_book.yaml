@@ -37,6 +37,8 @@ risk_management:
 
   # |NMV|/GMV on the projected book. 1.0 disables the band.
   max_net_exposure: 1.0
+  # Max abs(order shares) / ADV. 0 disables the check.
+  max_adv_participation: 0
 
   # Shorting
   allow_shorts: true  # Permit sells that exceed current holdings

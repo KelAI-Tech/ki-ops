@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
@@ -95,3 +96,35 @@ def load_listing_status(path: str | Path) -> dict[str, ListingStatus]:
 
 def load_infocode_ticker_map_from_listing(master: Mapping[str, ListingStatus]) -> dict[str, str]:
     return {sid: rec.ticker for sid, rec in master.items() if rec.ticker}
+
+
+_ADV_COLUMNS = ("adv20_adj", "adv20", "adv63_adj", "adv63")
+
+
+def load_adv_map(path: str | Path) -> dict[str, Decimal]:
+    """Load ``{INFOCODE: ADV}`` from a BASE_DATA_US_DT-style snapshot.
+
+    Prefers split-adjusted 20-day ADV, then raw ADV20, then 63-day variants.
+    """
+    path = Path(path)
+    out: dict[str, Decimal] = {}
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames:
+            return {}
+        fields = {str(k).strip().lower(): k for k in reader.fieldnames if k}
+        id_key = fields.get("infocode") or fields.get("security_id")
+        if not id_key:
+            raise ValueError(f"Need INFOCODE column in {path}")
+        adv_key = next((fields[c] for c in _ADV_COLUMNS if c in fields), None)
+        if not adv_key:
+            raise ValueError(f"Need an ADV column ({', '.join(_ADV_COLUMNS)}) in {path}")
+        for raw in reader:
+            sid = (raw.get(id_key) or "").strip()
+            val = (raw.get(adv_key) or "").strip()
+            if not sid or not val:
+                continue
+            adv = Decimal(val)
+            if adv > 0:
+                out[sid] = adv
+    return out

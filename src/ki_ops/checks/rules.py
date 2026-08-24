@@ -75,6 +75,43 @@ def check_position_and_portfolio_limits(
     return out
 
 
+def check_adv_participation(
+    orders: Sequence[Order],
+    adv: Mapping[str, Decimal] | None,
+    settings: RiskManagementSettings,
+) -> list[CheckViolation]:
+    """Warn when live order size exceeds ``max_adv_participation`` × ADV (share ADV)."""
+    if settings.max_adv_participation <= 0 or not adv:
+        return []
+    out: list[CheckViolation] = []
+    seen_missing: set[str] = set()
+    for o in orders:
+        if o.quantity == 0:
+            continue
+        a = adv.get(o.symbol)
+        if a is None or a <= 0:
+            if o.symbol not in seen_missing:
+                seen_missing.add(o.symbol)
+                out.append(
+                    warn(
+                        "MISSING_ADV",
+                        "no ADV in snapshot; liquidity unknown",
+                        o.symbol,
+                    )
+                )
+            continue
+        ratio = abs(o.quantity) / a
+        if ratio > settings.max_adv_participation:
+            out.append(
+                warn(
+                    "MAX_ADV_PARTICIPATION",
+                    f"{ratio:.4f} of ADV > {settings.max_adv_participation}",
+                    o.symbol,
+                )
+            )
+    return out
+
+
 def check_net_exposure(portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
     """Block a projected book whose |NMV|/GMV exceeds ``max_net_exposure``."""
     projected = project_orders(portfolio, orders)
@@ -234,6 +271,7 @@ def run_all_checks(
     vols: Mapping[str, Decimal] | None = None,
     listing: Mapping[str, ListingStatus] | None = None,
     as_of: date | None = None,
+    adv: Mapping[str, Decimal] | None = None,
 ) -> list[CheckViolation]:
     vols = vols or {}
     findings: list[CheckViolation] = []
@@ -243,6 +281,7 @@ def run_all_checks(
     findings += check_market_hours(orders, settings)
     findings += check_sell_availability(portfolio, orders, settings)
     findings += check_turnover(portfolio, orders, settings)
+    findings += check_adv_participation(orders, adv, settings)
     findings += check_net_exposure(portfolio, orders, settings)
     findings += check_position_and_portfolio_limits(portfolio, orders, settings)
     findings += check_volatility(orders, vols, settings)

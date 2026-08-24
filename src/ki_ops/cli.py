@@ -45,8 +45,10 @@ def _poc_default_label(key: str) -> str:
     """
     try:
         path = getattr(load_poc_data_paths(DEFAULT_POC_DATA), key)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, AttributeError):
         return f"{key} in POC manifest"
+    if path is None:
+        return f"{key} in POC manifest (optional)"
     try:
         shown: Path = path.relative_to(ROOT)
     except ValueError:
@@ -142,6 +144,12 @@ def _parser() -> argparse.ArgumentParser:
             type=Path,
             default=None,
             help=f"Datastream2 px CSV (default: {_poc_default_label('prices')})",
+        )
+        parser.add_argument(
+            "--adv",
+            type=Path,
+            default=None,
+            help=f"ADV snapshot CSV (default: {_poc_default_label('adv')})",
         )
         parser.add_argument(
             "--as-of",
@@ -428,6 +436,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         price_by_infocode=_load_trade_time_prices(prices),
         ticker_by_infocode=load_infocode_ticker_map(poc.ticker_map),
         ticker_map_csv=poc.ticker_map,
+        adv_csv=getattr(args, "adv", None) or poc.adv,
         scaled_trades_csv=getattr(args, "scaled_trades", None),
         as_of=date.fromisoformat(str(args.as_of)),
     )

@@ -31,4 +31,6 @@ risk_management:
   max_turnover: 0.25
   # |NMV|/GMV on the projected book (market-neutral band).
   max_net_exposure: 0.10
+  # Max abs(order shares) / ADV20_ADJ; warn only for now (does not block).
+  max_adv_participation: 0.10
   allow_shorts: true

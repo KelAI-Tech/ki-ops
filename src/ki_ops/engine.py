@@ -79,6 +79,7 @@ class PreTradeEngine:
         volatilities: Mapping[str, Decimal | float | int | str] | None = None,
         listing: Mapping[str, ListingStatus] | None = None,
         as_of: date | None = None,
+        adv: Mapping[str, Decimal] | None = None,
     ) -> PreTradeResult:
         order_list = annotate_display_labels(portfolio, list(orders))
         vols = {s.upper(): Decimal(str(v)) for s, v in (volatilities or {}).items()}
@@ -107,6 +108,7 @@ class PreTradeEngine:
                 self.settings,
                 pnl=pnl,
                 vols=vols,
+                adv=adv,
             )
         )
         return PreTradeResult(
@@ -130,6 +132,7 @@ class PreTradeEngine:
         flatten_missing_targets: bool = True,
         listing: Mapping[str, ListingStatus] | None = None,
         as_of: date | None = None,
+        adv: Mapping[str, Decimal] | None = None,
     ) -> PreTradeResult:
         batch = build_trade_intent_batch(
             sod, targets, timestamp=timestamp, flatten_missing_targets=flatten_missing_targets
@@ -141,6 +144,7 @@ class PreTradeEngine:
             volatilities=volatilities,
             listing=listing,
             as_of=as_of,
+            adv=adv,
         )
 
     def build_trade_intents(

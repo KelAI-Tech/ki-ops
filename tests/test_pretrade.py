@@ -52,6 +52,7 @@ def test_load_risk_settings_matches_yaml():
     assert s.allow_shorts is True
     assert s.max_position_size == Decimal("4000")
     assert s.max_turnover == Decimal("0.25")  # two-way (≈ 12.5% one-way)
+    assert s.max_adv_participation == Decimal("0")
     assert s.max_portfolio_value == Decimal("200000")
 
 
@@ -67,6 +68,9 @@ def test_poc_data_manifest_resolves():
     assert poc.trades.name == "trade_intents_lseg_20260806.csv"
     assert poc.prices.name == "ds2_px_20260804.csv"
     assert poc.ticker_map.name == "lseg_security_master.csv"
+    assert poc.adv is not None
+    assert poc.adv.is_file()
+    assert poc.adv.name == "base_data_us_adv_20260804.csv"
 
 
 def test_volatility_blocks_when_above_limit():
