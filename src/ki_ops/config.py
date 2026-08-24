@@ -42,7 +42,7 @@ def _as_bool(name: str, val: Any) -> bool:
 class RiskManagementSettings:
     enabled: bool = True
     max_position_size: Decimal = Decimal("4000")  # max abs share qty per name
-    max_portfolio_value: Decimal = Decimal("200000")  # GMV cap (long + |short| + cash)
+    max_portfolio_value: Decimal = Decimal("200000")  # cap on GMV + cash (deployed capital)
     max_daily_loss: Decimal = Decimal("2000")
     max_position_concentration: Decimal = Decimal("0.2")
     max_position_volatility: Decimal = Decimal("0.3")
@@ -58,7 +58,9 @@ class RiskManagementSettings:
     enforce_market_hours: bool = False
     pre_market_trading: bool = False
     after_hours_trading: bool = False
-    max_turnover: Decimal = Decimal("0.25")
+    # Two-way: (buy$ + sell$) / position GMV — kelaisim's convention.
+    # One-way turnover is exactly half, so 0.5 two-way == 0.25 one-way.
+    max_turnover: Decimal = Decimal("0.5")
     allow_shorts: bool = True
 
     @classmethod

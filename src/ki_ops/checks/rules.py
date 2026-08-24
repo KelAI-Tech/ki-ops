@@ -47,10 +47,14 @@ def check_position_and_portfolio_limits(
 ) -> list[CheckViolation]:
     projected = project_orders(portfolio, orders)
     out = []
-    gmv = projected.gross_exposure
-    if gmv > settings.max_portfolio_value:
-        out.append(block("MAX_PORTFOLIO_VALUE", f"GMV {gmv} > max {settings.max_portfolio_value}"))
-    base = gmv
+    # MAX_PORTFOLIO_VALUE caps deployed capital: positions GMV + cash.
+    total = projected.gmv_plus_cash
+    if total > settings.max_portfolio_value:
+        out.append(
+            block("MAX_PORTFOLIO_VALUE", f"GMV+cash {total} > max {settings.max_portfolio_value}")
+        )
+    # Concentration is |MV| / positions-only GMV (cash excluded, like kelaisim).
+    base = projected.gmv
     for symbol, h in projected.holdings.items():
         abs_qty = abs(h.quantity)
         abs_value = abs(h.market_value)

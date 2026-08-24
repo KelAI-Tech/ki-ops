@@ -12,7 +12,7 @@ from ki_ops.checks.rules import run_all_checks, split_findings
 from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.intents import TargetIntent, TradeIntentBatch, annotate_display_labels, build_trade_intent_batch
 from ki_ops.models import Order, Portfolio
-from ki_ops.portfolio import project_orders, turnover_ratio
+from ki_ops.portfolio import TURNOVER_CONVENTION, project_orders, turnover_ratio
 
 _TWOPLACES = Decimal("0.01")
 
@@ -53,6 +53,7 @@ class PreTradeResult:
             "violations": [v.to_dict() for v in self.violations],
             "warnings": [v.to_dict() for v in self.warnings],
             "turnover": format_decimal(self.turnover),
+            "turnover_convention": TURNOVER_CONVENTION,
             "projected_portfolio_value": format_decimal(self.projected_portfolio_value),
             "trade_intents": [o.to_dict() for o in self.trade_intents],
         }
@@ -83,7 +84,7 @@ class PreTradeEngine:
             return PreTradeResult(
                 allowed=True,
                 turnover=turnover_ratio(portfolio, order_list),
-                projected_portfolio_value=projected.gross_exposure,
+                projected_portfolio_value=projected.gmv_plus_cash,
                 trade_intents=tuple(order_list),
             )
 
@@ -95,7 +96,7 @@ class PreTradeEngine:
             violations=blocks,
             warnings=warnings,
             turnover=turnover_ratio(portfolio, order_list),
-            projected_portfolio_value=projected.gross_exposure,
+            projected_portfolio_value=projected.gmv_plus_cash,
             trade_intents=tuple(order_list),
         )
 

@@ -19,7 +19,12 @@ from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.engine import PreTradeEngine, PreTradeResult, format_decimal, passed_status
 from ki_ops.intents import TargetIntent
 from ki_ops.models import Holding, Order, Portfolio, Side
-from ki_ops.portfolio import portfolio_from_holdings, project_orders, turnover_ratio
+from ki_ops.portfolio import (
+    TURNOVER_CONVENTION,
+    portfolio_from_holdings,
+    project_orders,
+    turnover_ratio,
+)
 
 # Unit price: qty = dollar notional / 1 → MV equals alpha dollars.
 UNIT_PRICE = Decimal("1")
@@ -177,8 +182,8 @@ def run_alpha_panel_checks(
                 target_date=str(tgt_ts.date()) if hasattr(tgt_ts, "date") else str(tgt_ts)[:10],
                 allowed=result.allowed,
                 turnover=result.turnover,
-                sod_gmv=sod.gross_exposure,
-                target_gross=tgt_port.gross_exposure,
+                sod_gmv=sod.gmv,
+                target_gross=tgt_port.gmv,
                 sod_net_mv=sod.total_value,
                 target_net=tgt_port.total_value,
                 n_sod_names=len(sod.holdings),
@@ -205,6 +210,7 @@ def summarize_alpha_days(days: Sequence[AlphaDayResult]) -> dict[str, Any]:
         "n_rebalance_days": len(days),
         "n_allowed": sum(1 for d in days if d.allowed),
         "n_blocked": sum(1 for d in days if not d.allowed),
+        "turnover_convention": TURNOVER_CONVENTION,
         "turnover_avg": format_decimal(avg),
         "turnover_min": format_decimal(min(finite)) if finite else None,
         "turnover_max": format_decimal(max(finite)) if finite else None,
@@ -357,12 +363,12 @@ def construct_lseg_trades_for_turnover(
     panel,
     *,
     sod_date: str = "2026-08-05",
-    target_turnover: Decimal = Decimal("0.12"),
+    target_turnover: Decimal = Decimal("0.24"),
     unit_price: Decimal = UNIT_PRICE,
     ticker_by_infocode: Mapping[str, str] | None = None,
     price_by_infocode: Mapping[str, Decimal] | None = None,
 ) -> dict[str, Any]:
-    """Build theoretical LSEG-id trades so one-way TO vs SOD is ``target_turnover``.
+    """Build theoretical LSEG-id trades so two-way TO vs SOD is ``target_turnover``.
 
     SOD stays in dollar notionals (unit price 1). Trade shape = scaled
     (sod − prior parquet day). If ``price_by_infocode`` is set, trade quantity
@@ -380,7 +386,7 @@ def construct_lseg_trades_for_turnover(
     raw_gross = Decimal(str(float(template.abs().sum())))
     if gmv <= 0 or raw_gross <= 0:
         raise ValueError("Need positive SOD GMV and a non-zero prior-day move to scale")
-    k = (target_turnover * Decimal("2") * gmv) / raw_gross
+    k = (target_turnover * gmv) / raw_gross
     trades = template * float(k)
 
     sod_holdings = [
@@ -444,7 +450,8 @@ def construct_lseg_trades_for_turnover(
         "scale_k": str(k),
         "target_turnover": str(target_turnover),
         "realized_turnover": str(realized),
-        "sod_gmv": str(sod.gross_exposure),
+        "turnover_convention": TURNOVER_CONVENTION,
+        "sod_gmv": str(sod.gmv),
         "trade_long_notional": str(long_n),
         "trade_short_notional": str(short_n),
         "n_sod_names": len(sod.holdings),
@@ -498,20 +505,20 @@ def scale_orders_to_turnover_and_gmv(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.52"),
     target_gmv: Decimal = Decimal("90000000"),
 ) -> list[Order]:
-    """Scale expanding vs contracting trades to hit one-way TO and projected GMV."""
+    """Scale expanding vs contracting trades to hit two-way TO and projected GMV."""
     exp = [o for o in orders if _expands_gross(sod, o)]
     con = [o for o in orders if not _expands_gross(sod, o)]
     add = sum((abs(o.notional) for o in exp), Decimal("0"))
     red = sum((abs(o.notional) for o in con), Decimal("0"))
-    g = sod.gross_exposure
+    g = sod.gmv
     if add <= 0 or red <= 0 or g <= 0:
         k = turnover_breach_scale(sod, orders, target_turnover=target_turnover)
         return round_order_shares(scale_orders(orders, k))
 
-    rhs_sum = target_turnover * Decimal("2") * g
+    rhs_sum = target_turnover * g
     rhs_diff = target_gmv - g
     ke = (rhs_sum + rhs_diff) / (Decimal("2") * add)
     kc = (rhs_sum - rhs_diff) / (Decimal("2") * red)
@@ -535,7 +542,7 @@ def scale_orders_to_turnover_and_gmv(
     trial = assemble(ke, kc)
     lo, hi = ke * Decimal("0.2"), ke * Decimal("3")
     best = trial
-    best_err = abs(project_orders(sod, trial).gross_exposure - target_gmv)
+    best_err = abs(project_orders(sod, trial).gmv - target_gmv)
     for _ in range(24):
         mid = (lo + hi) / 2
         kc_mid = (rhs_sum - mid * add) / red
@@ -547,7 +554,7 @@ def scale_orders_to_turnover_and_gmv(
         if to > 0:
             adj = target_turnover / to
             trial = assemble(mid * adj, kc_mid * adj)
-        gmv = project_orders(sod, trial).gross_exposure
+        gmv = project_orders(sod, trial).gmv
         err = abs(gmv - target_gmv)
         if err < best_err:
             best, best_err, ke, kc = trial, err, mid, kc_mid
@@ -617,9 +624,9 @@ def turnover_breach_scale(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.52"),
 ) -> Decimal:
-    """Scale factor so one-way turnover vs ``sod`` reaches ``target_turnover``."""
+    """Scale factor so two-way turnover vs ``sod`` reaches ``target_turnover``."""
     base = turnover_ratio(sod, orders)
     if base <= 0:
         raise ValueError("Need positive base turnover to scale trades")
@@ -687,7 +694,7 @@ def run_lseg_perturb(
     trades_csv: str | Path | None = None,
     cash: Decimal | float | int | str = 0,
     config_path: str | Path | None = None,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.52"),
     target_gmv: Decimal = Decimal("90000000"),
     prices_csv: str | Path | None = None,
     price_by_infocode: Mapping[str, Decimal] | None = None,
@@ -761,10 +768,11 @@ def run_lseg_perturb(
         "max_order_size": format_decimal(settings.max_order_size),
         "n_priced": sum(1 for o in orders if o.limit_price != UNIT_PRICE),
         "n_sod_names": len(sod.holdings),
-        "sod_gmv": format_decimal(sod.gross_exposure),
+        "sod_gmv": format_decimal(sod.gmv),
         "sod_net_mv": format_decimal(sod.total_value),
         "n_orders": len(result.trade_intents),
         "turnover": format_decimal(result.turnover),
+        "turnover_convention": TURNOVER_CONVENTION,
         "passed": passed_status(result.allowed, result.warnings),
         "projected_portfolio_value": format_decimal(result.projected_portfolio_value),
         "violation_codes": codes,
@@ -803,10 +811,11 @@ def evaluate_parquet_sod_vs_trade_intents(
         "trade_intents_file": str(trades_csv) if trades_csv else None,
         "config": str(config_path) if config_path else None,
         "n_sod_names": len(sod.holdings),
-        "sod_gmv": format_decimal(sod.gross_exposure),
+        "sod_gmv": format_decimal(sod.gmv),
         "sod_net_mv": format_decimal(sod.total_value),
         "n_orders": len(result.trade_intents),
         "turnover": format_decimal(result.turnover),
+        "turnover_convention": TURNOVER_CONVENTION,
         "passed": passed_status(result.allowed, result.warnings),
         "projected_portfolio_value": format_decimal(result.projected_portfolio_value),
         "violation_codes": codes,

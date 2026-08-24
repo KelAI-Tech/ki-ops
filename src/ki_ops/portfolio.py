@@ -60,20 +60,33 @@ def project_orders(portfolio: Portfolio, orders: Iterable[Order]) -> Portfolio:
     return Portfolio(holdings=holdings, cash=cash, as_of=as_of)
 
 
+# Emitted in JSON outputs next to every turnover figure.
+TURNOVER_CONVENTION = (
+    "two-way: (buy$ + sell$) / position GMV (cash excluded; all-cash book falls back to cash); "
+    "matches kelaisim stats.py; one-way = value / 2"
+)
+
+
 def turnover_ratio(portfolio: Portfolio, orders: Iterable[Order]) -> Decimal:
-    """One-way turnover with shorts:
+    """Two-way (gross) turnover with shorts — kelaisim's convention:
 
-    (abs buy notional + abs sell notional) / 2 / (Σ|position MV| + cash)
+    (abs buy notional + abs sell notional) / Σ|position MV|
 
-    Buys and sells both enter the notional sum (covers, short opens, long trims),
-    then ÷2 so a full book replace (exit + enter) reads as 100%, not 200%.
-    Denominator is gross exposure, not net NAV — so a dollar-neutral book does
-    not collapse the base to cash-only and inflate turnover.
+    Buys and sells both enter the notional sum (covers, short opens, long
+    trims), so a full book replace (exit + enter) reads as 200%; one-way
+    turnover is exactly half this value. Denominator is positions-only GMV
+    (cash excluded), matching kelaisim's ``$_traded / (long_size - short_size)``
+    — so a dollar-neutral book does not collapse the base to cash-only, and a
+    cash buffer does not dilute the ratio. An all-cash book (no positions)
+    falls back to cash as the base so day-1 deployment is measurable; a truly
+    empty book with trades returns Infinity (→ ZERO_GMV_BASE block).
     """
     buy_amt = sum((abs(o.notional) for o in orders if o.side is Side.BUY), Decimal("0"))
     sell_amt = sum((abs(o.notional) for o in orders if o.side is Side.SELL), Decimal("0"))
     traded = buy_amt + sell_amt
-    base = portfolio.gross_exposure
+    base = portfolio.gmv
+    if base <= 0:
+        base = portfolio.gmv_plus_cash
     if base <= 0:
         return Decimal("0") if traded == 0 else Decimal("Infinity")
-    return (traded / Decimal("2")) / base
+    return traded / base

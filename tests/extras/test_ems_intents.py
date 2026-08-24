@@ -130,7 +130,8 @@ def test_evaluate_parquet_sod_vs_ems_intents(tmp_path: Path):
     assert out["sod_source"] == "parquet"
     assert out["n_orders"] == 1
     assert Decimal(out["sod_gmv"]) == Decimal("2710")
-    assert Decimal(out["turnover"]) == Decimal("0.35")
+    # two-way: 1910 traded / 2710 GMV ≈ 0.70
+    assert Decimal(out["turnover"]) == Decimal("0.70")
 
 
 def test_scale_ems_targets_hits_turnover_band(tmp_path: Path):
@@ -142,15 +143,15 @@ def test_scale_ems_targets_hits_turnover_band(tmp_path: Path):
         EmsIntent("CCC", 0, "VWAP"),
     ]
     px = {"AAA": Decimal("10"), "BBB": Decimal("20"), "CCC": Decimal("1")}
-    # raw gross = 100+100=200; one-way vs 10000 GMV = 0.01; k = 0.12/0.01 = 12
+    # raw gross = 100+100=200; two-way vs 10000 GMV = 0.02; k = 0.12/0.02 = 6
     scaled, stats = scale_ems_targets_to_turnover(
         intents, px, sod_gross=Decimal("10000"), target_turnover=Decimal("0.12")
     )
-    assert Decimal(stats["scale_k"]) == Decimal("12")
+    assert Decimal(stats["scale_k"]) == Decimal("6")
     assert Decimal(stats["realized_turnover"]) == Decimal("0.12")
     by = {i.symbol: i for i in scaled}
-    assert by["AAA"].quantity == Decimal("120")
-    assert by["BBB"].quantity == Decimal("-60")
+    assert by["AAA"].quantity == Decimal("60")
+    assert by["BBB"].quantity == Decimal("-30")
     assert by["CCC"].quantity == Decimal("0")
     out = write_target_intents_csv(scaled, tmp_path / "tgt.csv")
     text = out.read_text()

@@ -122,10 +122,22 @@ class Portfolio:
         return equity + self.cash
 
     @property
-    def gross_exposure(self) -> Decimal:
-        """Σ|position MV| + cash — stable denominator for long/short turnover."""
-        gmv = sum((abs(h.market_value) for h in self.holdings.values()), Decimal("0"))
-        return gmv + self.cash
+    def gmv(self) -> Decimal:
+        """Σ|position MV|, cash excluded.
+
+        Used as the denominator for turnover and position concentration —
+        matching kelaisim, where GMV is positions-only.
+        """
+        return sum((abs(h.market_value) for h in self.holdings.values()), Decimal("0"))
+
+    @property
+    def gmv_plus_cash(self) -> Decimal:
+        """Σ|position MV| + cash — total deployed capital.
+
+        Used only by the MAX_PORTFOLIO_VALUE cap (and reported as
+        ``projected_portfolio_value``); risk ratios use :attr:`gmv`.
+        """
+        return self.gmv + self.cash
 
     def get(self, symbol: str) -> Holding | None:
         return self.holdings.get(symbol.upper())
