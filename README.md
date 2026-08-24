@@ -80,6 +80,14 @@ Two explicit portfolio measures (`Portfolio.gmv` / `Portfolio.gmv_plus_cash`):
 - `max_position_size` — abs **share** qty (notional / px); **warning only** (does not block)
 - Order size min/max — off (`enforce_order_size_limits: false`)
 
+### Decimal vs float
+
+ki-ops does all money math in Python `Decimal` for deterministic, auditable
+results (no float representation drift in a pre-trade gate). kelaisim and the
+alpha parquets are `float`/numpy — values are converted once at the boundary
+(`Decimal(str(float(v)))`), so tiny last-digit differences vs sim-reported
+numbers are expected and harmless.
+
 ## Generic SOD / targets
 
 Still supported for smaller example books:
