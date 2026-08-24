@@ -94,8 +94,27 @@ def load_symbol_volatilities(*paths: str | Path) -> dict[str, Decimal]:
     return vols
 
 
+def _raise_on_duplicates(symbols: Iterable[str], path: Path, kind: str) -> None:
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for sym in symbols:
+        if sym in seen:
+            dupes.add(sym)
+        seen.add(sym)
+    if dupes:
+        shown = ", ".join(sorted(dupes)[:20])
+        raise ValueError(
+            f"Duplicate symbols in {kind} CSV {path}: {shown}"
+            f"{' …' if len(dupes) > 20 else ''} — aggregate or dedupe upstream"
+        )
+
+
 def load_sod_positions_csv(path: str | Path, *, cash=None) -> Portfolio:
-    """Load start-of-day positions. ``quantity`` may be negative for shorts."""
+    """Load start-of-day positions. ``quantity`` may be negative for shorts.
+
+    Duplicate symbols are an error: keying holdings by symbol would silently
+    keep only the last row and understate GMV.
+    """
     rows = _rows(Path(path))
     holdings = []
     file_cash = None
@@ -119,6 +138,7 @@ def load_sod_positions_csv(path: str | Path, *, cash=None) -> Portfolio:
                 Decimal(row["cost_basis"]) if row.get("cost_basis") else None,
             )
         )
+    _raise_on_duplicates((h.symbol for h in holdings), Path(path), "SOD")
     resolved = Decimal(str(cash)) if cash is not None else (file_cash or Decimal("0"))
     return portfolio_from_holdings(holdings, cash=resolved)
 
@@ -139,6 +159,7 @@ def load_target_intents_csv(path: str | Path) -> list[TargetIntent]:
                 px,
             )
         )
+    _raise_on_duplicates((t.symbol for t in targets), Path(path), "target")
     return targets
 
 
