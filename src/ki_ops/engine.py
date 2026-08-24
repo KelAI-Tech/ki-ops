@@ -18,8 +18,15 @@ _TWOPLACES = Decimal("0.01")
 
 
 def format_decimal(value: Decimal | float | int | str, *, places: Decimal = _TWOPLACES) -> str:
-    """Format a number for CLI/JSON stdout (default 2 decimal places)."""
-    return str(Decimal(str(value)).quantize(places, rounding=ROUND_HALF_UP))
+    """Format a number for CLI/JSON stdout (default 2 decimal places).
+
+    Non-finite values (e.g. ``Decimal("Infinity")`` from a zero-GMV turnover
+    base) are returned as-is instead of raising ``InvalidOperation``.
+    """
+    d = Decimal(str(value))
+    if not d.is_finite():
+        return str(d)
+    return str(d.quantize(places, rounding=ROUND_HALF_UP))
 
 
 def passed_status(allowed: bool, warnings: Sequence | None = None) -> bool | str:
