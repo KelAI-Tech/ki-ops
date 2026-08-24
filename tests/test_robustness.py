@@ -115,7 +115,7 @@ def test_missing_price_blocks_run_perturb(tmp_path: Path, capsys):
 
     rc = main(
         [
-            "run-perturb",
+            "run-perturb-baseline",
             "--poc-data",
             str(poc),
             "--sod",

@@ -274,9 +274,30 @@ def write_turnover_csv(days: Sequence[AlphaDayResult], path: str | Path) -> Path
     return path
 
 
-def load_infocode_ticker_map(path: str | Path) -> dict[str, str]:
-    """Return ``{INFOCODE: TICKER}`` from ``KELAI.LSEG.SECURITY_MASTER_DT``-style CSV."""
+def load_infocode_ticker_map(
+    path: str | Path,
+    *,
+    as_of: date | None = None,
+) -> dict[str, str]:
+    """Return ``{INFOCODE: TICKER}``.
+
+    ``TICKER_MAPPING_DT`` CSVs (VALIDFROM/VALIDTO) are resolved as-of ``as_of``
+    (or ``ISCURRENT`` when ``as_of`` is omitted). Security-master snapshots stay
+    current-ticker only.
+    """
+    from ki_ops.listing import (
+        current_infocode_to_ticker,
+        infocode_to_ticker_as_of,
+        load_ticker_intervals,
+        ticker_mapping_has_intervals,
+    )
+
     path = Path(path)
+    if ticker_mapping_has_intervals(path):
+        intervals = load_ticker_intervals(path)
+        if as_of is None:
+            return current_infocode_to_ticker(intervals)
+        return infocode_to_ticker_as_of(intervals, as_of)
     out: dict[str, str] = {}
     with path.open(encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -686,7 +707,7 @@ def missing_price_findings(
     return out
 
 
-PerturbScenario = Literal["baseline", "max-turnover", "zero-turnover"]
+PerturbScenario = Literal["baseline", "var-checks", "zero-turnover"]
 
 
 def run_lseg_perturb(
@@ -704,11 +725,11 @@ def run_lseg_perturb(
     price_by_infocode: Mapping[str, Decimal] | None = None,
     ticker_by_infocode: Mapping[str, str] | None = None,
     ticker_map_csv: str | Path | None = None,
+    ticker_mapping_csv: str | Path | None = None,
     adv_csv: str | Path | None = None,
-    scaled_trades_csv: str | Path | None = None,
     as_of: date | None = None,
 ) -> dict[str, Any]:
-    """POC risk check: same SOD + trade CSVs; optional scale/relax for one breach."""
+    """POC risk check: same SOD + trade CSVs; optional scale or zero-qty book."""
     from datetime import date as date_cls
 
     from ki_ops.audit import input_hashes, settings_hash
@@ -728,7 +749,7 @@ def run_lseg_perturb(
         sod = portfolio_at_trade_time_prices(sod, price_by_infocode)
 
     trades_out = Path(trades_csv) if trades_csv else None
-    if scenario == "max-turnover":
+    if scenario == "var-checks":
         settings = relax_settings_for_turnover_perturb(settings)
         orders = scale_orders_to_turnover_and_gmv(
             sod, orders, target_turnover=target_turnover, target_gmv=target_gmv
@@ -736,14 +757,14 @@ def run_lseg_perturb(
         if trades_out is not None:
             tickers = dict(ticker_by_infocode or {})
             tickers.update(tickers_from_trade_intents_csv(trades_out))
-            dest = Path(scaled_trades_csv) if scaled_trades_csv else trades_out.with_name(f"{trades_out.stem}_scaled.csv")
+            dest = trades_out.with_name(f"{trades_out.stem}_var_checks.csv")
             trades_out = write_trade_intents_csv(orders, dest, ticker_by_infocode=tickers)
     elif scenario == "zero-turnover":
         orders = zero_order_quantities(orders)
         if trades_out is not None:
             tickers = dict(ticker_by_infocode or {})
             tickers.update(tickers_from_trade_intents_csv(trades_out))
-            dest = Path(scaled_trades_csv) if scaled_trades_csv else trades_out.with_name(f"{trades_out.stem}_zero.csv")
+            dest = trades_out.with_name(f"{trades_out.stem}_zero.csv")
             trades_out = write_trade_intents_csv(
                 orders, dest, ticker_by_infocode=tickers, keep_zero_qty=True
             )
@@ -776,6 +797,7 @@ def run_lseg_perturb(
         {
             "config": config_path,
             "ticker_map": ticker_map_csv,
+            "ticker_mapping": ticker_mapping_csv,
             "adv": adv_csv,
             "prices": prices_csv,
             "sod": sod_csv,
@@ -790,7 +812,10 @@ def run_lseg_perturb(
         "config": str(config_path) if config_path else None,
         "config_hash": settings_hash(settings),
         "input_hashes": hashes,
-        "ticker_map": str(ticker_map_csv) if ticker_map_csv else None,
+        "security_master": (
+            f"{ticker_map_csv}: tradability_isactive" if ticker_map_csv else None
+        ),
+        "ticker_mapping_dt": str(ticker_mapping_csv) if ticker_mapping_csv else None,
         "adv": str(adv_csv) if adv_csv else None,
         "prices_csv": str(prices_csv) if prices_csv else None,
         "sod_csv": str(sod_csv) if sod_csv else None,

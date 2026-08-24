@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 ACTIVE_STATUS_CODES = {"A", ""}
 
@@ -96,6 +96,101 @@ def load_listing_status(path: str | Path) -> dict[str, ListingStatus]:
 
 def load_infocode_ticker_map_from_listing(master: Mapping[str, ListingStatus]) -> dict[str, str]:
     return {sid: rec.ticker for sid, rec in master.items() if rec.ticker}
+
+
+_INTERVAL_FROM = ("validfrom", "valid_from", "startdate", "start_date")
+_INTERVAL_TO = ("validto", "valid_to", "enddate", "end_date")
+_OPEN_END = date(9999, 12, 31)
+
+
+@dataclass(frozen=True)
+class TickerInterval:
+    infocode: str
+    ticker: str
+    valid_from: date
+    valid_to: date
+    is_current: bool
+
+    def covers(self, as_of: date) -> bool:
+        return self.valid_from <= as_of <= self.valid_to
+
+
+def ticker_mapping_has_intervals(path: str | Path) -> bool:
+    path = Path(path)
+    if not path.is_file():
+        return False
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        names = {str(k).strip().lower() for k in (reader.fieldnames or []) if k}
+    return bool(names & set(_INTERVAL_FROM))
+
+
+def load_ticker_intervals(path: str | Path) -> list[TickerInterval]:
+    """Load TICKER_MAPPING_DT-style rows: INFOCODE + [VALIDFROM, VALIDTO] + TICKER."""
+    path = Path(path)
+    out: list[TickerInterval] = []
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames:
+            return []
+        fields = {str(k).strip().lower(): k for k in reader.fieldnames if k}
+        id_key = fields.get("infocode") or fields.get("security_id")
+        tic_key = fields.get("ticker") or fields.get("symbol")
+        from_key = next((fields[c] for c in _INTERVAL_FROM if c in fields), None)
+        to_key = next((fields[c] for c in _INTERVAL_TO if c in fields), None)
+        cur_key = fields.get("iscurrent")
+        if not id_key or not tic_key or not from_key:
+            raise ValueError(f"Need INFOCODE, TICKER, VALIDFROM in {path}")
+        for raw in reader:
+            sid = (raw.get(id_key) or "").strip()
+            tic = (raw.get(tic_key) or "").strip().upper()
+            start = parse_iso_date(raw.get(from_key))
+            if not sid or not tic or start is None:
+                continue
+            end = parse_iso_date(raw.get(to_key) if to_key else None) or _OPEN_END
+            current = parse_is_active(raw.get(cur_key) if cur_key else "")
+            out.append(
+                TickerInterval(
+                    infocode=sid,
+                    ticker=tic,
+                    valid_from=start,
+                    valid_to=end,
+                    is_current=current,
+                )
+            )
+    return out
+
+
+def infocode_to_ticker_as_of(intervals: Sequence[TickerInterval], as_of: date) -> dict[str, str]:
+    """INFOCODE → ticker that was live on ``as_of`` (later VALIDFROM wins ties)."""
+    chosen: dict[str, tuple[date, str]] = {}
+    for row in intervals:
+        if not row.covers(as_of):
+            continue
+        prev = chosen.get(row.infocode)
+        if prev is None or row.valid_from >= prev[0]:
+            chosen[row.infocode] = (row.valid_from, row.ticker)
+    return {sid: tic for sid, (_, tic) in chosen.items()}
+
+
+def ticker_to_infocode_as_of(intervals: Sequence[TickerInterval], as_of: date) -> dict[str, str]:
+    """Ticker → INFOCODE that owned that symbol on ``as_of`` (later VALIDFROM wins ties)."""
+    chosen: dict[str, tuple[date, str]] = {}
+    for row in intervals:
+        if not row.covers(as_of):
+            continue
+        prev = chosen.get(row.ticker)
+        if prev is None or row.valid_from >= prev[0]:
+            chosen[row.ticker] = (row.valid_from, row.infocode)
+    return {tic: sid for tic, (_, sid) in chosen.items()}
+
+
+def current_infocode_to_ticker(intervals: Sequence[TickerInterval]) -> dict[str, str]:
+    return {row.infocode: row.ticker for row in intervals if row.is_current and row.ticker}
+
+
+def current_ticker_to_infocode(intervals: Sequence[TickerInterval]) -> dict[str, str]:
+    return {row.ticker: row.infocode for row in intervals if row.is_current and row.ticker}
 
 
 _ADV_COLUMNS = ("adv20_adj", "adv20", "adv63_adj", "adv63")

@@ -9,7 +9,14 @@ from ki_ops.audit import settings_hash, sha256_file, write_json_out
 from ki_ops.checks.rules import check_adv_participation, check_net_exposure, check_tradability
 from ki_ops.config import RiskManagementSettings
 from ki_ops.engine import PreTradeEngine
-from ki_ops.listing import ListingStatus, load_adv_map, load_listing_status
+from ki_ops.listing import (
+    ListingStatus,
+    infocode_to_ticker_as_of,
+    load_adv_map,
+    load_listing_status,
+    load_ticker_intervals,
+    ticker_to_infocode_as_of,
+)
 from ki_ops.models import Holding, Order, Side
 from ki_ops.portfolio import portfolio_from_holdings
 
@@ -60,7 +67,7 @@ def test_unknown_infocode_warns():
 
 
 def test_load_lseg_master_marks_dead_row():
-    path = Path(__file__).resolve().parents[1] / "examples" / "lseg_security_master.csv"
+    path = Path(__file__).resolve().parents[1] / "examples" / "lseg_security_master_dt.csv"
     if not path.is_file():
         return
     master = load_listing_status(path)
@@ -166,6 +173,25 @@ def test_adv_check_off_when_cap_zero():
         orders, {"1001": Decimal("100")}, _settings(max_adv_participation=Decimal("0"))
     )
     assert findings == []
+
+
+def test_ticker_mapping_resolves_rename_and_recycle(tmp_path: Path):
+    path = tmp_path / "map.csv"
+    path.write_text(
+        "INFOCODE,VALIDFROM,VALIDTO,TICKER,ISCURRENT\n"
+        "60747,1999-10-20,2005-10-06,BSQR,False\n"
+        "60747,2005-10-07,2005-11-03,BSQRD,False\n"
+        "60747,2005-11-04,2079-06-05,BSQR,True\n"
+        "49796,2006-09-08,2009-01-09,THRM,False\n"
+        "55665,2012-06-12,2079-06-05,THRM,True\n",
+        encoding="utf-8",
+    )
+    intervals = load_ticker_intervals(path)
+    assert infocode_to_ticker_as_of(intervals, date(2005, 10, 20))["60747"] == "BSQRD"
+    assert infocode_to_ticker_as_of(intervals, date(2026, 8, 6))["60747"] == "BSQR"
+    assert ticker_to_infocode_as_of(intervals, date(2008, 1, 1))["THRM"] == "49796"
+    assert ticker_to_infocode_as_of(intervals, date(2026, 8, 6))["THRM"] == "55665"
+    assert "THRM" not in ticker_to_infocode_as_of(intervals, date(2010, 6, 1))
 
 
 def test_json_out_and_hashes(tmp_path: Path):
