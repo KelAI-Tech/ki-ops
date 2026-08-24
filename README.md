@@ -42,7 +42,7 @@ cd /path/to/ki-ops
 
 ki-ops run-perturb              # baseline (~24% two-way TO; clean pass)
 ki-ops run-perturb-zero         # all trade qty → 0 (TO 0); writes <trades>_zero.csv
-ki-ops run-perturb-turnover     # scale to ~52% two-way TO vs 50% cap; writes <trades>_scaled.csv
+ki-ops run-perturb-turnover     # scale to ~26% two-way TO vs 25% cap; writes <trades>_scaled.csv
 ```
 
 Stdout includes config/paths, SOD GMV / net MV, turnover, `passed` (`true` / `false` / `"with warnings"`), blocks, and warnings.
@@ -58,10 +58,11 @@ turnover = (buy$ + sell$) / position GMV        # GMV = Σ|position MV|, cash ex
 ```
 
 **One-way turnover is exactly half of this** (a full book replace = 200% two-way
-= 100% one-way). The old ki-ops one-way numbers map 1:2 — e.g. the previous
-`max_turnover: 0.25` (one-way) is now `0.5` (two-way), and the ~12% one-way POC
-baseline reads ~24%. Every JSON output carries a `turnover_convention` field
-stating the formula so numbers are never compared across conventions by accident.
+= 100% one-way). The YAML `max_turnover: 0.25` is a **two-way** cap, i.e.
+≈ 12.5% one-way — tighter than a 25% one-way cap would be. The POC baseline
+(previously reported as ~12% one-way) reads ~24% two-way and clears the cap.
+Every JSON output carries a `turnover_convention` field stating the formula so
+numbers are never compared across conventions by accident.
 
 ### GMV vs GMV + cash
 

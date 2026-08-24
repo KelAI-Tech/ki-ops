@@ -505,7 +505,7 @@ def scale_orders_to_turnover_and_gmv(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.52"),
+    target_turnover: Decimal = Decimal("0.26"),
     target_gmv: Decimal = Decimal("90000000"),
 ) -> list[Order]:
     """Scale expanding vs contracting trades to hit two-way TO and projected GMV."""
@@ -624,7 +624,7 @@ def turnover_breach_scale(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.52"),
+    target_turnover: Decimal = Decimal("0.26"),
 ) -> Decimal:
     """Scale factor so two-way turnover vs ``sod`` reaches ``target_turnover``."""
     base = turnover_ratio(sod, orders)
@@ -694,7 +694,7 @@ def run_lseg_perturb(
     trades_csv: str | Path | None = None,
     cash: Decimal | float | int | str = 0,
     config_path: str | Path | None = None,
-    target_turnover: Decimal = Decimal("0.52"),
+    target_turnover: Decimal = Decimal("0.26"),
     target_gmv: Decimal = Decimal("90000000"),
     prices_csv: str | Path | None = None,
     price_by_infocode: Mapping[str, Decimal] | None = None,

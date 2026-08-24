@@ -26,7 +26,7 @@ risk_management:
   pre_market_trading: false
   after_hours_trading: false
 
-  # Two-way (kelaisim convention): (buy$ + sell$) / position GMV.
-  # One-way = half of this, so 0.5 two-way == the old 0.25 one-way cap.
-  max_turnover: 0.5
+  # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
+  # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+  max_turnover: 0.25
   allow_shorts: true

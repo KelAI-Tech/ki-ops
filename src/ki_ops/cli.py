@@ -159,8 +159,8 @@ def _parser() -> argparse.ArgumentParser:
     _add_poc_csv_args(pt)
     pt.add_argument(
         "--target-turnover",
-        default="0.52",
-        help="scaled two-way turnover target (default 0.52 vs 0.50 cap)",
+        default="0.26",
+        help="scaled two-way turnover target (default 0.26 vs 0.25 cap)",
     )
     pt.add_argument(
         "--target-gmv",
@@ -400,7 +400,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
 
     sod, trades, prices = _resolve_poc_paths(args)
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
-    target = Decimal(getattr(args, "target_turnover", "0.52")) if scenario == "max-turnover" else Decimal("0.52")
+    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "max-turnover" else Decimal("0.26")
     out = run_lseg_perturb(
         _load_orders(trades),
         scenario=scenario,  # type: ignore[arg-type]

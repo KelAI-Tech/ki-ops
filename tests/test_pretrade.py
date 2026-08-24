@@ -51,7 +51,7 @@ def test_load_risk_settings_matches_yaml():
     assert s.enforce_market_hours is False
     assert s.allow_shorts is True
     assert s.max_position_size == Decimal("4000")
-    assert s.max_turnover == Decimal("0.5")  # two-way (== 0.25 one-way)
+    assert s.max_turnover == Decimal("0.25")  # two-way (≈ 12.5% one-way)
     assert s.max_portfolio_value == Decimal("200000")
 
 
@@ -274,17 +274,17 @@ def test_turnover_limit():
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
-def test_yaml_turnover_limit_blocks_over_50pct():
-    """60% two-way must trip max_turnover 0.5 without other limits."""
-    settings = loose(max_turnover=Decimal("0.5"))
+def test_yaml_turnover_limit_blocks_over_25pct():
+    """30% two-way must trip the YAML max_turnover 0.25 (two-way) without other limits."""
+    settings = loose(max_turnover=Decimal("0.25"))
     portfolio = portfolio_from_holdings([Holding("SPY", 200, 100)], cash=0)  # GMV 20000
-    # 3 × $4,000 buys → two-way 12000/20000 = 0.60
+    # 3 × $2,000 buys → two-way 6000/20000 = 0.30
     orders = [
-        Order("AAPL", Side.BUY, 40, 100, TS),
-        Order("MSFT", Side.BUY, 40, 100, TS),
-        Order("GOOG", Side.BUY, 40, 100, TS),
+        Order("AAPL", Side.BUY, 20, 100, TS),
+        Order("MSFT", Side.BUY, 20, 100, TS),
+        Order("GOOG", Side.BUY, 20, 100, TS),
     ]
-    assert turnover_ratio(portfolio, orders) == Decimal("0.6")
+    assert turnover_ratio(portfolio, orders) == Decimal("0.3")
     result = PreTradeEngine(settings=settings).evaluate(portfolio, orders)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
@@ -330,14 +330,14 @@ def test_max_portfolio_value_uses_gmv_plus_cash():
 
 
 def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
-    """Parquet-style SOD + POC trade CSV: 60% two-way trips YAML max_turnover 0.5.
+    """Parquet-style SOD + POC trade CSV: 60% two-way trips YAML max_turnover 0.25.
 
     SOD matches ``examples/sod_lseg_*.csv`` (infocode, ticker, integer notional).
     Trades match ``examples/trade_intents_lseg_*.csv`` (ticker, infocode, signed qty).
     Uses the POC YAML so a long/short book does not also trip retail order caps.
     """
     settings = load_risk_settings(POC_CONFIG)
-    assert settings.max_turnover == Decimal("0.5")
+    assert settings.max_turnover == Decimal("0.25")  # two-way
     assert settings.max_position_size == Decimal("300000")
 
     # 20 long + 20 short at $10k: GMV $400k; each name 2.5% < POC 3% concentration.
@@ -374,7 +374,7 @@ def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
 
 
 def test_real_lseg_examples_breach_max_turnover():
-    """Real 8/5 SOD + 8/6 POC trades (~24% two-way TO) scaled up to breach YAML 50%."""
+    """Real 8/5 SOD + 8/6 POC trades (~24% two-way TO) scaled up to breach YAML 25%."""
     from ki_ops.alpha import (
         apply_trade_time_prices,
         load_infocode_price_map,
@@ -391,12 +391,12 @@ def test_real_lseg_examples_breach_max_turnover():
     sod = portfolio_at_trade_time_prices(load_sod_positions_csv(sod_path), prices)
     orders = apply_trade_time_prices(_load_orders(trd_path), prices)
     base_to = turnover_ratio(sod, orders)
-    assert base_to < Decimal("0.5")
+    assert base_to < Decimal("0.25")
 
-    # Same trade mix as the saved POC file, scaled to ~52% two-way vs 8/5 GMV.
-    scale = Decimal("0.52") / base_to
+    # Same trade mix as the saved POC file, scaled to ~26% two-way vs 8/5 GMV.
+    scale = Decimal("0.26") / base_to
     scaled = [replace(o, quantity=o.quantity * scale) for o in orders]
-    assert turnover_ratio(sod, scaled) > Decimal("0.5")
+    assert turnover_ratio(sod, scaled) > Decimal("0.25")
 
     settings = replace(
         load_risk_settings(POC_CONFIG),
@@ -406,7 +406,7 @@ def test_real_lseg_examples_breach_max_turnover():
         max_position_concentration=Decimal("1"),
         min_order_size=Decimal("0"),
     )
-    assert settings.max_turnover == Decimal("0.5")
+    assert settings.max_turnover == Decimal("0.25")  # two-way
     result = PreTradeEngine(settings=settings).evaluate(sod, scaled)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}

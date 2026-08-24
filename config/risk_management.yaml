@@ -30,9 +30,9 @@ risk_management:
   after_hours_trading: false
 
   # Turnover (pre-trade safety)
-  # Two-way (kelaisim convention): (buy$ + sell$) / position GMV.
-  # One-way = half of this, so 0.5 two-way == the old 0.25 one-way cap.
-  max_turnover: 0.5
+  # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
+  # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+  max_turnover: 0.25
 
   # Shorting
   allow_shorts: true  # Permit sells that exceed current holdings

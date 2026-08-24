@@ -58,9 +58,9 @@ class RiskManagementSettings:
     enforce_market_hours: bool = False
     pre_market_trading: bool = False
     after_hours_trading: bool = False
-    # Two-way: (buy$ + sell$) / position GMV — kelaisim's convention.
-    # One-way turnover is exactly half, so 0.5 two-way == 0.25 one-way.
-    max_turnover: Decimal = Decimal("0.5")
+    # TWO-WAY turnover: (buy$ + sell$) / position GMV — kelaisim's convention.
+    # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+    max_turnover: Decimal = Decimal("0.25")
     allow_shorts: bool = True
 
     @classmethod
