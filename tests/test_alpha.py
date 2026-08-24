@@ -198,7 +198,7 @@ def test_real_lseg_baseline_allows_without_position_or_order_size(capsys):
     assert "MIN_ORDER_SIZE" not in out["violation_codes"]
 
 
-def test_run_perturb_turnover_breach(capsys):
+def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
     import json
 
     from ki_ops.cli import main
@@ -208,7 +208,18 @@ def test_run_perturb_turnover_breach(capsys):
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
 
-    rc = main(["run-perturb-turnover", "--sod", str(sod), "--trades", str(trades)])
+    out_csv = tmp_path / "trade_intents_lseg_20260806_scaled.csv"
+    rc = main(
+        [
+            "run-perturb-turnover",
+            "--sod",
+            str(sod),
+            "--trades",
+            str(trades),
+            "--scaled-trades",
+            str(out_csv),
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 2
     assert out["perturb"] == "max-turnover"
@@ -225,7 +236,7 @@ def test_run_perturb_turnover_breach(capsys):
     assert scaled.read_text(encoding="utf-8").startswith("ticker,infocode,quantity")
 
 
-def test_run_perturb_zero_turnover(capsys):
+def test_run_perturb_zero_turnover(tmp_path: Path, capsys):
     import json
 
     from ki_ops.cli import main
@@ -235,7 +246,18 @@ def test_run_perturb_zero_turnover(capsys):
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
 
-    rc = main(["run-perturb-zero", "--sod", str(sod), "--trades", str(trades)])
+    out_csv = tmp_path / "trade_intents_lseg_20260806_zero.csv"
+    rc = main(
+        [
+            "run-perturb-zero",
+            "--sod",
+            str(sod),
+            "--trades",
+            str(trades),
+            "--scaled-trades",
+            str(out_csv),
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out["perturb"] == "zero-turnover"
