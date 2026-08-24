@@ -343,14 +343,6 @@ def write_target_intents_csv(intents: Sequence[EmsIntent], path: str | Path, *, 
                 }
             )
     return path
-    if as_of is None:
-        parsed = parse_asof_from_filename(intents_csv)
-        if parsed is None:
-            raise ValueError("Pass --as-of or use a filename like Portfolio_YYYYMMDD.csv")
-        return parsed
-    if isinstance(as_of, date):
-        return as_of
-    return datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date()
 
 
 def _as_of_date(intents_csv: str | Path, as_of: date | str | None) -> date:
