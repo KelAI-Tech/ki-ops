@@ -14,6 +14,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
+from ki_ops.checks import CheckViolation, Severity, block, warn
 from ki_ops.config import RiskManagementSettings, load_risk_settings
 from ki_ops.engine import PreTradeEngine, PreTradeResult, format_decimal, passed_status
 from ki_ops.intents import TargetIntent
@@ -637,6 +638,43 @@ def relax_settings_for_turnover_perturb(settings: RiskManagementSettings) -> Ris
     )
 
 
+def missing_price_findings(
+    sod: Portfolio,
+    orders: Sequence[Order],
+    prices: Mapping[str, Decimal],
+) -> list[CheckViolation]:
+    """Findings for names absent from the trade-time price map.
+
+    Silently keeping unit price 1 would understate order notionals in turnover
+    and make dollar SOD notionals look like share quantities to the position
+    size check — so live (non-zero qty) unpriced orders BLOCK and unpriced SOD
+    names WARN.
+    """
+    unpriced_orders = sorted({o.symbol for o in orders if o.quantity != 0 and not prices.get(o.symbol)})
+    unpriced_sod = sorted(s for s in sod.holdings if not prices.get(s))
+    out: list[CheckViolation] = []
+    if unpriced_orders:
+        shown = ", ".join(unpriced_orders[:20])
+        out.append(
+            block(
+                "MISSING_PRICE",
+                f"{len(unpriced_orders)} live trade intents have no trade-time px: {shown}"
+                f"{' …' if len(unpriced_orders) > 20 else ''}",
+            )
+        )
+    if unpriced_sod:
+        shown = ", ".join(unpriced_sod[:20])
+        out.append(
+            warn(
+                "MISSING_PRICE_SOD",
+                f"{len(unpriced_sod)} SOD names have no trade-time px "
+                f"(share-based checks unreliable for them): {shown}"
+                f"{' …' if len(unpriced_sod) > 20 else ''}",
+            )
+        )
+    return out
+
+
 PerturbScenario = Literal["baseline", "max-turnover", "zero-turnover"]
 
 
@@ -698,6 +736,17 @@ def run_lseg_perturb(
 
     engine = PreTradeEngine(settings=settings)
     result = engine.evaluate(sod, list(orders))
+    if price_by_infocode:
+        findings = missing_price_findings(sod, list(orders), price_by_infocode)
+        extra_blocks = tuple(v for v in findings if v.severity is Severity.BLOCK)
+        extra_warnings = tuple(v for v in findings if v.severity is Severity.WARN)
+        if findings:
+            result = replace(
+                result,
+                allowed=result.allowed and not extra_blocks,
+                violations=result.violations + extra_blocks,
+                warnings=result.warnings + extra_warnings,
+            )
     codes = sorted({v.code for v in result.violations})
     warn_codes = sorted({v.code for v in result.warnings})
     return {
