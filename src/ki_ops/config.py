@@ -23,6 +23,21 @@ INTS = {"volatility_lookback", "max_orders_per_minute"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _as_bool(name: str, val: Any) -> bool:
+    """Strict bool coercion — ``bool("false")`` is ``True``, which is a trap."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int) and val in (0, 1):
+        return bool(val)
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in {"true", "yes", "on", "1"}:
+            return True
+        if s in {"false", "no", "off", "0"}:
+            return False
+    raise ValueError(f"Invalid boolean for risk_management.{name}: {val!r}")
+
+
 @dataclass(frozen=True)
 class RiskManagementSettings:
     enabled: bool = True
@@ -49,6 +64,15 @@ class RiskManagementSettings:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> RiskManagementSettings:
         raw = data.get("risk_management", data)
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(raw) - known)
+        if unknown:
+            # A typo'd limit silently running with the default would be worse
+            # than refusing to start.
+            raise ValueError(
+                f"Unknown risk_management keys: {', '.join(unknown)} "
+                f"(known: {', '.join(sorted(known))})"
+            )
         defaults = cls()
         kwargs: dict[str, Any] = {}
         for f in fields(cls):
@@ -56,7 +80,7 @@ class RiskManagementSettings:
                 continue
             val = raw[f.name]
             if f.name in BOOLS:
-                kwargs[f.name] = bool(val)
+                kwargs[f.name] = _as_bool(f.name, val)
             elif f.name in INTS:
                 kwargs[f.name] = int(val)
             else:
