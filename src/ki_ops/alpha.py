@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -701,10 +701,16 @@ def run_lseg_perturb(
     ticker_by_infocode: Mapping[str, str] | None = None,
     ticker_map_csv: str | Path | None = None,
     scaled_trades_csv: str | Path | None = None,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     """POC risk check: same SOD + trade CSVs; optional scale/relax for one breach."""
-    from ki_ops.intents import load_sod_positions_csv
+    from datetime import date as date_cls
 
+    from ki_ops.audit import input_hashes, settings_hash
+    from ki_ops.intents import load_sod_positions_csv
+    from ki_ops.listing import listing_csv_has_status_fields, load_listing_status
+
+    trade_as_of = as_of or date_cls(2026, 8, 6)
     settings = load_risk_settings(config_path)
     if sod is None:
         if sod_csv is None:
@@ -741,8 +747,12 @@ def run_lseg_perturb(
     else:
         raise ValueError(f"Unknown perturb scenario: {scenario}")
 
+    listing = None
+    if ticker_map_csv and listing_csv_has_status_fields(ticker_map_csv):
+        listing = load_listing_status(ticker_map_csv)
+
     engine = PreTradeEngine(settings=settings)
-    result = engine.evaluate(sod, list(orders))
+    result = engine.evaluate(sod, list(orders), listing=listing, as_of=trade_as_of)
     if price_by_infocode:
         findings = missing_price_findings(sod, list(orders), price_by_infocode)
         extra_blocks = tuple(v for v in findings if v.severity is Severity.BLOCK)
@@ -756,25 +766,42 @@ def run_lseg_perturb(
             )
     codes = sorted({v.code for v in result.violations})
     warn_codes = sorted({v.code for v in result.warnings})
+    hashes = input_hashes(
+        {
+            "config": config_path,
+            "ticker_map": ticker_map_csv,
+            "prices": prices_csv,
+            "sod": sod_csv,
+            "trades": trades_csv,
+            "trade_intents_out": trades_out,
+        }
+    )
     return {
         "perturb": scenario,
         "sod_source": "csv",
+        "as_of": trade_as_of.isoformat(),
         "config": str(config_path) if config_path else None,
+        "config_hash": settings_hash(settings),
+        "input_hashes": hashes,
         "ticker_map": str(ticker_map_csv) if ticker_map_csv else None,
         "prices_csv": str(prices_csv) if prices_csv else None,
         "sod_csv": str(sod_csv) if sod_csv else None,
         "trade_intents_file": str(trades_out) if trades_out else None,
         "max_turnover": format_decimal(settings.max_turnover),
+        "max_net_exposure": format_decimal(settings.max_net_exposure),
         "max_order_size": format_decimal(settings.max_order_size),
         "n_priced": sum(1 for o in orders if o.limit_price != UNIT_PRICE),
         "n_sod_names": len(sod.holdings),
         "sod_gmv": format_decimal(sod.gmv),
         "sod_net_mv": format_decimal(sod.total_value),
+        "sod_nmv": format_decimal(sod.nmv),
+        "sod_net_exposure": format_decimal(sod.net_exposure),
         "n_orders": len(result.trade_intents),
         "turnover": format_decimal(result.turnover),
         "turnover_convention": TURNOVER_CONVENTION,
         "passed": passed_status(result.allowed, result.warnings),
         "projected_portfolio_value": format_decimal(result.projected_portfolio_value),
+        "projected_net_exposure": format_decimal(result.projected_net_exposure),
         "violation_codes": codes,
         "violations": [v.to_dict() for v in result.violations],
         "warning_codes": warn_codes,

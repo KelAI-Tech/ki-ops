@@ -22,7 +22,7 @@ from ki_ops.models import Holding, Order, Side
 from ki_ops.portfolio import portfolio_from_holdings, turnover_ratio
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "config" / "risk_management.yaml"
+CONFIG = ROOT / "config" / "risk_management_small_book.yaml"
 POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 EXAMPLES = ROOT / "examples"
 TS = datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)

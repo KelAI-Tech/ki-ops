@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
 DEFAULT_TARGETS = ROOT / "examples" / "target_intents.csv"
 DEFAULT_UNIVERSE = ROOT / "examples" / "extras" / "security_master.csv"
-DEFAULT_CONFIG = ROOT / "config" / "risk_management.yaml"
+DEFAULT_CONFIG = ROOT / "config" / "risk_management_small_book.yaml"
 DEFAULT_POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 DEFAULT_POC_ALPHA = ROOT / "examples" / (
     "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
@@ -142,6 +142,17 @@ def _parser() -> argparse.ArgumentParser:
             type=Path,
             default=None,
             help=f"Datastream2 px CSV (default: {_poc_default_label('prices')})",
+        )
+        parser.add_argument(
+            "--as-of",
+            default="2026-08-06",
+            help="trade date for tradability / delist checks (YYYY-MM-DD)",
+        )
+        parser.add_argument(
+            "--json-out",
+            type=Path,
+            default=None,
+            help="write the same JSON artifact (with input/config hashes) to FILE",
         )
 
     rp = sub.add_parser(
@@ -396,7 +407,10 @@ def _resolve_poc_paths(args) -> tuple[Path, Path, Path]:
 
 
 def _run_perturb_breach(args, *, scenario: str) -> int:
+    from datetime import date
+
     from ki_ops.alpha import load_infocode_ticker_map, run_lseg_perturb
+    from ki_ops.audit import write_json_out
 
     sod, trades, prices = _resolve_poc_paths(args)
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
@@ -415,8 +429,11 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         ticker_by_infocode=load_infocode_ticker_map(poc.ticker_map),
         ticker_map_csv=poc.ticker_map,
         scaled_trades_csv=getattr(args, "scaled_trades", None),
+        as_of=date.fromisoformat(str(args.as_of)),
     )
     print(json.dumps(out, indent=2, default=str))
+    if getattr(args, "json_out", None):
+        write_json_out(args.json_out, out)
     return 0 if out.get("passed") else 2
 
 

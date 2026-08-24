@@ -61,6 +61,8 @@ class RiskManagementSettings:
     # TWO-WAY turnover: (buy$ + sell$) / position GMV — kelaisim's convention.
     # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
     max_turnover: Decimal = Decimal("0.25")
+    # |NMV|/GMV on the projected book. 1.0 = 100% (effectively off).
+    max_net_exposure: Decimal = Decimal("1")
     allow_shorts: bool = True
 
     @classmethod
@@ -107,6 +109,8 @@ def load_risk_settings(path: str | Path | None = None) -> RiskManagementSettings
         Path.cwd() / "config" / "risk_management.yaml",
         Path.cwd() / "risk_management.yaml",
         REPO_ROOT / "config" / "risk_management.yaml",
+        Path.cwd() / "config" / "risk_management_small_book.yaml",
+        REPO_ROOT / "config" / "risk_management_small_book.yaml",
     ]
     for p in paths:
         if p.is_file():

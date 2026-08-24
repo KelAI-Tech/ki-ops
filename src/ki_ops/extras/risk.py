@@ -4,7 +4,9 @@ Weights are signed market value over position GMV (cash excluded). That keeps a
 dollar-neutral book from collapsing onto NAV/cash the way net-equity weights would.
 
 Security attributes are file-driven. Loadings are not estimated here — feed an
-export from Arcana, Barra, Axioma, Wolfe, or an internal model.
+export from Arcana, Barra, Axioma, Wolfe, or an internal model. The current
+loader expects a generic CSV; a daily Wolfe ``h5`` snapshot should replace it
+before production.
 """
 
 from __future__ import annotations

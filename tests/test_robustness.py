@@ -100,9 +100,33 @@ def test_missing_price_blocks_run_perturb(tmp_path: Path, capsys):
         "  max_orders_per_minute: 100000\n",
         encoding="utf-8",
     )
+    master = tmp_path / "master.csv"
+    master.write_text(
+        "INFOCODE,TICKER,STATUSCODE,ISACTIVE,DELISTDATE\n"
+        "1001,AAA,A,True,\n"
+        "1002,BBB,A,True,\n",
+        encoding="utf-8",
+    )
+    poc = tmp_path / "poc.yaml"
+    poc.write_text(
+        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nticker_map: {master}\n",
+        encoding="utf-8",
+    )
 
     rc = main(
-        ["run-perturb", "--sod", str(sod), "--trades", str(trades), "--prices", str(px), "--config", str(cfg)]
+        [
+            "run-perturb",
+            "--poc-data",
+            str(poc),
+            "--sod",
+            str(sod),
+            "--trades",
+            str(trades),
+            "--prices",
+            str(px),
+            "--config",
+            str(cfg),
+        ]
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 2

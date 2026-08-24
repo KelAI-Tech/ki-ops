@@ -89,7 +89,12 @@ def load_ems_trade_intents_csv(path: str | Path) -> list[EmsIntent]:
 
 
 def load_security_id_ticker_map(path: str | Path | None) -> dict[str, str]:
-    """Return ``{SYMBOL: security_id}``. CSV needs ``security_id`` and ``symbol`` (any case)."""
+    """Return ``{SYMBOL: security_id}``. CSV needs ``security_id`` and ``symbol`` (any case).
+
+    This is a *current* ticker map (SECURITY_MASTER_DT). Production should join
+    via TICKER_MAPPING_DT point-in-time intervals so recycled tickers do not
+    attach to the wrong security.
+    """
     if path is None:
         return {}
     path = Path(path)

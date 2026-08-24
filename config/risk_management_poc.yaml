@@ -29,4 +29,6 @@ risk_management:
   # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
   # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
   max_turnover: 0.25
+  # |NMV|/GMV on the projected book (market-neutral band).
+  max_net_exposure: 0.10
   allow_shorts: true
