@@ -4,9 +4,9 @@ risk_management:
 
   # Max abs share quantity per name (not dollar notional)
   max_position_size: 4000
-  max_portfolio_value: 200000  # Max GMV: long $ + |short $| + cash
+  max_portfolio_value: 200000  # Cap on GMV + cash: long $ + |short $| + cash
   max_daily_loss: 2000  # Maximum daily loss before shutdown
-  max_position_concentration: 0.2  # Max 20% of GMV in any single name
+  max_position_concentration: 0.2  # Max 20% of position GMV (cash excluded) in any single name
 
   # Volatility controls
   max_position_volatility: 0.3  # Maximum position volatility
@@ -30,7 +30,9 @@ risk_management:
   after_hours_trading: false
 
   # Turnover (pre-trade safety)
-  max_turnover: 0.25  # Max 25% one-way: (buys+sells)/2 / gross exposure
+  # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
+  # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+  max_turnover: 0.25
 
   # Shorting
   allow_shorts: true  # Permit sells that exceed current holdings

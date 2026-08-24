@@ -34,7 +34,24 @@ DEFAULT_POC_ALPHA = ROOT / "examples" / (
 )
 DEFAULT_ALPHA_PANEL = DEFAULT_POC_ALPHA
 DEFAULT_EMS_INTENTS = ROOT / "examples" / "extras" / "Portfolio_20260806.csv"
-_POC_DATA = load_poc_data_paths(DEFAULT_POC_DATA)
+
+
+def _poc_default_label(key: str) -> str:
+    """Help-text label for a POC manifest default.
+
+    Resolved lazily so importing the CLI (e.g. from an installed wheel without
+    the repo's config/ and examples/ trees) never fails; the manifest is only
+    required when a run-perturb command actually needs it.
+    """
+    try:
+        path = getattr(load_poc_data_paths(DEFAULT_POC_DATA), key)
+    except (FileNotFoundError, ValueError):
+        return f"{key} in POC manifest"
+    try:
+        shown: Path = path.relative_to(ROOT)
+    except ValueError:
+        shown = path
+    return f"{key} in POC manifest → {shown}"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -105,13 +122,13 @@ def _parser() -> argparse.ArgumentParser:
             "--sod",
             type=Path,
             default=None,
-            help=f"SOD CSV (default: sod in POC manifest → {_POC_DATA.sod.relative_to(ROOT)})",
+            help=f"SOD CSV (default: {_poc_default_label('sod')})",
         )
         parser.add_argument(
             "--trades",
             type=Path,
             default=None,
-            help=f"trade-intent CSV (default: trades in POC manifest → {_POC_DATA.trades.relative_to(ROOT)})",
+            help=f"trade-intent CSV (default: {_poc_default_label('trades')})",
         )
         parser.add_argument("--cash", default="0")
         parser.add_argument(
@@ -124,26 +141,26 @@ def _parser() -> argparse.ArgumentParser:
             "--prices",
             type=Path,
             default=None,
-            help=f"Datastream2 px CSV (default: prices in POC manifest → {_POC_DATA.prices.relative_to(ROOT)})",
+            help=f"Datastream2 px CSV (default: {_poc_default_label('prices')})",
         )
 
     rp = sub.add_parser(
         "run-perturb",
         aliases=["perturb"],
-        help="POC baseline: sod_lseg_20260805.csv + trade_intents_lseg_20260806.csv",
+        help="POC baseline: sod_lseg_20260805.csv + trade_intents_lseg_20260806.csv (~24% two-way TO)",
     )
     _add_poc_csv_args(rp)
 
     pt = sub.add_parser(
         "run-perturb-turnover",
         aliases=["perturb-turnover", "perturb-to"],
-        help="same POC CSVs; scale trades to breach max_turnover",
+        help="same POC CSVs; scale trades to breach max_turnover (two-way)",
     )
     _add_poc_csv_args(pt)
     pt.add_argument(
         "--target-turnover",
         default="0.26",
-        help="scaled one-way turnover target (default 0.26 vs 0.25 cap)",
+        help="scaled two-way turnover target (default 0.26 vs 0.25 cap)",
     )
     pt.add_argument(
         "--target-gmv",

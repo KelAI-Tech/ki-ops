@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from ki_ops.alpha import load_alpha_dollar_panel, portfolio_from_dollar_row
 from ki_ops.engine import PreTradeEngine, format_decimal, passed_status
 from ki_ops.models import D, Order, Side
+from ki_ops.portfolio import TURNOVER_CONVENTION
 
 _ASOF_RE = re.compile(r"(20\d{6})")
 
@@ -264,9 +265,9 @@ def scale_ems_targets_to_turnover(
     open_px: Mapping[str, Decimal],
     sod_gross: Decimal,
     *,
-    target_turnover: Decimal = Decimal("0.12"),
+    target_turnover: Decimal = Decimal("0.24"),
 ) -> tuple[list[EmsIntent], dict[str, Any]]:
-    """Scale live EMS share qtys so one-way TO vs ``sod_gross`` equals ``target_turnover``.
+    """Scale live EMS share qtys so two-way TO vs ``sod_gross`` equals ``target_turnover``.
 
     px from the as-of open. Unchanged names keep qty 0. Returns scaled rows (all names)
     plus stats. ``px_approx`` on live names is the open px.
@@ -281,7 +282,7 @@ def scale_ems_targets_to_turnover(
         live_gross += abs(it.quantity * px)
     if live_gross == 0 or sod_gross <= 0:
         raise ValueError("Need live notionals and positive SOD GMV to scale turnover")
-    raw_to = (live_gross / Decimal("2")) / sod_gross
+    raw_to = live_gross / sod_gross
     k = target_turnover / raw_to
     scaled: list[EmsIntent] = []
     long_n = Decimal("0")
@@ -309,7 +310,7 @@ def scale_ems_targets_to_turnover(
             )
         )
     gross = abs(long_n) + abs(short_n)
-    to = (gross / Decimal("2")) / sod_gross
+    to = gross / sod_gross
     stats = {
         "scale_k": format_decimal(k),
         "target_turnover": format_decimal(target_turnover),
@@ -343,14 +344,6 @@ def write_target_intents_csv(intents: Sequence[EmsIntent], path: str | Path, *, 
                 }
             )
     return path
-    if as_of is None:
-        parsed = parse_asof_from_filename(intents_csv)
-        if parsed is None:
-            raise ValueError("Pass --as-of or use a filename like Portfolio_YYYYMMDD.csv")
-        return parsed
-    if isinstance(as_of, date):
-        return as_of
-    return datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date()
 
 
 def _as_of_date(intents_csv: str | Path, as_of: date | str | None) -> date:
@@ -416,10 +409,11 @@ def evaluate_ems_against_alpha_sod(
         "sod_source": "parquet",
         "trade_intents_file": str(intents_csv),
         "n_sod_names": len(sod.holdings),
-        "sod_gmv": format_decimal(sod.gross_exposure),
+        "sod_gmv": format_decimal(sod.gmv),
         "sod_net_mv": format_decimal(sod.total_value),
         "passed": passed_status(result.allowed, result.warnings),
         "turnover": format_decimal(result.turnover),
+        "turnover_convention": TURNOVER_CONVENTION,
         "n_orders": len(orders),
         "violations": [v.to_dict() for v in result.violations],
         "warnings": [v.to_dict() for v in result.warnings],

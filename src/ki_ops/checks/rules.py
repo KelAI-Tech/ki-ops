@@ -47,10 +47,14 @@ def check_position_and_portfolio_limits(
 ) -> list[CheckViolation]:
     projected = project_orders(portfolio, orders)
     out = []
-    gmv = projected.gross_exposure
-    if gmv > settings.max_portfolio_value:
-        out.append(block("MAX_PORTFOLIO_VALUE", f"GMV {gmv} > max {settings.max_portfolio_value}"))
-    base = gmv
+    # MAX_PORTFOLIO_VALUE caps deployed capital: positions GMV + cash.
+    total = projected.gmv_plus_cash
+    if total > settings.max_portfolio_value:
+        out.append(
+            block("MAX_PORTFOLIO_VALUE", f"GMV+cash {total} > max {settings.max_portfolio_value}")
+        )
+    # Concentration is |MV| / positions-only GMV (cash excluded, like kelaisim).
+    base = projected.gmv
     for symbol, h in projected.holdings.items():
         abs_qty = abs(h.quantity)
         abs_value = abs(h.market_value)
@@ -72,6 +76,10 @@ def check_position_and_portfolio_limits(
 
 def check_turnover(portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
     ratio = turnover_ratio(portfolio, orders)
+    if not ratio.is_finite():
+        # Non-zero trade intents against a zero/negative gross-exposure book:
+        # the turnover base is meaningless, so fail loudly instead of comparing.
+        return [block("ZERO_GMV_BASE", "trade intents against a book with zero gross exposure")]
     if ratio > settings.max_turnover:
         return [block("MAX_TURNOVER", f"{ratio:.4f} > {settings.max_turnover}")]
     return []

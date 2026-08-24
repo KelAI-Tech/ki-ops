@@ -51,7 +51,7 @@ def test_load_risk_settings_matches_yaml():
     assert s.enforce_market_hours is False
     assert s.allow_shorts is True
     assert s.max_position_size == Decimal("4000")
-    assert s.max_turnover == Decimal("0.25")
+    assert s.max_turnover == Decimal("0.25")  # two-way (≈ 12.5% one-way)
     assert s.max_portfolio_value == Decimal("200000")
 
 
@@ -248,7 +248,7 @@ def test_example_files_block_on_max_position_volatility():
 
 def test_concentration_blocks_overweight_buy():
     """Buy that pushes one name above max_position_concentration blocks."""
-    # Cash-only SOD is under the cap; $25k AAPL → 25% of $100k GMV > 20%.
+    # Cash-only SOD is under the cap; $25k AAPL → 100% of the $25k position GMV > 20%.
     sod = portfolio_from_holdings([], cash=100000)
     assert PreTradeEngine(settings=loose(max_position_concentration=Decimal("0.2"))).evaluate(
         sod, []
@@ -265,24 +265,24 @@ def test_concentration_blocks_overweight_buy():
 
 
 def test_turnover_limit():
-    portfolio = portfolio_from_holdings([], cash=10000)
+    portfolio = portfolio_from_holdings([Holding("AAPL", 100, 100)], cash=0)  # GMV 10000
     orders = [Order("MSFT", Side.BUY, 20, 100, TS)]
-    # one-way: (2000/2)/10000 = 0.10
-    assert turnover_ratio(portfolio, orders) == Decimal("0.1")
+    # two-way: 2000/10000 = 0.20
+    assert turnover_ratio(portfolio, orders) == Decimal("0.2")
     result = PreTradeEngine(settings=loose(max_turnover=Decimal("0.05"))).evaluate(portfolio, orders)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
 def test_yaml_turnover_limit_blocks_over_25pct():
-    """30% one-way must trip max_turnover 0.25 without other limits."""
+    """30% two-way must trip the YAML max_turnover 0.25 (two-way) without other limits."""
     settings = loose(max_turnover=Decimal("0.25"))
-    portfolio = portfolio_from_holdings([], cash=20000)
-    # 3 × $4,000 buys → one-way (12000/2)/20000 = 0.30
+    portfolio = portfolio_from_holdings([Holding("SPY", 200, 100)], cash=0)  # GMV 20000
+    # 3 × $2,000 buys → two-way 6000/20000 = 0.30
     orders = [
-        Order("AAPL", Side.BUY, 40, 100, TS),
-        Order("MSFT", Side.BUY, 40, 100, TS),
-        Order("GOOG", Side.BUY, 40, 100, TS),
+        Order("AAPL", Side.BUY, 20, 100, TS),
+        Order("MSFT", Side.BUY, 20, 100, TS),
+        Order("GOOG", Side.BUY, 20, 100, TS),
     ]
     assert turnover_ratio(portfolio, orders) == Decimal("0.3")
     result = PreTradeEngine(settings=settings).evaluate(portfolio, orders)
@@ -303,11 +303,11 @@ def test_max_position_size_warns_over_yaml_cap():
     assert any(v.code == "MAX_POSITION_SIZE" for v in result.warnings)
 
 
-def test_max_portfolio_value_uses_gross_exposure():
-    """Dollar-neutral book: GMV cap, not net NAV.
+def test_max_portfolio_value_uses_gmv_plus_cash():
+    """Dollar-neutral book: deployed-capital cap (GMV + cash), not net NAV.
 
-    SOD GMV = |AAPL| + |TSLA| + cash = 10k + 10k + 5k = 25k (net still 5k).
-    Short-open MSFT $10k: new |MSFT| 10k and cash +10k → GMV 45k > 30k cap.
+    SOD: |AAPL| + |TSLA| = 20k position GMV; + 5k cash = 25k deployed (net 5k).
+    Short-open MSFT $10k: new |MSFT| 10k and cash +10k → GMV+cash 45k > 30k cap.
     Net equity stays 5k, so a NAV-based cap would not trip.
     """
     sod = portfolio_from_holdings(
@@ -318,25 +318,26 @@ def test_max_portfolio_value_uses_gross_exposure():
         cash=5000,
     )
     assert sod.total_value == Decimal("5000")
-    assert sod.gross_exposure == Decimal("25000")
+    assert sod.gmv == Decimal("20000")            # positions only
+    assert sod.gmv_plus_cash == Decimal("25000")  # deployed capital
     result = PreTradeEngine(settings=loose(max_portfolio_value=Decimal("30000"))).evaluate(
         sod,
         [Order("MSFT", Side.SELL, 100, 100, TS)],
     )
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_PORTFOLIO_VALUE"}
-    assert result.projected_portfolio_value == Decimal("45000")  # GMV, not net
+    assert result.projected_portfolio_value == Decimal("45000")  # GMV + cash, not net
 
 
 def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
-    """Parquet-style SOD + POC trade CSV: 30% one-way trips YAML max_turnover 0.25.
+    """Parquet-style SOD + POC trade CSV: 60% two-way trips YAML max_turnover 0.25.
 
     SOD matches ``examples/sod_lseg_*.csv`` (infocode, ticker, integer notional).
     Trades match ``examples/trade_intents_lseg_*.csv`` (ticker, infocode, signed qty).
     Uses the POC YAML so a long/short book does not also trip retail order caps.
     """
     settings = load_risk_settings(POC_CONFIG)
-    assert settings.max_turnover == Decimal("0.25")
+    assert settings.max_turnover == Decimal("0.25")  # two-way
     assert settings.max_position_size == Decimal("300000")
 
     # 20 long + 20 short at $10k: GMV $400k; each name 2.5% < POC 3% concentration.
@@ -344,7 +345,7 @@ def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
     seed_short = [("6347", "SCCO"), ("39985", "ORCL"), ("40142", "C"), ("45293", "AMZN")]
     longs = seed_long + [(str(81000 + i), f"L{i:02d}") for i in range(16)]
     shorts = seed_short + [(str(82000 + i), f"S{i:02d}") for i in range(16)]
-    sod_n, trade_n = 10000, 6000  # gross $240k → one-way 30% of $400k GMV
+    sod_n, trade_n = 10000, 6000  # gross $240k → two-way 60% of $400k GMV
 
     sod_path = tmp_path / "sod_lseg_20260805.csv"
     sod_path.write_text(
@@ -365,15 +366,15 @@ def test_lseg_poc_csvs_breach_yaml_turnover(tmp_path: Path):
 
     sod = load_sod_positions_csv(sod_path)
     orders = _load_orders(trd_path)
-    assert sod.gross_exposure == Decimal("400000")
-    assert turnover_ratio(sod, orders) == Decimal("0.3")
+    assert sod.gmv == Decimal("400000")
+    assert turnover_ratio(sod, orders) == Decimal("0.6")
     result = PreTradeEngine(settings=settings).evaluate(sod, orders)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
 
 
 def test_real_lseg_examples_breach_max_turnover():
-    """Real 8/5 SOD + 8/6 POC trades (~12% TO) scaled up to breach YAML 25%."""
+    """Real 8/5 SOD + 8/6 POC trades (~24% two-way TO) scaled up to breach YAML 25%."""
     from ki_ops.alpha import (
         apply_trade_time_prices,
         load_infocode_price_map,
@@ -392,7 +393,7 @@ def test_real_lseg_examples_breach_max_turnover():
     base_to = turnover_ratio(sod, orders)
     assert base_to < Decimal("0.25")
 
-    # Same trade mix as the saved POC file, scaled to ~26% one-way vs 8/5 GMV.
+    # Same trade mix as the saved POC file, scaled to ~26% two-way vs 8/5 GMV.
     scale = Decimal("0.26") / base_to
     scaled = [replace(o, quantity=o.quantity * scale) for o in orders]
     assert turnover_ratio(sod, scaled) > Decimal("0.25")
@@ -405,7 +406,7 @@ def test_real_lseg_examples_breach_max_turnover():
         max_position_concentration=Decimal("1"),
         min_order_size=Decimal("0"),
     )
-    assert settings.max_turnover == Decimal("0.25")
+    assert settings.max_turnover == Decimal("0.25")  # two-way
     result = PreTradeEngine(settings=settings).evaluate(sod, scaled)
     assert result.allowed is False
     assert {v.code for v in result.violations} == {"MAX_TURNOVER"}
@@ -453,18 +454,18 @@ def test_real_lseg_examples_zero_trades_have_zero_turnover(tmp_path: Path):
 
 
 def test_turnover_adds_buys_and_sells_does_not_net():
-    """Buy $1k + sell $1k on a $10k book => one-way 0.10, not 0 (net)."""
-    portfolio = portfolio_from_holdings([Holding("AAPL", 10, 100)], cash=9000)
+    """Buy $1k + sell $1k on a $10k-GMV book => two-way 0.20, not 0 (net)."""
+    portfolio = portfolio_from_holdings([Holding("AAPL", 100, 100)], cash=0)  # GMV 10000
     orders = [
         Order("MSFT", Side.BUY, 10, 100, TS),   # +1000
         Order("AAPL", Side.SELL, 10, 100, TS),  # +1000
     ]
-    # (2000/2)/10000 = 0.10
-    assert turnover_ratio(portfolio, orders) == Decimal("0.1")
+    # (1000+1000)/10000 = 0.20
+    assert turnover_ratio(portfolio, orders) == Decimal("0.2")
 
 
-def test_turnover_uses_gross_exposure_with_shorts():
-    """Dollar-neutral SOD must not use tiny net NAV as the turnover base."""
+def test_turnover_uses_position_gmv_with_shorts():
+    """Dollar-neutral SOD must use position GMV, not tiny net NAV or GMV+cash."""
     sod = portfolio_from_holdings(
         [
             Holding("AAPL", 100, 100),   # +10000
@@ -472,14 +473,15 @@ def test_turnover_uses_gross_exposure_with_shorts():
         ],
         cash=5000,
     )
-    assert sod.total_value == Decimal("5000")          # net NAV = cash
-    assert sod.gross_exposure == Decimal("25000")      # 10k+10k+5k cash
+    assert sod.total_value == Decimal("5000")        # net NAV = cash
+    assert sod.gmv == Decimal("20000")               # positions only (kelaisim base)
+    assert sod.gmv_plus_cash == Decimal("25000")
     orders = [
         Order("AAPL", Side.SELL, 10, 100, TS),  # 1000
         Order("TSLA", Side.BUY, 5, 200, TS),    # 1000 cover
     ]
-    # one-way: (2000/2)/25000 = 0.04 — not (2000/2)/5000 = 0.2
-    assert turnover_ratio(sod, orders) == Decimal("0.04")
+    # two-way: 2000/20000 = 0.10 — cash neither dilutes nor replaces the base
+    assert turnover_ratio(sod, orders) == Decimal("0.1")
 
 
 def test_max_order_size_is_abs_qty_times_trade_px():

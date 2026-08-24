@@ -34,28 +34,60 @@ Inputs are listed in [`config/poc_pos_and_px.yaml`](config/poc_pos_and_px.yaml):
 | `examples/lseg_security_master.csv` | INFOCODE → ticker |
 | `config/risk_management_poc.yaml` | Risk limits (~$90M GMV book) |
 
-At run time, SOD `$` → shares via CLOSE (`qty = notional / px`). Order / turnover notionals use `abs(qty) × px`. One-way turnover is `(buys+sells)/2 / GMV`.
+At run time, SOD `$` → shares via CLOSE (`qty = notional / px`). Order / turnover notionals use `abs(qty) × px`.
 
 ```bash
 source .venv/bin/activate   # or /data/robert/venvs/ki-ops/bin/activate
 cd /path/to/ki-ops
 
-ki-ops run-perturb              # baseline (~12% TO; clean pass)
+ki-ops run-perturb              # baseline (~24% two-way TO; clean pass)
 ki-ops run-perturb-zero         # all trade qty → 0 (TO 0); writes <trades>_zero.csv
-ki-ops run-perturb-turnover     # scale to ~26% TO vs 25% cap; writes <trades>_scaled.csv
+ki-ops run-perturb-turnover     # scale to ~26% two-way TO vs 25% cap; writes <trades>_scaled.csv
 ```
 
 Stdout includes config/paths, SOD GMV / net MV, turnover, `passed` (`true` / `false` / `"with warnings"`), blocks, and warnings.
 
 Overrides: `--sod`, `--trades`, `--prices`, `--poc-data`, `--config`.
 
+### Turnover convention (matches kelaisim)
+
+Turnover is **two-way (gross)**, the same convention as kelaisim's `stats.py`:
+
+```
+turnover = (buy$ + sell$) / position GMV        # GMV = Σ|position MV|, cash excluded
+```
+
+**One-way turnover is exactly half of this** (a full book replace = 200% two-way
+= 100% one-way). The YAML `max_turnover: 0.25` is a **two-way** cap, i.e.
+≈ 12.5% one-way — tighter than a 25% one-way cap would be. The POC baseline
+(previously reported as ~12% one-way) reads ~24% two-way and clears the cap.
+Every JSON output carries a `turnover_convention` field stating the formula so
+numbers are never compared across conventions by accident.
+
+### GMV vs GMV + cash
+
+Two explicit portfolio measures (`Portfolio.gmv` / `Portfolio.gmv_plus_cash`):
+
+- `gmv` — Σ|position MV|, **cash excluded**. Denominator for `max_turnover`
+  and `max_position_concentration` (matches kelaisim's positions-only GMV).
+- `gmv_plus_cash` — deployed capital. Used by `max_portfolio_value` and
+  reported as `projected_portfolio_value`.
+
 ### Risk notes (POC)
 
-- `max_turnover` — one-way; **blocks**
-- `max_portfolio_value` — projected GMV; **blocks**
-- `max_position_concentration` — |MV| / GMV; **blocks**
+- `max_turnover` — two-way / position GMV; **blocks**
+- `max_portfolio_value` — projected GMV + cash; **blocks**
+- `max_position_concentration` — |MV| / position GMV; **blocks**
 - `max_position_size` — abs **share** qty (notional / px); **warning only** (does not block)
 - Order size min/max — off (`enforce_order_size_limits: false`)
+
+### Decimal vs float
+
+ki-ops does all money math in Python `Decimal` for deterministic, auditable
+results (no float representation drift in a pre-trade gate). kelaisim and the
+alpha parquets are `float`/numpy — values are converted once at the boundary
+(`Decimal(str(float(v)))`), so tiny last-digit differences vs sim-reported
+numbers are expected and harmless.
 
 ## Generic SOD / targets
 

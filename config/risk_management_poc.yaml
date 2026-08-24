@@ -4,9 +4,9 @@ risk_management:
 
   # max abs share qty (SOD $ notional / trade-time px); ~max_portfolio_value/2 × conc / 5 historically
   max_position_size: 300000
-  max_portfolio_value: 100000000   # max GMV (~$90M book + headroom)
+  max_portfolio_value: 100000000   # max GMV + cash (~$90M book + headroom)
   max_daily_loss: 2000000
-  max_position_concentration: 0.03 # 3% of GMV
+  max_position_concentration: 0.03 # 3% of position GMV (cash excluded)
 
   max_position_volatility: 0.3
   volatility_lookback: 30
@@ -26,5 +26,7 @@ risk_management:
   pre_market_trading: false
   after_hours_trading: false
 
-  max_turnover: 0.25  # one-way: (buys+sells)/2 / GMV
+  # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
+  # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+  max_turnover: 0.25
   allow_shorts: true
