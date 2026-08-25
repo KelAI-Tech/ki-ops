@@ -152,6 +152,32 @@ print(result.to_dict())  # "passed", violations, warnings, turnover, …
 
 Exit code `2` means a **blocking** check failed.
 
+## Email + Slack job (Airflow-style)
+
+`ki-ops extras notify-perturbs` runs the three perturb commands, captures JSON stdout, and **emails** it. Slack is optional (only if `KI_OPS_SLACK_WEBHOOK_URL` is set). Airflow is not required; [`dags/ki_ops_poc_perturbs.py`](dags/ki_ops_poc_perturbs.py) is an example DAG if you add Airflow later.
+
+On macOS, Mail.app is used when SMTP is unset. **From** is `robert@kelaitech.com` (not iCloud). That address must exist under Mail → Settings → Accounts. If only iCloud is added, send is refused.
+
+```bash
+# one-line ping — From robert@kelaitech.com
+ki-ops extras notify-perturbs --test-email --to robert@kelaitech.com --from-addr robert@kelaitech.com
+
+# full perturb JSON to email (Slack skipped unless a webhook is set)
+ki-ops extras notify-perturbs --to robert@kelaitech.com
+```
+
+SMTP (servers / Linux) instead of Mail.app:
+
+```bash
+export KI_OPS_SMTP_HOST=smtp.gmail.com
+export KI_OPS_SMTP_PORT=587
+export KI_OPS_SMTP_USER=...
+export KI_OPS_SMTP_PASSWORD=...
+export KI_OPS_SMTP_FROM=robert@kelaitech.com
+export KI_OPS_EMAIL_TO=robert@kelaitech.com
+ki-ops extras notify-perturbs --test-email
+```
+
 ## Layout
 
 ```
@@ -162,14 +188,15 @@ config/
 src/ki_ops/
   engine.py, checks/, intents.py, portfolio.py, models.py, config.py
   alpha.py, poc_data.py, cli.py, listing.py, audit.py
-  extras/                      # EMS, fills, risk snapshot
+  extras/                      # EMS, fills, risk snapshot, email/Slack perturb job
 examples/
   sod_lseg_*.csv, trade_intents_lseg_*.csv
   lseg_security_master_dt.csv, lseg_ticker_mapping_dt.csv
   lseg_base_data_us_dt_*.csv, lseg_datastream2_px_*.csv
   sod_positions.csv, target_intents.csv
   extras/                      # EMS Portfolio CSV, small security master
+dags/                          # example Airflow DAG (copy into AIRFLOW_HOME/dags)
 tests/
 ```
 
-Sidecars (not the LSEG perturb path): `ki-ops extras check-ems`, `ki-ops extras summarize-trades`, `ki-ops extras risk-snapshot`, and `ki-ops poc-alpha` (dollar-panel parquet).
+Sidecars (not the LSEG perturb path): `ki-ops extras check-ems`, `ki-ops extras summarize-trades`, `ki-ops extras risk-snapshot`, `ki-ops extras notify-perturbs`, and `ki-ops poc-alpha` (dollar-panel parquet).
