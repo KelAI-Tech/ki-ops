@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from ki_ops.checks import CheckViolation, Severity, block, warn
 from ki_ops.config import RiskManagementSettings
+from ki_ops.listing import ListingStatus
 from ki_ops.models import Order, Portfolio, Side
 from ki_ops.portfolio import project_orders, turnover_ratio
 
@@ -72,6 +73,110 @@ def check_position_and_portfolio_limits(
                     )
                 )
     return out
+
+
+def check_adv_participation(
+    orders: Sequence[Order],
+    adv: Mapping[str, Decimal] | None,
+    settings: RiskManagementSettings,
+) -> list[CheckViolation]:
+    """Warn when live order size exceeds ``max_adv_participation`` × ADV (share ADV)."""
+    if settings.max_adv_participation <= 0 or not adv:
+        return []
+    out: list[CheckViolation] = []
+    seen_missing: set[str] = set()
+    for o in orders:
+        if o.quantity == 0:
+            continue
+        a = adv.get(o.symbol)
+        if a is None or a <= 0:
+            if o.symbol not in seen_missing:
+                seen_missing.add(o.symbol)
+                out.append(
+                    warn(
+                        "MISSING_ADV",
+                        "no ADV in snapshot; liquidity unknown",
+                        o.symbol,
+                    )
+                )
+            continue
+        ratio = abs(o.quantity) / a
+        if ratio > settings.max_adv_participation:
+            out.append(
+                warn(
+                    "MAX_ADV_PARTICIPATION",
+                    f"{ratio:.4f} of ADV > {settings.max_adv_participation}",
+                    o.symbol,
+                )
+            )
+    return out
+
+
+def check_net_exposure(portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
+    """Block a projected book whose |NMV|/GMV exceeds ``max_net_exposure``."""
+    projected = project_orders(portfolio, orders)
+    if projected.gmv <= 0:
+        return []
+    ratio = projected.net_exposure
+    if ratio > settings.max_net_exposure:
+        return [
+            block(
+                "MAX_NET_EXPOSURE",
+                f"{ratio:.4f} > {settings.max_net_exposure}",
+            )
+        ]
+    return []
+
+
+def check_tradability(
+    orders: Sequence[Order],
+    master: Mapping[str, ListingStatus] | None,
+    *,
+    as_of: date,
+) -> list[CheckViolation]:
+    """Warn on live trade intents in inactive / delisted names, or if unknown."""
+    if master is None:
+        return []
+    out: list[CheckViolation] = []
+    seen_unknown: set[str] = set()
+    seen_dead: set[str] = set()
+    for o in orders:
+        if o.quantity == 0:
+            continue
+        rec = master.get(o.symbol)
+        if rec is None:
+            if o.symbol not in seen_unknown:
+                seen_unknown.add(o.symbol)
+                out.append(
+                    warn(
+                        "NOT_IN_SECURITY_MASTER",
+                        "infocode not in security master; tradability unknown",
+                        o.symbol,
+                    )
+                )
+            continue
+        if rec.is_tradable(as_of) or o.symbol in seen_dead:
+            continue
+        seen_dead.add(o.symbol)
+        reason = rec.block_reason(as_of) or "not tradable"
+        out.append(warn("NOT_TRADABLE", reason, o.symbol))
+    return out
+
+
+def drop_untradable_orders(
+    orders: Sequence[Order],
+    master: Mapping[str, ListingStatus] | None,
+    *,
+    as_of: date,
+) -> tuple[list[Order], list[CheckViolation]]:
+    """Drop live tickets in dead names; keep the rest of the book.
+
+    Unknown infocodes stay in the batch (warn only). Zero-qty rows are kept.
+    """
+    findings = check_tradability(orders, master, as_of=as_of)
+    dead = {v.symbol for v in findings if v.code == "NOT_TRADABLE" and v.symbol}
+    kept = [o for o in orders if o.quantity == 0 or o.symbol not in dead]
+    return kept, findings
 
 
 def check_turnover(portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
@@ -164,6 +269,9 @@ def run_all_checks(
     *,
     pnl: Decimal = Decimal("0"),
     vols: Mapping[str, Decimal] | None = None,
+    listing: Mapping[str, ListingStatus] | None = None,
+    as_of: date | None = None,
+    adv: Mapping[str, Decimal] | None = None,
 ) -> list[CheckViolation]:
     vols = vols or {}
     findings: list[CheckViolation] = []
@@ -173,9 +281,14 @@ def run_all_checks(
     findings += check_market_hours(orders, settings)
     findings += check_sell_availability(portfolio, orders, settings)
     findings += check_turnover(portfolio, orders, settings)
+    findings += check_adv_participation(orders, adv, settings)
+    findings += check_net_exposure(portfolio, orders, settings)
     findings += check_position_and_portfolio_limits(portfolio, orders, settings)
     findings += check_volatility(orders, vols, settings)
     findings += check_stop_loss_context(portfolio, settings)
+    if listing is not None:
+        trade_date = as_of or date.today()
+        findings += check_tradability(orders, listing, as_of=trade_date)
     return findings
 
 

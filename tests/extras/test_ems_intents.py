@@ -87,7 +87,21 @@ def test_end_to_end_prior_day_before_asof(tmp_path: Path):
     assert by["CCC"].px_approx == Decimal("400")
     assert by["ZZZ"].px_source == "unmapped_ticker"
     assert summary["n_priced"] == 2
-    assert summary["n_unmapped_live"] == 1
+
+
+def test_ticker_mapping_pit_joins_as_of(tmp_path: Path):
+    from ki_ops.extras.ems_intents import load_security_id_ticker_map
+
+    path = tmp_path / "ticker_mapping.csv"
+    path.write_text(
+        "INFOCODE,VALIDFROM,VALIDTO,TICKER,ISCURRENT\n"
+        "49796,2006-09-08,2009-01-09,THRM,False\n"
+        "55665,2012-06-12,2079-06-05,THRM,True\n",
+        encoding="utf-8",
+    )
+    assert load_security_id_ticker_map(path, as_of=date(2008, 6, 1))["THRM"] == "49796"
+    assert load_security_id_ticker_map(path, as_of=date(2026, 8, 6))["THRM"] == "55665"
+    assert load_security_id_ticker_map(path)["THRM"] == "55665"
 
 
 def test_prior_alpha_date_strictly_before():

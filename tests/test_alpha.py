@@ -154,9 +154,23 @@ def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     )
     px = tmp_path / "px.csv"
     px.write_text("infocode,close\n1001,10\n1002,5\n", encoding="utf-8")
+    master = tmp_path / "master.csv"
+    master.write_text(
+        "INFOCODE,TICKER,STATUSCODE,ISACTIVE,DELISTDATE\n"
+        "1001,AAA,A,True,\n"
+        "1002,BBB,A,True,\n",
+        encoding="utf-8",
+    )
+    poc = tmp_path / "poc.yaml"
+    poc.write_text(
+        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nticker_map: {master}\n",
+        encoding="utf-8",
+    )
     rc = main(
         [
-            "run-perturb",
+            "run-perturb-baseline",
+            "--poc-data",
+            str(poc),
             "--sod",
             str(sod),
             "--trades",
@@ -176,23 +190,59 @@ def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     assert Decimal(out["turnover"]) == Decimal("0.20")
     assert "two-way" in out["turnover_convention"]
     assert out["passed"] is True
+    assert "config_hash" in out
+    assert "sod" in out["input_hashes"]
+    assert out["adv"] is None
+    assert out["ticker_mapping_dt"] is None
+    assert out["security_master"] == f"{master}: tradability_isactive"
+    json_path = tmp_path / "artifact.json"
+    rc2 = main(
+        [
+            "run-perturb-baseline",
+            "--poc-data",
+            str(poc),
+            "--sod",
+            str(sod),
+            "--trades",
+            str(trades),
+            "--config",
+            str(cfg),
+            "--prices",
+            str(px),
+            "--json-out",
+            str(json_path),
+        ]
+    )
+    assert rc2 == 0
+    disk = json.loads(json_path.read_text(encoding="utf-8"))
+    assert disk["config_hash"] == out["config_hash"]
+    assert disk["passed"] is True
 
 
-def test_real_lseg_baseline_allows_without_position_or_order_size(capsys):
-    """Real POC CSVs: ~24% two-way TO, no MAX_POSITION_SIZE / MAX_ORDER_SIZE."""
+def test_real_lseg_baseline_warns_adv_and_drops_delisted_name(capsys):
+    """Delisted 56992 is dropped (warn); infocode 335446 exceeds 10% of ADV20_ADJ (warn)."""
     import json
 
     from ki_ops.cli import main
 
     sod = ROOT / "examples" / "sod_lseg_20260805.csv"
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
-    if not sod.is_file() or not trades.is_file():
+    adv = ROOT / "examples" / "lseg_base_data_us_dt_20260804.csv"
+    if not sod.is_file() or not trades.is_file() or not adv.is_file():
         pytest.skip("LSEG example CSVs not present")
 
-    rc = main(["run-perturb", "--sod", str(sod), "--trades", str(trades)])
+    rc = main(["run-perturb-baseline", "--sod", str(sod), "--trades", str(trades)])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert out["passed"] is True
+    assert out["passed"] == "with warnings"
+    assert out["violation_codes"] == []
+    assert "MAX_ADV_PARTICIPATION" in out["warning_codes"]
+    assert Decimal(out["max_adv_participation"]) == Decimal("0.10")
+    assert Path(out["adv"]).name == "lseg_base_data_us_dt_20260804.csv"
+    assert out["security_master"].endswith("lseg_security_master_dt.csv: tradability_isactive")
+    assert Path(out["ticker_mapping_dt"]).name == "lseg_ticker_mapping_dt.csv"
+    assert "NOT_TRADABLE" in out["warning_codes"]
+    assert "NOT_TRADABLE" not in out["violation_codes"]
     assert Decimal(out["turnover"]) < Decimal("0.25")
     assert "two-way" in out["turnover_convention"]
     assert "MAX_POSITION_SIZE" not in out["violation_codes"]
@@ -200,7 +250,7 @@ def test_real_lseg_baseline_allows_without_position_or_order_size(capsys):
     assert "MIN_ORDER_SIZE" not in out["violation_codes"]
 
 
-def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
+def test_run_perturb_var_checks_breaches_turnover(tmp_path: Path, capsys):
     import json
 
     from ki_ops.cli import main
@@ -209,22 +259,23 @@ def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
+    if not (ROOT / "examples" / "lseg_base_data_us_dt_20260804.csv").is_file():
+        pytest.skip("ADV snapshot CSV not present")
 
-    out_csv = tmp_path / "trade_intents_lseg_20260806_scaled.csv"
+    trades_copy = tmp_path / "trade_intents_lseg_20260806.csv"
+    trades_copy.write_text(trades.read_text(encoding="utf-8"), encoding="utf-8")
     rc = main(
         [
-            "run-perturb-turnover",
+            "run-perturb-var-checks",
             "--sod",
             str(sod),
             "--trades",
-            str(trades),
-            "--scaled-trades",
-            str(out_csv),
+            str(trades_copy),
         ]
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 2
-    assert out["perturb"] == "max-turnover"
+    assert out["perturb"] == "var-checks"
     assert out["sod_source"] == "csv"
     assert out["passed"] is False
     assert Decimal(out["turnover"]) >= Decimal("0.25")
@@ -232,12 +283,16 @@ def test_run_perturb_turnover_breach(tmp_path: Path, capsys):
     # so allow ~1% slack for the cash generated by net selling.
     gmv = Decimal(out["projected_portfolio_value"])
     assert Decimal("89000000") <= gmv <= Decimal("91000000")
+    assert Decimal(out["max_net_exposure"]) == Decimal("0.10")
+    assert Decimal(out["max_adv_participation"]) == Decimal("0.10")
     assert out["violation_codes"] == ["MAX_TURNOVER"]
-    assert out["prices_csv"] and Path(out["prices_csv"]).name == "ds2_px_20260804.csv"
-    scaled = Path(out["trade_intents_file"])
-    assert scaled.name == "trade_intents_lseg_20260806_scaled.csv"
-    assert scaled.is_file()
-    assert scaled.read_text(encoding="utf-8").startswith("ticker,infocode,quantity")
+    assert "MAX_ADV_PARTICIPATION" in out["warning_codes"]
+    assert "NOT_TRADABLE" in out["warning_codes"]
+    assert out["prices_csv"] and Path(out["prices_csv"]).name == "lseg_datastream2_px_20260804.csv"
+    var_checks = Path(out["trade_intents_file"])
+    assert var_checks.name == "trade_intents_lseg_20260806_var_checks.csv"
+    assert var_checks.is_file()
+    assert var_checks.read_text(encoding="utf-8").startswith("ticker,infocode,quantity")
 
 
 def test_run_perturb_zero_turnover(tmp_path: Path, capsys):
@@ -249,17 +304,18 @@ def test_run_perturb_zero_turnover(tmp_path: Path, capsys):
     trades = ROOT / "examples" / "trade_intents_lseg_20260806.csv"
     if not sod.is_file() or not trades.is_file():
         pytest.skip("LSEG example CSVs not present")
+    if not (ROOT / "examples" / "lseg_base_data_us_dt_20260804.csv").is_file():
+        pytest.skip("ADV snapshot CSV not present")
 
-    out_csv = tmp_path / "trade_intents_lseg_20260806_zero.csv"
+    trades_copy = tmp_path / "trade_intents_lseg_20260806.csv"
+    trades_copy.write_text(trades.read_text(encoding="utf-8"), encoding="utf-8")
     rc = main(
         [
             "run-perturb-zero",
             "--sod",
             str(sod),
             "--trades",
-            str(trades),
-            "--scaled-trades",
-            str(out_csv),
+            str(trades_copy),
         ]
     )
     out = json.loads(capsys.readouterr().out)

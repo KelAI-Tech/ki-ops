@@ -1,4 +1,4 @@
-"""POC input manifest: SOD, trade intents, trade-time prices, ticker map."""
+"""POC input manifest: SOD, trade intents, trade-time prices, ticker map, ADV."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ class PocDataPaths:
     trades: Path
     prices: Path
     ticker_map: Path
+    ticker_mapping: Path | None
+    adv: Path | None
     config_file: Path
 
 
@@ -49,5 +51,11 @@ def _paths_from_mapping(raw: Mapping[str, Any], *, config_file: Path) -> PocData
         trades=resolve_config_path(str(raw["trades"]), config_file=config_file),
         prices=resolve_config_path(str(raw["prices"]), config_file=config_file),
         ticker_map=resolve_config_path(str(raw["ticker_map"]), config_file=config_file),
+        ticker_mapping=(
+            resolve_config_path(str(raw["ticker_mapping"]), config_file=config_file)
+            if raw.get("ticker_mapping")
+            else None
+        ),
+        adv=resolve_config_path(str(raw["adv"]), config_file=config_file) if raw.get("adv") else None,
         config_file=config_file.resolve(),
     )

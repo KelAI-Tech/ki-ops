@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -274,9 +274,30 @@ def write_turnover_csv(days: Sequence[AlphaDayResult], path: str | Path) -> Path
     return path
 
 
-def load_infocode_ticker_map(path: str | Path) -> dict[str, str]:
-    """Return ``{INFOCODE: TICKER}`` from ``KELAI.LSEG.SECURITY_MASTER_DT``-style CSV."""
+def load_infocode_ticker_map(
+    path: str | Path,
+    *,
+    as_of: date | None = None,
+) -> dict[str, str]:
+    """Return ``{INFOCODE: TICKER}``.
+
+    ``TICKER_MAPPING_DT`` CSVs (VALIDFROM/VALIDTO) are resolved as-of ``as_of``
+    (or ``ISCURRENT`` when ``as_of`` is omitted). Security-master snapshots stay
+    current-ticker only.
+    """
+    from ki_ops.listing import (
+        current_infocode_to_ticker,
+        infocode_to_ticker_as_of,
+        load_ticker_intervals,
+        ticker_mapping_has_intervals,
+    )
+
     path = Path(path)
+    if ticker_mapping_has_intervals(path):
+        intervals = load_ticker_intervals(path)
+        if as_of is None:
+            return current_infocode_to_ticker(intervals)
+        return infocode_to_ticker_as_of(intervals, as_of)
     out: dict[str, str] = {}
     with path.open(encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -634,7 +655,11 @@ def turnover_breach_scale(
 
 
 def relax_settings_for_turnover_perturb(settings: RiskManagementSettings) -> RiskManagementSettings:
-    """Isolate MAX_TURNOVER — other POC limits are relaxed for this scenario."""
+    """Isolate MAX_TURNOVER — size/concentration/portfolio caps are relaxed.
+
+    ``max_adv_participation`` and ``max_net_exposure`` stay as configured so a
+    turnover stress still surfaces liquidity and market-neutral breaches.
+    """
     return replace(
         settings,
         max_order_size=Decimal("100000000"),
@@ -682,7 +707,7 @@ def missing_price_findings(
     return out
 
 
-PerturbScenario = Literal["baseline", "max-turnover", "zero-turnover"]
+PerturbScenario = Literal["baseline", "var-checks", "zero-turnover"]
 
 
 def run_lseg_perturb(
@@ -700,11 +725,18 @@ def run_lseg_perturb(
     price_by_infocode: Mapping[str, Decimal] | None = None,
     ticker_by_infocode: Mapping[str, str] | None = None,
     ticker_map_csv: str | Path | None = None,
-    scaled_trades_csv: str | Path | None = None,
+    ticker_mapping_csv: str | Path | None = None,
+    adv_csv: str | Path | None = None,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
-    """POC risk check: same SOD + trade CSVs; optional scale/relax for one breach."""
-    from ki_ops.intents import load_sod_positions_csv
+    """POC risk check: same SOD + trade CSVs; optional scale or zero-qty book."""
+    from datetime import date as date_cls
 
+    from ki_ops.audit import input_hashes, settings_hash
+    from ki_ops.intents import load_sod_positions_csv
+    from ki_ops.listing import listing_csv_has_status_fields, load_adv_map, load_listing_status
+
+    trade_as_of = as_of or date_cls(2026, 8, 6)
     settings = load_risk_settings(config_path)
     if sod is None:
         if sod_csv is None:
@@ -717,7 +749,7 @@ def run_lseg_perturb(
         sod = portfolio_at_trade_time_prices(sod, price_by_infocode)
 
     trades_out = Path(trades_csv) if trades_csv else None
-    if scenario == "max-turnover":
+    if scenario == "var-checks":
         settings = relax_settings_for_turnover_perturb(settings)
         orders = scale_orders_to_turnover_and_gmv(
             sod, orders, target_turnover=target_turnover, target_gmv=target_gmv
@@ -725,14 +757,14 @@ def run_lseg_perturb(
         if trades_out is not None:
             tickers = dict(ticker_by_infocode or {})
             tickers.update(tickers_from_trade_intents_csv(trades_out))
-            dest = Path(scaled_trades_csv) if scaled_trades_csv else trades_out.with_name(f"{trades_out.stem}_scaled.csv")
+            dest = trades_out.with_name(f"{trades_out.stem}_var_checks.csv")
             trades_out = write_trade_intents_csv(orders, dest, ticker_by_infocode=tickers)
     elif scenario == "zero-turnover":
         orders = zero_order_quantities(orders)
         if trades_out is not None:
             tickers = dict(ticker_by_infocode or {})
             tickers.update(tickers_from_trade_intents_csv(trades_out))
-            dest = Path(scaled_trades_csv) if scaled_trades_csv else trades_out.with_name(f"{trades_out.stem}_zero.csv")
+            dest = trades_out.with_name(f"{trades_out.stem}_zero.csv")
             trades_out = write_trade_intents_csv(
                 orders, dest, ticker_by_infocode=tickers, keep_zero_qty=True
             )
@@ -741,8 +773,13 @@ def run_lseg_perturb(
     else:
         raise ValueError(f"Unknown perturb scenario: {scenario}")
 
+    listing = None
+    if ticker_map_csv and listing_csv_has_status_fields(ticker_map_csv):
+        listing = load_listing_status(ticker_map_csv)
+    adv = load_adv_map(adv_csv) if adv_csv else None
+
     engine = PreTradeEngine(settings=settings)
-    result = engine.evaluate(sod, list(orders))
+    result = engine.evaluate(sod, list(orders), listing=listing, as_of=trade_as_of, adv=adv)
     if price_by_infocode:
         findings = missing_price_findings(sod, list(orders), price_by_infocode)
         extra_blocks = tuple(v for v in findings if v.severity is Severity.BLOCK)
@@ -756,25 +793,49 @@ def run_lseg_perturb(
             )
     codes = sorted({v.code for v in result.violations})
     warn_codes = sorted({v.code for v in result.warnings})
+    hashes = input_hashes(
+        {
+            "config": config_path,
+            "ticker_map": ticker_map_csv,
+            "ticker_mapping": ticker_mapping_csv,
+            "adv": adv_csv,
+            "prices": prices_csv,
+            "sod": sod_csv,
+            "trades": trades_csv,
+            "trade_intents_out": trades_out,
+        }
+    )
     return {
         "perturb": scenario,
         "sod_source": "csv",
+        "as_of": trade_as_of.isoformat(),
         "config": str(config_path) if config_path else None,
-        "ticker_map": str(ticker_map_csv) if ticker_map_csv else None,
+        "config_hash": settings_hash(settings),
+        "input_hashes": hashes,
+        "security_master": (
+            f"{ticker_map_csv}: tradability_isactive" if ticker_map_csv else None
+        ),
+        "ticker_mapping_dt": str(ticker_mapping_csv) if ticker_mapping_csv else None,
+        "adv": str(adv_csv) if adv_csv else None,
         "prices_csv": str(prices_csv) if prices_csv else None,
         "sod_csv": str(sod_csv) if sod_csv else None,
         "trade_intents_file": str(trades_out) if trades_out else None,
         "max_turnover": format_decimal(settings.max_turnover),
+        "max_net_exposure": format_decimal(settings.max_net_exposure),
+        "max_adv_participation": format_decimal(settings.max_adv_participation),
         "max_order_size": format_decimal(settings.max_order_size),
         "n_priced": sum(1 for o in orders if o.limit_price != UNIT_PRICE),
         "n_sod_names": len(sod.holdings),
         "sod_gmv": format_decimal(sod.gmv),
         "sod_net_mv": format_decimal(sod.total_value),
+        "sod_nmv": format_decimal(sod.nmv),
+        "sod_net_exposure": format_decimal(sod.net_exposure),
         "n_orders": len(result.trade_intents),
         "turnover": format_decimal(result.turnover),
         "turnover_convention": TURNOVER_CONVENTION,
         "passed": passed_status(result.allowed, result.warnings),
         "projected_portfolio_value": format_decimal(result.projected_portfolio_value),
+        "projected_net_exposure": format_decimal(result.projected_net_exposure),
         "violation_codes": codes,
         "violations": [v.to_dict() for v in result.violations],
         "warning_codes": warn_codes,

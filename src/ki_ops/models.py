@@ -122,6 +122,11 @@ class Portfolio:
         return equity + self.cash
 
     @property
+    def nmv(self) -> Decimal:
+        """Σ signed position MV, cash excluded (longs − |shorts|)."""
+        return sum((h.market_value for h in self.holdings.values()), Decimal("0"))
+
+    @property
     def gmv(self) -> Decimal:
         """Σ|position MV|, cash excluded.
 
@@ -129,6 +134,13 @@ class Portfolio:
         matching kelaisim, where GMV is positions-only.
         """
         return sum((abs(h.market_value) for h in self.holdings.values()), Decimal("0"))
+
+    @property
+    def net_exposure(self) -> Decimal:
+        """|NMV| / GMV. Zero when GMV is zero."""
+        if self.gmv <= 0:
+            return Decimal("0")
+        return abs(self.nmv) / self.gmv
 
     @property
     def gmv_plus_cash(self) -> Decimal:

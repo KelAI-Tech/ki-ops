@@ -1,4 +1,5 @@
-# Risk Management Settings
+# Risk limits for the small example book (examples/sod_positions.csv).
+# Production/POC limits live in risk_management_poc.yaml for now.
 risk_management:
   enabled: true
 
@@ -33,6 +34,11 @@ risk_management:
   # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
   # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
   max_turnover: 0.25
+
+  # |NMV|/GMV on the projected book. 1.0 disables the band.
+  max_net_exposure: 1.0
+  # Max abs(order shares) / ADV. 0 disables the check.
+  max_adv_participation: 0
 
   # Shorting
   allow_shorts: true  # Permit sells that exceed current holdings

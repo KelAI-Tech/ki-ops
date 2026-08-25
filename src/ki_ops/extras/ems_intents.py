@@ -88,13 +88,34 @@ def load_ems_trade_intents_csv(path: str | Path) -> list[EmsIntent]:
     return out
 
 
-def load_security_id_ticker_map(path: str | Path | None) -> dict[str, str]:
-    """Return ``{SYMBOL: security_id}``. CSV needs ``security_id`` and ``symbol`` (any case)."""
+def load_security_id_ticker_map(
+    path: str | Path | None,
+    *,
+    as_of: date | None = None,
+) -> dict[str, str]:
+    """Return ``{SYMBOL: security_id}``.
+
+    ``TICKER_MAPPING_DT`` interval CSVs are resolved as-of ``as_of`` (or
+    ``ISCURRENT`` if omitted). Snapshot maps (security master) stay last-row-wins
+    current ticker.
+    """
     if path is None:
         return {}
     path = Path(path)
     if not path.is_file():
         return {}
+    from ki_ops.listing import (
+        current_ticker_to_infocode,
+        load_ticker_intervals,
+        ticker_mapping_has_intervals,
+        ticker_to_infocode_as_of,
+    )
+
+    if ticker_mapping_has_intervals(path):
+        intervals = load_ticker_intervals(path)
+        if as_of is None:
+            return current_ticker_to_infocode(intervals)
+        return ticker_to_infocode_as_of(intervals, as_of)
     mapping: dict[str, str] = {}
     with path.open(encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -370,7 +391,7 @@ def approximate_ems_prices_from_alpha(
     panel = load_alpha_dollar_panel(alpha_parquet, end=str(as_of_date))
     prior_ts = prior_alpha_date(panel, as_of_date)
     dollars = alpha_dollars_by_id(panel, prior_ts)
-    id_map = load_security_id_ticker_map(id_map_csv)
+    id_map = load_security_id_ticker_map(id_map_csv, as_of=as_of_date)
     enriched = enrich_intents_with_prior_alpha_px(intents, dollars, id_map)
     prior_str = str(prior_ts.date()) if hasattr(prior_ts, "date") else str(prior_ts)[:10]
     summary = summarize_px_coverage(enriched, prior_date=prior_str)
@@ -397,7 +418,7 @@ def evaluate_ems_against_alpha_sod(
     prior_ts = prior_alpha_date(panel, as_of_date)
     sod = portfolio_from_dollar_row(panel.loc[prior_ts])
     dollars = alpha_dollars_by_id(panel, prior_ts)
-    id_map = load_security_id_ticker_map(id_map_csv)
+    id_map = load_security_id_ticker_map(id_map_csv, as_of=as_of_date)
     enriched = enrich_intents_with_prior_alpha_px(intents, dollars, id_map)
     orders = intents_to_orders(enriched)
     result = engine.evaluate(sod, orders)

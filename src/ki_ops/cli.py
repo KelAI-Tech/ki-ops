@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
 DEFAULT_TARGETS = ROOT / "examples" / "target_intents.csv"
 DEFAULT_UNIVERSE = ROOT / "examples" / "extras" / "security_master.csv"
-DEFAULT_CONFIG = ROOT / "config" / "risk_management.yaml"
+DEFAULT_CONFIG = ROOT / "config" / "risk_management_small_book.yaml"
 DEFAULT_POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 DEFAULT_POC_ALPHA = ROOT / "examples" / (
     "df_combo_lseg_v2c_00233cb52db9baa05a20329d01af6420f88241854b6c66b3e9da066884abfae8"
@@ -45,8 +45,10 @@ def _poc_default_label(key: str) -> str:
     """
     try:
         path = getattr(load_poc_data_paths(DEFAULT_POC_DATA), key)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, AttributeError):
         return f"{key} in POC manifest"
+    if path is None:
+        return f"{key} in POC manifest (optional)"
     try:
         shown: Path = path.relative_to(ROOT)
     except ValueError:
@@ -143,18 +145,39 @@ def _parser() -> argparse.ArgumentParser:
             default=None,
             help=f"Datastream2 px CSV (default: {_poc_default_label('prices')})",
         )
+        parser.add_argument(
+            "--adv",
+            type=Path,
+            default=None,
+            help=f"ADV snapshot CSV (default: {_poc_default_label('adv')})",
+        )
+        parser.add_argument(
+            "--ticker-mapping",
+            type=Path,
+            default=None,
+            help=f"TICKER_MAPPING_DT interval CSV (default: {_poc_default_label('ticker_mapping')})",
+        )
+        parser.add_argument(
+            "--as-of",
+            default="2026-08-06",
+            help="trade date for tradability / delist checks (YYYY-MM-DD)",
+        )
+        parser.add_argument(
+            "--json-out",
+            type=Path,
+            default=None,
+            help="write the same JSON artifact (with input/config hashes) to FILE",
+        )
 
     rp = sub.add_parser(
-        "run-perturb",
-        aliases=["perturb"],
-        help="POC baseline: sod_lseg_20260805.csv + trade_intents_lseg_20260806.csv (~24% two-way TO)",
+        "run-perturb-baseline",
+        help="POC baseline: full pre-trade gate on sod + trade intents (~24% two-way TO)",
     )
     _add_poc_csv_args(rp)
 
     pt = sub.add_parser(
-        "run-perturb-turnover",
-        aliases=["perturb-turnover", "perturb-to"],
-        help="same POC CSVs; scale trades to breach max_turnover (two-way)",
+        "run-perturb-var-checks",
+        help="scale trades above max_turnover, then run the full pre-trade gate",
     )
     _add_poc_csv_args(pt)
     pt.add_argument(
@@ -167,25 +190,12 @@ def _parser() -> argparse.ArgumentParser:
         default="90000000",
         help="projected GMV after scaled trades (default 90000000)",
     )
-    pt.add_argument(
-        "--scaled-trades",
-        type=Path,
-        default=None,
-        help="write scaled trade-intent CSV (default: <trades>_scaled.csv)",
-    )
 
     pz = sub.add_parser(
         "run-perturb-zero",
-        aliases=["perturb-zero", "perturb-z"],
-        help="same POC CSVs; zero all trade quantities (turnover 0)",
+        help="zero all trade quantities, then run the full pre-trade gate (turnover 0)",
     )
     _add_poc_csv_args(pz)
-    pz.add_argument(
-        "--scaled-trades",
-        type=Path,
-        default=None,
-        help="write zeroed trade-intent CSV (default: <trades>_zero.csv)",
-    )
 
     # Sidecar features (EMS / filled trades / risk snapshot) — not the POC path
     extras = sub.add_parser("extras", help="optional sidecars: EMS, filled trades, risk snapshot")
@@ -224,7 +234,7 @@ def _parser() -> argparse.ArgumentParser:
         "--id-map",
         type=Path,
         default=None,
-        help="CSV with security_id,symbol to join tickers to parquet SOD names",
+        help="CSV with security_id,symbol — or TICKER_MAPPING_DT intervals (PIT as-of --as-of)",
     )
     px.add_argument(
         "--out",
@@ -323,12 +333,16 @@ def _check_ems(args) -> int:
 
     settings = load_risk_settings(args.poc_config)
     engine = PreTradeEngine(settings=settings)
+    id_map = args.id_map
+    if id_map is None:
+        poc = load_poc_data_paths(getattr(args, "poc_data", None))
+        id_map = poc.ticker_mapping
     summary = evaluate_ems_against_alpha_sod(
         args.intents_csv,
         args.alpha_parquet,
         engine,
         as_of=args.as_of,
-        id_map_csv=args.id_map,
+        id_map_csv=id_map,
     )
     enriched = summary.pop("_enriched")
     out = args.out
@@ -396,11 +410,19 @@ def _resolve_poc_paths(args) -> tuple[Path, Path, Path]:
 
 
 def _run_perturb_breach(args, *, scenario: str) -> int:
+    from datetime import date
+
     from ki_ops.alpha import load_infocode_ticker_map, run_lseg_perturb
+    from ki_ops.audit import write_json_out
 
     sod, trades, prices = _resolve_poc_paths(args)
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
-    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "max-turnover" else Decimal("0.26")
+    as_of = date.fromisoformat(str(args.as_of))
+    mapping = getattr(args, "ticker_mapping", None) or poc.ticker_mapping
+    tickers = load_infocode_ticker_map(poc.ticker_map)
+    if mapping:
+        tickers.update(load_infocode_ticker_map(mapping, as_of=as_of))
+    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "var-checks" else Decimal("0.26")
     out = run_lseg_perturb(
         _load_orders(trades),
         scenario=scenario,  # type: ignore[arg-type]
@@ -412,11 +434,15 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         target_gmv=Decimal(getattr(args, "target_gmv", "90000000")),
         prices_csv=prices,
         price_by_infocode=_load_trade_time_prices(prices),
-        ticker_by_infocode=load_infocode_ticker_map(poc.ticker_map),
+        ticker_by_infocode=tickers,
         ticker_map_csv=poc.ticker_map,
-        scaled_trades_csv=getattr(args, "scaled_trades", None),
+        ticker_mapping_csv=mapping,
+        adv_csv=getattr(args, "adv", None) or poc.adv,
+        as_of=as_of,
     )
     print(json.dumps(out, indent=2, default=str))
+    if getattr(args, "json_out", None):
+        write_json_out(args.json_out, out)
     return 0 if out.get("passed") else 2
 
 
@@ -430,13 +456,13 @@ def main(argv: list[str] | None = None) -> int:
     if command == "extras":
         return _extras(args)
 
-    if command in {"run-perturb", "perturb"}:
+    if command == "run-perturb-baseline":
         return _run_perturb(args)
 
-    if command in {"run-perturb-turnover", "perturb-turnover", "perturb-to"}:
-        return _run_perturb_breach(args, scenario="max-turnover")
+    if command == "run-perturb-var-checks":
+        return _run_perturb_breach(args, scenario="var-checks")
 
-    if command in {"run-perturb-zero", "perturb-zero", "perturb-z"}:
+    if command == "run-perturb-zero":
         return _run_perturb_breach(args, scenario="zero-turnover")
 
     settings = load_risk_settings(args.config)

@@ -22,7 +22,7 @@ from ki_ops.models import Holding, Order, Side
 from ki_ops.portfolio import portfolio_from_holdings, turnover_ratio
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "config" / "risk_management.yaml"
+CONFIG = ROOT / "config" / "risk_management_small_book.yaml"
 POC_CONFIG = ROOT / "config" / "risk_management_poc.yaml"
 EXAMPLES = ROOT / "examples"
 TS = datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)
@@ -52,6 +52,7 @@ def test_load_risk_settings_matches_yaml():
     assert s.allow_shorts is True
     assert s.max_position_size == Decimal("4000")
     assert s.max_turnover == Decimal("0.25")  # two-way (≈ 12.5% one-way)
+    assert s.max_adv_participation == Decimal("0")
     assert s.max_portfolio_value == Decimal("200000")
 
 
@@ -65,8 +66,14 @@ def test_poc_data_manifest_resolves():
     assert poc.ticker_map.is_file()
     assert poc.sod.name == "sod_lseg_20260805.csv"
     assert poc.trades.name == "trade_intents_lseg_20260806.csv"
-    assert poc.prices.name == "ds2_px_20260804.csv"
-    assert poc.ticker_map.name == "lseg_security_master.csv"
+    assert poc.prices.name == "lseg_datastream2_px_20260804.csv"
+    assert poc.ticker_map.name == "lseg_security_master_dt.csv"
+    assert poc.ticker_mapping is not None
+    assert poc.ticker_mapping.is_file()
+    assert poc.ticker_mapping.name == "lseg_ticker_mapping_dt.csv"
+    assert poc.adv is not None
+    assert poc.adv.is_file()
+    assert poc.adv.name == "lseg_base_data_us_dt_20260804.csv"
 
 
 def test_volatility_blocks_when_above_limit():
@@ -383,7 +390,7 @@ def test_real_lseg_examples_breach_max_turnover():
 
     sod_path = EXAMPLES / "sod_lseg_20260805.csv"
     trd_path = EXAMPLES / "trade_intents_lseg_20260806.csv"
-    px_path = EXAMPLES / "ds2_px_20260804.csv"
+    px_path = EXAMPLES / "lseg_datastream2_px_20260804.csv"
     if not sod_path.is_file() or not trd_path.is_file() or not px_path.is_file():
         pytest.skip("LSEG example CSVs not present")
 
@@ -425,7 +432,7 @@ def test_real_lseg_examples_zero_trades_have_zero_turnover(tmp_path: Path):
 
     sod_path = EXAMPLES / "sod_lseg_20260805.csv"
     trd_path = EXAMPLES / "trade_intents_lseg_20260806.csv"
-    px_path = EXAMPLES / "ds2_px_20260804.csv"
+    px_path = EXAMPLES / "lseg_datastream2_px_20260804.csv"
     if not sod_path.is_file() or not trd_path.is_file() or not px_path.is_file():
         pytest.skip("LSEG example CSVs not present")
 
