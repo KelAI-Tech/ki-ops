@@ -1,4 +1,4 @@
-"""POC input manifest: SOD, trade intents, trade-time prices, ticker map, ADV."""
+"""POC input manifest: SOD, trade intents, trade-time prices, security master, ADV."""
 
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ class PocDataPaths:
     sod: Path
     trades: Path
     prices: Path
-    ticker_map: Path
+    security_master: Path
     ticker_mapping: Path | None
     adv: Path | None
     config_file: Path
 
 
 def load_poc_data_paths(path: str | Path | None = None) -> PocDataPaths:
-    """Load SOD / trades / prices / ticker_map paths from a POC manifest YAML."""
+    """Load SOD / trades / prices / security_master paths from a POC manifest YAML."""
     if path:
         candidates = [Path(path)]
     else:
@@ -38,19 +38,19 @@ def load_poc_data_paths(path: str | Path | None = None) -> PocDataPaths:
         return _paths_from_mapping(raw, config_file=cfg)
     raise FileNotFoundError(
         "POC data manifest not found; expected config/poc_pos_and_px.yaml "
-        "(sod, trades, prices, ticker_map keys)"
+        "(sod, trades, prices, security_master keys)"
     )
 
 
 def _paths_from_mapping(raw: Mapping[str, Any], *, config_file: Path) -> PocDataPaths:
-    missing = [k for k in ("sod", "trades", "prices", "ticker_map") if not raw.get(k)]
+    missing = [k for k in ("sod", "trades", "prices", "security_master") if not raw.get(k)]
     if missing:
         raise ValueError(f"POC manifest {config_file} missing keys: {', '.join(missing)}")
     return PocDataPaths(
         sod=resolve_config_path(str(raw["sod"]), config_file=config_file),
         trades=resolve_config_path(str(raw["trades"]), config_file=config_file),
         prices=resolve_config_path(str(raw["prices"]), config_file=config_file),
-        ticker_map=resolve_config_path(str(raw["ticker_map"]), config_file=config_file),
+        security_master=resolve_config_path(str(raw["security_master"]), config_file=config_file),
         ticker_mapping=(
             resolve_config_path(str(raw["ticker_mapping"]), config_file=config_file)
             if raw.get("ticker_mapping")

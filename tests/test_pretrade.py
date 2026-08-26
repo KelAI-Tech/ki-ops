@@ -63,17 +63,32 @@ def test_poc_data_manifest_resolves():
     assert poc.sod.is_file()
     assert poc.trades.is_file()
     assert poc.prices.is_file()
-    assert poc.ticker_map.is_file()
+    assert poc.security_master.is_file()
     assert poc.sod.name == "sod_lseg_20260805.csv"
     assert poc.trades.name == "trade_intents_lseg_20260806.csv"
     assert poc.prices.name == "lseg_datastream2_px_20260804.csv"
-    assert poc.ticker_map.name == "lseg_security_master_dt.csv"
+    assert poc.security_master.name == "lseg_security_master_dt.csv"
     assert poc.ticker_mapping is not None
     assert poc.ticker_mapping.is_file()
     assert poc.ticker_mapping.name == "lseg_ticker_mapping_dt.csv"
     assert poc.adv is not None
     assert poc.adv.is_file()
     assert poc.adv.name == "lseg_base_data_us_dt_20260804.csv"
+
+
+def test_poc_manifest_rejects_legacy_ticker_map_key(tmp_path: Path):
+    from ki_ops.poc_data import load_poc_data_paths
+
+    manifest = tmp_path / "legacy.yaml"
+    manifest.write_text(
+        "sod: examples/sod_lseg_20260805.csv\n"
+        "trades: examples/trade_intents_lseg_20260806.csv\n"
+        "prices: examples/lseg_datastream2_px_20260804.csv\n"
+        "ticker_map: examples/lseg_security_master_dt.csv\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="security_master"):
+        load_poc_data_paths(manifest)
 
 
 def test_volatility_blocks_when_above_limit():

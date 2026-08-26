@@ -5,7 +5,7 @@ trades: examples/trade_intents_lseg_20260806.csv
 prices: examples/lseg_datastream2_px_20260804.csv
 # SECURITY_MASTER_DT export — tradability only (ISACTIVE, STATUSCODE, DELISTDATE).
 # Identifies which stocks may be traded; not used for ticker identity.
-ticker_map: examples/lseg_security_master_dt.csv
+security_master: examples/lseg_security_master_dt.csv
 # TICKER_MAPPING_DT export — point-in-time INFOCODE ↔ ticker (VALIDFROM/VALIDTO).
 ticker_mapping: examples/lseg_ticker_mapping_dt.csv
 # ADV snapshot from KELAI.LSEG_CANARY.BASE_DATA_US_DT (2026-08-04).

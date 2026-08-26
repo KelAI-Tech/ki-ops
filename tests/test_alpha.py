@@ -163,7 +163,7 @@ def test_run_perturb_uses_sod_and_trade_csv(tmp_path: Path, capsys):
     )
     poc = tmp_path / "poc.yaml"
     poc.write_text(
-        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nticker_map: {master}\n",
+        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nsecurity_master: {master}\n",
         encoding="utf-8",
     )
     rc = main(

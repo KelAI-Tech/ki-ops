@@ -77,5 +77,5 @@ def test_cli_test_email_skips_perturbs():
             rc = main(["extras", "notify-perturbs", "--test-email", "--to", "robert@kelaitech.com"])
     run.assert_not_called()
     assert rc == 0
-    assert disp.call_args.kwargs["subject"] == "ki-ops email test"
-    assert disp.call_args.kwargs["body"] == "ki-ops email test.\n"
+    assert disp.call_args.kwargs["subject"] == "ki-ops notify test"
+    assert disp.call_args.kwargs["body"] == "ki-ops notify test.\n"

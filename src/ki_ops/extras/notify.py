@@ -13,7 +13,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Mapping, Sequence
+
+from ki_ops.config import REPO_ROOT
 
 SLACK_TEXT_LIMIT = 39_000
 
@@ -26,6 +29,9 @@ ENV_EMAIL_TO = "KI_OPS_EMAIL_TO"
 ENV_SMTP_STARTTLS = "KI_OPS_SMTP_STARTTLS"
 ENV_SLACK_WEBHOOK = "KI_OPS_SLACK_WEBHOOK_URL"
 ENV_EMAIL_TRANSPORT = "KI_OPS_EMAIL_TRANSPORT"
+ENV_NOTIFY_ENV_FILE = "KI_OPS_NOTIFY_ENV_FILE"
+
+DEFAULT_NOTIFY_ENV = REPO_ROOT / "config" / "notify.env"
 
 DEFAULT_EMAIL_TO = "robert@kelaitech.com"
 DEFAULT_EMAIL_FROM = "robert@kelaitech.com"
@@ -69,8 +75,58 @@ def _resolve_transport(src: Mapping[str, str], smtp_host: str | None) -> str:
     return "sendmail"
 
 
-def load_notify_settings(env: Mapping[str, str] | None = None) -> NotifySettings:
-    src = env if env is not None else os.environ
+def load_dotenv_file(path: str | Path) -> dict[str, str]:
+    """Parse a simple KEY=VALUE env file (``#`` comments, no export prefix)."""
+    out: dict[str, str] = {}
+    p = Path(path)
+    if not p.is_file():
+        return out
+    for line in p.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].strip()
+        if "=" not in stripped:
+            continue
+        key, _, val = stripped.partition("=")
+        key = key.strip()
+        val = val.strip().strip("'").strip('"')
+        if key:
+            out[key] = val
+    return out
+
+
+def notify_env_candidates(explicit: str | Path | None = None) -> list[Path]:
+    if explicit:
+        return [Path(explicit)]
+    from_env = (os.environ.get(ENV_NOTIFY_ENV_FILE) or "").strip()
+    if from_env:
+        return [Path(from_env)]
+    return [Path.cwd() / "config" / DEFAULT_NOTIFY_ENV.name, DEFAULT_NOTIFY_ENV]
+
+
+def merged_notify_env(
+    env: Mapping[str, str] | None = None,
+    *,
+    env_file: str | Path | None = None,
+) -> dict[str, str]:
+    """File values first; process env overrides (so ``export KI_OPS_*`` wins)."""
+    merged: dict[str, str] = {}
+    for candidate in notify_env_candidates(env_file):
+        if candidate.is_file():
+            merged.update(load_dotenv_file(candidate))
+            break
+    merged.update(dict(env if env is not None else os.environ))
+    return merged
+
+
+def load_notify_settings(
+    env: Mapping[str, str] | None = None,
+    *,
+    env_file: str | Path | None = None,
+) -> NotifySettings:
+    src = merged_notify_env(env, env_file=env_file)
     to_raw = (src.get(ENV_EMAIL_TO) or DEFAULT_EMAIL_TO).strip()
     to = tuple(p.strip() for p in to_raw.split(",") if p.strip())
     port_raw = (src.get(ENV_SMTP_PORT) or "587").strip() or "587"
@@ -114,6 +170,10 @@ def slack_text(body: str) -> str:
         return body
     keep = SLACK_TEXT_LIMIT - 80
     return body[:keep] + "\n… truncated for Slack; full JSON is in the email.\n"
+
+
+def format_slack_message(*, subject: str, body: str) -> str:
+    return f"*{subject}*\n```\n{slack_text(body).rstrip()}\n```"
 
 
 def _apple_quote(value: str) -> str:
@@ -197,6 +257,11 @@ def send_via_sendmail(*, settings: NotifySettings, subject: str, body: str) -> N
 def send_via_smtp(*, settings: NotifySettings, subject: str, body: str) -> None:
     if not settings.smtp_host or not settings.smtp_from:
         raise RuntimeError(f"SMTP needs {ENV_SMTP_HOST} and {ENV_SMTP_FROM}")
+    if settings.smtp_user and not (settings.smtp_password or "").strip():
+        raise RuntimeError(
+            f"{ENV_SMTP_PASSWORD} is empty in config/notify.env — set a Google App Password and save the file"
+        )
+    password = (settings.smtp_password or "").replace(" ", "")
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
@@ -206,14 +271,14 @@ def send_via_smtp(*, settings: NotifySettings, subject: str, body: str) -> None:
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=context) as smtp:
             if settings.smtp_user:
-                smtp.login(settings.smtp_user, settings.smtp_password or "")
+                smtp.login(settings.smtp_user, password)
             smtp.send_message(msg)
         return
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=60) as smtp:
         if settings.smtp_starttls:
             smtp.starttls(context=ssl.create_default_context())
         if settings.smtp_user:
-            smtp.login(settings.smtp_user, settings.smtp_password or "")
+            smtp.login(settings.smtp_user, password)
         smtp.send_message(msg)
 
 
@@ -237,8 +302,8 @@ def send_email(*, settings: NotifySettings, subject: str, body: str) -> None:
     send_via_smtp(settings=settings, subject=subject, body=body)
 
 
-def send_slack(*, webhook_url: str, text: str) -> None:
-    payload = json.dumps({"text": slack_text(text)}).encode("utf-8")
+def send_slack(*, webhook_url: str, subject: str, body: str) -> None:
+    payload = json.dumps({"text": format_slack_message(subject=subject, body=body)}).encode("utf-8")
     req = urllib.request.Request(
         webhook_url,
         data=payload,
@@ -282,6 +347,22 @@ def dispatch(
         send_email(settings=settings, subject=subject, body=body)
         sent["email"] = True
     if want_slack:
-        send_slack(webhook_url=settings.slack_webhook_url or "", text=body)
+        send_slack(webhook_url=settings.slack_webhook_url or "", subject=subject, body=body)
         sent["slack"] = True
     return sent
+
+
+def describe_settings(settings: NotifySettings) -> dict[str, object]:
+    """Non-secret summary for ``notify-config`` / debugging."""
+    return {
+        "email_transport": settings.email_transport,
+        "email_enabled": settings.email_enabled,
+        "smtp_host": settings.smtp_host,
+        "smtp_port": settings.smtp_port,
+        "smtp_user": settings.smtp_user,
+        "smtp_from": settings.smtp_from,
+        "email_to": list(settings.email_to),
+        "smtp_password_set": bool(settings.smtp_password),
+        "slack_enabled": settings.slack_enabled,
+        "slack_webhook_set": bool(settings.slack_webhook_url),
+    }

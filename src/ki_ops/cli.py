@@ -118,7 +118,7 @@ def _parser() -> argparse.ArgumentParser:
             "--poc-data",
             type=Path,
             default=DEFAULT_POC_DATA,
-            help="POC manifest YAML: sod, trades, prices, ticker_map (default: config/poc_pos_and_px.yaml)",
+            help="POC manifest YAML: sod, trades, prices, security_master (default: config/poc_pos_and_px.yaml)",
         )
         parser.add_argument(
             "--sod",
@@ -274,9 +274,31 @@ def _parser() -> argparse.ArgumentParser:
         help="send a one-line test message; do not run the three perturbs",
     )
     np.add_argument(
+        "--test-slack",
+        action="store_true",
+        help="post a one-line test message to Slack; do not run the three perturbs",
+    )
+    np.add_argument(
         "--dry-run",
         action="store_true",
         help="build the payload; do not send",
+    )
+    np.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="notify env file (default: config/notify.env)",
+    )
+
+    nc = ex.add_parser(
+        "notify-config",
+        help="show loaded email/Slack settings (password not printed)",
+    )
+    nc.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="notify env file (default: config/notify.env)",
     )
 
     return p
@@ -362,7 +384,7 @@ def _check_ems(args) -> int:
     )
 
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
-    id_map = args.id_map if args.id_map is not None else poc.ticker_map
+    id_map = args.id_map if args.id_map is not None else poc.security_master
     enriched, summary, _prior = approximate_ems_prices_from_alpha(
         args.intents_csv,
         args.alpha_parquet,
@@ -419,13 +441,23 @@ def _extras(args) -> int:
             send_slack=not args.skip_slack,
             dry_run=args.dry_run,
             test_email=args.test_email,
+            test_slack=args.test_slack,
             to=args.to,
             sender=args.from_addr,
+            env_file=getattr(args, "env_file", None),
         )
         print(json.dumps(summary, indent=2, default=str))
-        if args.dry_run or args.test_email:
+        if args.dry_run or args.test_email or args.test_slack:
             return 0
         return int(summary.get("max_exit_code") or 0)
+    if cmd == "notify-config":
+        from ki_ops.extras.notify import describe_settings, load_notify_settings, notify_env_candidates
+
+        cfg = load_notify_settings(env_file=getattr(args, "env_file", None))
+        loaded = next((str(p) for p in notify_env_candidates(getattr(args, "env_file", None)) if p.is_file()), None)
+        out = {"env_file": loaded, **describe_settings(cfg)}
+        print(json.dumps(out, indent=2))
+        return 0
     return 2
 
 
@@ -459,7 +491,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
     as_of = date.fromisoformat(str(args.as_of))
     mapping = getattr(args, "ticker_mapping", None) or poc.ticker_mapping
-    tickers = load_infocode_ticker_map(poc.ticker_map)
+    tickers = load_infocode_ticker_map(poc.security_master)
     if mapping:
         tickers.update(load_infocode_ticker_map(mapping, as_of=as_of))
     target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "var-checks" else Decimal("0.26")
@@ -475,7 +507,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         prices_csv=prices,
         price_by_infocode=_load_trade_time_prices(prices),
         ticker_by_infocode=tickers,
-        ticker_map_csv=poc.ticker_map,
+        security_master_csv=poc.security_master,
         ticker_mapping_csv=mapping,
         adv_csv=getattr(args, "adv", None) or poc.adv,
         as_of=as_of,

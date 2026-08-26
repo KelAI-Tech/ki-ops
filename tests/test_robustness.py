@@ -109,7 +109,7 @@ def test_missing_price_blocks_run_perturb(tmp_path: Path, capsys):
     )
     poc = tmp_path / "poc.yaml"
     poc.write_text(
-        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nticker_map: {master}\n",
+        f"sod: {sod}\ntrades: {trades}\nprices: {px}\nsecurity_master: {master}\n",
         encoding="utf-8",
     )
 

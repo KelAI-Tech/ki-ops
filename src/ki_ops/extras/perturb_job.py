@@ -62,17 +62,19 @@ def run_and_notify_perturbs(
     send_slack: bool = True,
     dry_run: bool = False,
     test_email: bool = False,
+    test_slack: bool = False,
     to: str | None = None,
     sender: str | None = None,
+    env_file: str | Path | None = None,
     runner: Callable[..., int] | None = None,
 ) -> dict:
-    cfg = settings if settings is not None else load_notify_settings()
+    cfg = settings if settings is not None else load_notify_settings(env_file=env_file)
     cfg = with_recipients(cfg, to)
     cfg = with_sender(cfg, sender)
-    if test_email:
+    if test_email or test_slack:
         blocks: list[tuple[str, int, str]] = []
-        body = "ki-ops email test.\n"
-        subject = "ki-ops email test"
+        body = "ki-ops notify test.\n"
+        subject = "ki-ops notify test"
     else:
         blocks = run_three_perturbs(runner=runner)
         body = format_combined_stdout(blocks)
@@ -91,6 +93,7 @@ def run_and_notify_perturbs(
         "sent": sent,
         "dry_run": dry_run,
         "test_email": test_email,
+        "test_slack": test_slack,
         "to": list(cfg.email_to),
         "from": cfg.smtp_from,
         "email_transport": cfg.email_transport,
