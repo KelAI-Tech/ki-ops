@@ -1,0 +1,40 @@
+{
+  "trade_date": "2026-08-06",
+  "orders": [
+    {
+      "orderId": "EXAMPLE-AAPL-US-1",
+      "symbol": "AAPL.US",
+      "side": 1,
+      "quantity": 18,
+      "filledQuantity": 10,
+      "weightedAvgPrice": 191.2,
+      "status": 4,
+      "tradeDate": "08/06/2026",
+      "fund_acc_tgt": "KELAI",
+      "positionGroup_acc_tgt": "DEFAULT"
+    },
+    {
+      "orderId": "EXAMPLE-AMD-US-2",
+      "symbol": "AMD.US",
+      "side": 1,
+      "quantity": 80,
+      "filledQuantity": 80,
+      "weightedAvgPrice": 162.5,
+      "status": 5,
+      "tradeDate": "08/06/2026",
+      "fund_acc_tgt": "KELAI",
+      "positionGroup_acc_tgt": "DEFAULT"
+    },
+    {
+      "orderId": "EXAMPLE-AVGO-US-4",
+      "symbol": "AVGO.US",
+      "side": 0,
+      "quantity": 25,
+      "filledQuantity": 0,
+      "status": 2,
+      "tradeDate": "08/06/2026",
+      "fund_acc_tgt": "KELAI",
+      "positionGroup_acc_tgt": "DEFAULT"
+    }
+  ]
+}

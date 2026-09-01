@@ -21,3 +21,8 @@ examples/*_zero.csv
 examples/*.parquet
 Untitled.ipynb
 config/notify.env
+data/kotl/
+
+# FlexTrade vendor: track kelai samples only
+vendor/flextrade/brooklyn-12.57.0/
+vendor/flextrade/APIDocumentation.html

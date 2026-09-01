@@ -301,6 +301,10 @@ def _parser() -> argparse.ArgumentParser:
         help="notify env file (default: config/notify.env)",
     )
 
+    from ki_ops.kotl.cli import register_kotl_parser
+
+    register_kotl_parser(sub)
+
     return p
 
 
@@ -527,6 +531,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "extras":
         return _extras(args)
+
+    if command == "kotl":
+        from ki_ops.kotl.cli import run_kotl
+
+        return run_kotl(args)
 
     if command == "run-perturb-baseline":
         return _run_perturb(args)
