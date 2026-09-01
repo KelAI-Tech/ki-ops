@@ -1,8 +1,8 @@
-"""EMS trade intents vs SOD from the alpha dollar parquet (no .pkl).
+"""EMS trade intents vs SOD dollar notionals (parquet or SOD CSV).
 
-SOD: latest parquet date strictly before trade as-of (dollars → positions).
+SOD: latest parquet date strictly before trade as-of, or a notional CSV.
 Trade intents: headerless EMS drop ``ticker,signed_share_qty,algo``.
-Missing px: ``px_approx = |SOD alpha $| / |trade qty|`` after ticker→security_id map.
+Missing px (POC): ``px_approx = |notional $| / |trade qty|``.
 """
 
 from __future__ import annotations
@@ -167,6 +167,60 @@ def alpha_dollars_by_id(panel, as_of_ts) -> dict[str, Decimal]:
     return out
 
 
+def dollars_from_notional_csv(path: str | Path) -> dict[str, Decimal]:
+    """``{infocode: $}`` from an SOD notional CSV; ticker aliases are added too."""
+    path = Path(path)
+    out: dict[str, Decimal] = {}
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames:
+            return {}
+        fields = {str(k).strip().lower(): k for k in reader.fieldnames if k}
+        sid_key = fields.get("infocode") or fields.get("security_id") or fields.get("symbol")
+        ntl_key = fields.get("notional") or fields.get("dollars") or fields.get("market_value")
+        tic_key = fields.get("ticker") or fields.get("symbol")
+        if not sid_key or not ntl_key:
+            raise ValueError(f"Need infocode and notional columns in {path}")
+        for raw in reader:
+            sid = (raw.get(sid_key) or "").strip()
+            ntl_raw = (raw.get(ntl_key) or "").strip()
+            if not sid or not ntl_raw:
+                continue
+            d = Decimal(ntl_raw)
+            if d == 0:
+                continue
+            out[sid] = d
+            tic = (raw.get(tic_key) or "").strip().upper() if tic_key else ""
+            if tic and tic not in out:
+                out[tic] = d
+    return out
+
+
+def load_alpha_dollars(
+    alpha_parquet: str | Path | None,
+    as_of: date,
+    *,
+    sod_csv: str | Path | None = None,
+) -> tuple[dict[str, Decimal], str, str]:
+    """Return ``(dollars_by_id, as_of_label, source)``.
+
+    Prefers the last parquet date strictly before ``as_of``. If the parquet is
+    missing, fall back to an SOD notional CSV (parquet export).
+    """
+    parquet = Path(alpha_parquet) if alpha_parquet else None
+    if parquet is not None and parquet.is_file():
+        panel = load_alpha_dollar_panel(parquet, end=str(as_of))
+        prior_ts = prior_alpha_date(panel, as_of)
+        dollars = alpha_dollars_by_id(panel, prior_ts)
+        prior_str = str(prior_ts.date()) if hasattr(prior_ts, "date") else str(prior_ts)[:10]
+        return dollars, prior_str, "parquet"
+    if sod_csv is not None and Path(sod_csv).is_file():
+        return dollars_from_notional_csv(sod_csv), Path(sod_csv).stem, "sod_csv"
+    raise FileNotFoundError(
+        f"Need alpha parquet ({parquet}) or SOD notional CSV ({sod_csv}) for POC px"
+    )
+
+
 def approx_px_from_alpha_dollars(quantity: Decimal, dollars: Decimal) -> Decimal | None:
     """``px = prior_alpha_usd / trade_qty``. Price is unsigned."""
     if quantity == 0 or dollars is None:
@@ -180,19 +234,22 @@ def enrich_intents_with_prior_alpha_px(
     dollars_by_id: Mapping[str, Decimal],
     id_map: Mapping[str, str] | None = None,
 ) -> list[EmsIntent]:
-    """Attach security_id, prior-day dollars, and px_approx.
+    """Attach security_id, SOD dollars, and px_approx.
 
     Lookup order per ticker:
-    1. explicit id map
-    2. ticker equals parquet security id
+    1. infocode already on the EMS row
+    2. explicit id map
+    3. ticker equals parquet/SOD security id (or SOD ticker alias)
     """
     id_map = id_map or {}
     enriched: list[EmsIntent] = []
     for it in intents:
-        sid = id_map.get(it.symbol)
+        sid = it.security_id or id_map.get(it.symbol)
         if sid is None and it.symbol in dollars_by_id:
             sid = it.symbol
         dollars = dollars_by_id.get(sid) if sid else None
+        if dollars is None:
+            dollars = dollars_by_id.get(it.symbol)
         px = None
         source = None
         if it.quantity != 0 and dollars is not None:
@@ -255,7 +312,7 @@ def summarize_px_coverage(intents: Sequence[EmsIntent], *, prior_date: str | Non
         "n_mapped_no_alpha": len(no_alpha),
         "gross_traded_usd_approx": str(traded_usd),
         "one_way_traded_usd_approx": str(traded_usd / Decimal("2") if traded_usd else "0"),
-        "px_formula": "abs(prior_alpha_usd) / abs(qty)",
+        "px_formula": "abs(notional) / abs(qty)",
         "unmapped_live_sample": unmapped[:20],
     }
 
@@ -380,54 +437,61 @@ def _as_of_date(intents_csv: str | Path, as_of: date | str | None) -> date:
 
 def approximate_ems_prices_from_alpha(
     intents_csv: str | Path,
-    alpha_parquet: str | Path,
+    alpha_parquet: str | Path | None = None,
     *,
     as_of: date | str | None = None,
     id_map_csv: str | Path | None = None,
+    sod_csv: str | Path | None = None,
 ) -> tuple[list[EmsIntent], dict[str, Any], str]:
     """SOD dollars + EMS intents; return enriched intents, coverage summary, SOD date."""
     intents = load_ems_trade_intents_csv(intents_csv)
     as_of_date = _as_of_date(intents_csv, as_of)
-    panel = load_alpha_dollar_panel(alpha_parquet, end=str(as_of_date))
-    prior_ts = prior_alpha_date(panel, as_of_date)
-    dollars = alpha_dollars_by_id(panel, prior_ts)
+    dollars, prior_str, source = load_alpha_dollars(alpha_parquet, as_of_date, sod_csv=sod_csv)
     id_map = load_security_id_ticker_map(id_map_csv, as_of=as_of_date)
     enriched = enrich_intents_with_prior_alpha_px(intents, dollars, id_map)
-    prior_str = str(prior_ts.date()) if hasattr(prior_ts, "date") else str(prior_ts)[:10]
     summary = summarize_px_coverage(enriched, prior_date=prior_str)
     summary["as_of"] = str(as_of_date)
-    summary["sod_source"] = "parquet"
-    summary["alpha_parquet"] = str(alpha_parquet)
+    summary["sod_source"] = source
+    summary["alpha_parquet"] = str(alpha_parquet) if alpha_parquet else None
+    summary["sod_csv"] = str(sod_csv) if sod_csv else None
     summary["id_map_csv"] = str(id_map_csv) if id_map_csv else None
     summary["n_id_map"] = len(id_map)
+    summary["px_formula"] = "abs(notional) / abs(qty)"
     return enriched, summary, prior_str
 
 
 def evaluate_ems_against_alpha_sod(
     intents_csv: str | Path,
-    alpha_parquet: str | Path,
+    alpha_parquet: str | Path | None,
     engine: PreTradeEngine,
     *,
     as_of: date | str | None = None,
     id_map_csv: str | Path | None = None,
+    sod_csv: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Pre-trade: SOD from parquet, trade intents from the EMS drop."""
+    """Pre-trade: SOD from parquet (or notional CSV), trade intents from the EMS drop."""
+    from ki_ops.intents import load_sod_positions_csv
+
     intents = load_ems_trade_intents_csv(intents_csv)
     as_of_date = _as_of_date(intents_csv, as_of)
-    panel = load_alpha_dollar_panel(alpha_parquet, end=str(as_of_date))
-    prior_ts = prior_alpha_date(panel, as_of_date)
-    sod = portfolio_from_dollar_row(panel.loc[prior_ts])
-    dollars = alpha_dollars_by_id(panel, prior_ts)
+    dollars, prior_str, source = load_alpha_dollars(alpha_parquet, as_of_date, sod_csv=sod_csv)
+    if source == "parquet":
+        panel = load_alpha_dollar_panel(alpha_parquet, end=str(as_of_date))
+        prior_ts = prior_alpha_date(panel, as_of_date)
+        sod = portfolio_from_dollar_row(panel.loc[prior_ts])
+    else:
+        if sod_csv is None:
+            raise ValueError("sod_csv required when alpha parquet is missing")
+        sod = load_sod_positions_csv(sod_csv)
     id_map = load_security_id_ticker_map(id_map_csv, as_of=as_of_date)
     enriched = enrich_intents_with_prior_alpha_px(intents, dollars, id_map)
     orders = intents_to_orders(enriched)
     result = engine.evaluate(sod, orders)
-    prior_str = str(prior_ts.date()) if hasattr(prior_ts, "date") else str(prior_ts)[:10]
     coverage = summarize_px_coverage(enriched, prior_date=prior_str)
     return {
         "as_of": str(as_of_date),
         "sod_date": prior_str,
-        "sod_source": "parquet",
+        "sod_source": source,
         "trade_intents_file": str(intents_csv),
         "n_sod_names": len(sod.holdings),
         "sod_gmv": format_decimal(sod.gmv),

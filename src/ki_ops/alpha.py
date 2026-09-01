@@ -724,7 +724,7 @@ def run_lseg_perturb(
     prices_csv: str | Path | None = None,
     price_by_infocode: Mapping[str, Decimal] | None = None,
     ticker_by_infocode: Mapping[str, str] | None = None,
-    ticker_map_csv: str | Path | None = None,
+    security_master_csv: str | Path | None = None,
     ticker_mapping_csv: str | Path | None = None,
     adv_csv: str | Path | None = None,
     as_of: date | None = None,
@@ -774,8 +774,8 @@ def run_lseg_perturb(
         raise ValueError(f"Unknown perturb scenario: {scenario}")
 
     listing = None
-    if ticker_map_csv and listing_csv_has_status_fields(ticker_map_csv):
-        listing = load_listing_status(ticker_map_csv)
+    if security_master_csv and listing_csv_has_status_fields(security_master_csv):
+        listing = load_listing_status(security_master_csv)
     adv = load_adv_map(adv_csv) if adv_csv else None
 
     engine = PreTradeEngine(settings=settings)
@@ -796,7 +796,7 @@ def run_lseg_perturb(
     hashes = input_hashes(
         {
             "config": config_path,
-            "ticker_map": ticker_map_csv,
+            "security_master": security_master_csv,
             "ticker_mapping": ticker_mapping_csv,
             "adv": adv_csv,
             "prices": prices_csv,
@@ -813,7 +813,7 @@ def run_lseg_perturb(
         "config_hash": settings_hash(settings),
         "input_hashes": hashes,
         "security_master": (
-            f"{ticker_map_csv}: tradability_isactive" if ticker_map_csv else None
+            f"{security_master_csv}: tradability_isactive" if security_master_csv else None
         ),
         "ticker_mapping_dt": str(ticker_mapping_csv) if ticker_mapping_csv else None,
         "adv": str(adv_csv) if adv_csv else None,

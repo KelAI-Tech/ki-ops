@@ -33,7 +33,7 @@ DEFAULT_POC_ALPHA = ROOT / "examples" / (
     "_neut_C5_cap125_nosv.parquet"
 )
 DEFAULT_ALPHA_PANEL = DEFAULT_POC_ALPHA
-DEFAULT_EMS_INTENTS = ROOT / "examples" / "extras" / "Portfolio_20260806.csv"
+DEFAULT_EMS_INTENTS = ROOT / "examples" / "Portfolio_20260813.csv"
 
 
 def _poc_default_label(key: str) -> str:
@@ -118,7 +118,7 @@ def _parser() -> argparse.ArgumentParser:
             "--poc-data",
             type=Path,
             default=DEFAULT_POC_DATA,
-            help="POC manifest YAML: sod, trades, prices, ticker_map (default: config/poc_pos_and_px.yaml)",
+            help="POC manifest YAML: sod, trades, prices, security_master (default: config/poc_pos_and_px.yaml)",
         )
         parser.add_argument(
             "--sod",
@@ -198,7 +198,10 @@ def _parser() -> argparse.ArgumentParser:
     _add_poc_csv_args(pz)
 
     # Sidecar features (EMS / filled trades / risk snapshot) — not the POC path
-    extras = sub.add_parser("extras", help="optional sidecars: EMS, filled trades, risk snapshot")
+    extras = sub.add_parser(
+        "extras",
+        help="optional sidecars: EMS, fills, risk snapshot, perturb email/Slack job",
+    )
     ex = extras.add_subparsers(dest="extras_command", required=True)
 
     risk = ex.add_parser("risk-snapshot", help="factor / sector / beta exposures")
@@ -216,25 +219,25 @@ def _parser() -> argparse.ArgumentParser:
     px = ex.add_parser(
         "check-ems",
         aliases=["approx-px"],
-        help="EMS drop vs alpha-parquet SOD; approx px from SOD $ / qty",
+        help="EMS drop missing px: POC price = |notional| / |qty|",
     )
     px.add_argument("intents_csv", type=Path, nargs="?", default=DEFAULT_EMS_INTENTS)
     px.add_argument(
         "--alpha-parquet",
         type=Path,
         default=DEFAULT_ALPHA_PANEL,
-        help="wide alpha dollar panel used as SOD (dates × security_id)",
+        help="wide alpha dollar panel (dates × security_id); falls back to SOD CSV",
     )
     px.add_argument(
         "--as-of",
-        default="2026-08-06",
-        help="trade-intent date YYYY-MM-DD (SOD = last parquet date before this)",
+        default=None,
+        help="trade-intent date YYYY-MM-DD (default: date in Portfolio_YYYYMMDD.csv)",
     )
     px.add_argument(
         "--id-map",
         type=Path,
         default=None,
-        help="CSV with security_id,symbol — or TICKER_MAPPING_DT intervals (PIT as-of --as-of)",
+        help="ticker→infocode CSV (default: SECURITY_MASTER_DT); or TICKER_MAPPING_DT intervals",
     )
     px.add_argument(
         "--out",
@@ -247,6 +250,55 @@ def _parser() -> argparse.ArgumentParser:
         dest="poc_config",
         default=str(DEFAULT_POC_CONFIG),
         help="risk YAML (defaults to config/risk_management_poc.yaml)",
+    )
+
+    np = ex.add_parser(
+        "notify-perturbs",
+        help="run the three POC perturbs and email stdout (Slack if a webhook is set)",
+    )
+    np.add_argument(
+        "--to",
+        default=None,
+        help="comma-separated recipients (default: KI_OPS_EMAIL_TO or robert@kelaitech.com)",
+    )
+    np.add_argument(
+        "--from-addr",
+        default=None,
+        help="From address (default: KI_OPS_SMTP_FROM or robert@kelaitech.com). Mail.app must have this account.",
+    )
+    np.add_argument("--skip-email", action="store_true", help="do not send email")
+    np.add_argument("--skip-slack", action="store_true", help="do not post to Slack")
+    np.add_argument(
+        "--test-email",
+        action="store_true",
+        help="send a one-line test message; do not run the three perturbs",
+    )
+    np.add_argument(
+        "--test-slack",
+        action="store_true",
+        help="post a one-line test message to Slack; do not run the three perturbs",
+    )
+    np.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="build the payload; do not send",
+    )
+    np.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="notify env file (default: config/notify.env)",
+    )
+
+    nc = ex.add_parser(
+        "notify-config",
+        help="show loaded email/Slack settings (password not printed)",
+    )
+    nc.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="notify env file (default: config/notify.env)",
     )
 
     return p
@@ -327,24 +379,19 @@ def _poc_alpha(args) -> int:
 
 def _check_ems(args) -> int:
     from ki_ops.extras.ems_intents import (
-        evaluate_ems_against_alpha_sod,
+        approximate_ems_prices_from_alpha,
         write_enriched_intents_csv,
     )
 
-    settings = load_risk_settings(args.poc_config)
-    engine = PreTradeEngine(settings=settings)
-    id_map = args.id_map
-    if id_map is None:
-        poc = load_poc_data_paths(getattr(args, "poc_data", None))
-        id_map = poc.ticker_mapping
-    summary = evaluate_ems_against_alpha_sod(
+    poc = load_poc_data_paths(getattr(args, "poc_data", None))
+    id_map = args.id_map if args.id_map is not None else poc.security_master
+    enriched, summary, _prior = approximate_ems_prices_from_alpha(
         args.intents_csv,
         args.alpha_parquet,
-        engine,
         as_of=args.as_of,
         id_map_csv=id_map,
+        sod_csv=poc.sod,
     )
-    enriched = summary.pop("_enriched")
     out = args.out
     if out is None:
         out = args.intents_csv.with_name(f"{args.intents_csv.stem}_with_px.csv")
@@ -352,7 +399,7 @@ def _check_ems(args) -> int:
     summary["out_csv"] = str(out)
     summary["config"] = str(args.poc_config)
     print(json.dumps(summary, indent=2, default=str))
-    return 0 if summary.get("passed") else 2
+    return 0
 
 
 def _extras(args) -> int:
@@ -385,6 +432,31 @@ def _extras(args) -> int:
             flatten_missing_targets=not args.keep_unmentioned,
         )
         print(json.dumps(snap.to_dict(), indent=2))
+        return 0
+    if cmd == "notify-perturbs":
+        from ki_ops.extras.perturb_job import run_and_notify_perturbs
+
+        summary = run_and_notify_perturbs(
+            send_email=not args.skip_email,
+            send_slack=not args.skip_slack,
+            dry_run=args.dry_run,
+            test_email=args.test_email,
+            test_slack=args.test_slack,
+            to=args.to,
+            sender=args.from_addr,
+            env_file=getattr(args, "env_file", None),
+        )
+        print(json.dumps(summary, indent=2, default=str))
+        if args.dry_run or args.test_email or args.test_slack:
+            return 0
+        return int(summary.get("max_exit_code") or 0)
+    if cmd == "notify-config":
+        from ki_ops.extras.notify import describe_settings, load_notify_settings, notify_env_candidates
+
+        cfg = load_notify_settings(env_file=getattr(args, "env_file", None))
+        loaded = next((str(p) for p in notify_env_candidates(getattr(args, "env_file", None)) if p.is_file()), None)
+        out = {"env_file": loaded, **describe_settings(cfg)}
+        print(json.dumps(out, indent=2))
         return 0
     return 2
 
@@ -419,7 +491,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
     poc = load_poc_data_paths(getattr(args, "poc_data", None))
     as_of = date.fromisoformat(str(args.as_of))
     mapping = getattr(args, "ticker_mapping", None) or poc.ticker_mapping
-    tickers = load_infocode_ticker_map(poc.ticker_map)
+    tickers = load_infocode_ticker_map(poc.security_master)
     if mapping:
         tickers.update(load_infocode_ticker_map(mapping, as_of=as_of))
     target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "var-checks" else Decimal("0.26")
@@ -435,7 +507,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         prices_csv=prices,
         price_by_infocode=_load_trade_time_prices(prices),
         ticker_by_infocode=tickers,
-        ticker_map_csv=poc.ticker_map,
+        security_master_csv=poc.security_master,
         ticker_mapping_csv=mapping,
         adv_csv=getattr(args, "adv", None) or poc.adv,
         as_of=as_of,

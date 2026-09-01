@@ -38,12 +38,25 @@ Inputs are listed in [`config/poc_pos_and_px.yaml`](config/poc_pos_and_px.yaml).
 
 `TICKER_MAPPING_DT`.`ISCURRENT` is “latest ticker interval,” not “still listed” (`ISACTIVE`). Tradability always comes from `SECURITY_MASTER_DT`. Ticker labels start from the master’s current ticker, then **overlay** PIT intervals as of `--as-of`.
 
-Manifest vs stdout path keys:
+POC manifest keys in [`config/poc_pos_and_px.yaml`](config/poc_pos_and_px.yaml):
 
-| Manifest (`poc_pos_and_px.yaml`) | Stdout JSON |
-|----------------------------------|-------------|
-| `ticker_map` (security master) | `security_master` — printed as `{path}: tradability_isactive`. `input_hashes` still hash the real file path |
-| `ticker_mapping` | `ticker_mapping_dt` |
+```yaml
+sod: examples/sod_lseg_20260805.csv
+trades: examples/trade_intents_lseg_20260806.csv
+prices: examples/lseg_datastream2_px_20260804.csv
+security_master: examples/lseg_security_master_dt.csv   # tradability (SECURITY_MASTER_DT)
+ticker_mapping: examples/lseg_ticker_mapping_dt.csv     # PIT labels (TICKER_MAPPING_DT)
+adv: examples/lseg_base_data_us_dt_20260804.csv
+```
+
+Manifest vs stdout (and `input_hashes` keys):
+
+| Manifest | Stdout path | Role |
+|----------|-------------|------|
+| `security_master` | `security_master` — `{path}: tradability_isactive` | May we trade? (`ISACTIVE`, `STATUSCODE`, `DELISTDATE`) |
+| `ticker_mapping` | `ticker_mapping_dt` | INFOCODE ↔ ticker as of `--as-of` |
+
+The old manifest key `ticker_map` is **not** supported; use `security_master`.
 
 At run time, SOD `$` → shares via CLOSE (`qty = notional / px`). Order / turnover notionals use `abs(qty) × px`.
 
@@ -69,7 +82,7 @@ Stdout JSON includes:
 - `perturb`: `"baseline"` / `"zero-turnover"` / `"var-checks"`
 - `as_of`, `sod_source`
 - Paths: `config`, `security_master` (annotated), `ticker_mapping_dt`, `adv`, `prices_csv`, `sod_csv`, `trade_intents_file` (input trades for baseline; `<trades>_zero.csv` or `<trades>_var_checks.csv` for the other two)
-- Hashes: `config_hash`, `input_hashes`
+- Hashes: `config_hash`, `input_hashes` (`security_master`, `ticker_mapping`, `sod`, `trades`, …)
 - Caps echoed: `max_turnover`, `max_net_exposure`, `max_adv_participation`, `max_order_size`
 - Book: SOD GMV / NMV / net exposure, `turnover`, `projected_portfolio_value`, `projected_net_exposure`
 - Gate: `passed` (`true` / `false` / `"with warnings"`)
@@ -152,24 +165,58 @@ print(result.to_dict())  # "passed", violations, warnings, turnover, …
 
 Exit code `2` means a **blocking** check failed.
 
+## Email + Slack notifications
+
+`ki-ops extras notify-perturbs` runs all three perturb commands, captures their JSON stdout, and sends **one email** plus an optional **Slack** post. Settings load from `config/notify.env` (gitignored; copy [`config/notify.env.example`](config/notify.env.example)). Process env vars override the file.
+
+### Email (Google Workspace SMTP)
+
+```bash
+./scripts/setup-notify-email.sh
+# edit config/notify.env → KI_OPS_SMTP_PASSWORD=<Google App Password>
+ki-ops extras notify-config
+ki-ops extras notify-perturbs --test-email --skip-slack
+ki-ops extras notify-perturbs --skip-slack    # full perturb JSON
+```
+
+Defaults: **From / To** `robert@kelaitech.com`, `smtp.gmail.com:587`. Use a [Google App Password](https://support.google.com/accounts/answer/185833), not your login password.
+
+Without `config/notify.env`, macOS falls back to **Mail.app** (`robert@kelaitech.com` must be an account there; iCloud is not used).
+
+### Slack (Incoming Webhook)
+
+Add `KI_OPS_SLACK_WEBHOOK_URL` to `config/notify.env`. Webhooks post to **one channel**, not a DM — pick a channel you watch.
+
+```bash
+ki-ops extras notify-config                    # slack_webhook_set: true
+ki-ops extras notify-perturbs --test-slack --skip-email
+ki-ops extras notify-perturbs                  # email + Slack
+```
+
+Slack shows the subject plus JSON in a code block (truncated if very long; email has the full body).
+
+[`dags/ki_ops_poc_perturbs.py`](dags/ki_ops_poc_perturbs.py) is an optional Airflow example (Airflow is not a package dependency). Cron is the same CLI entrypoint.
+
 ## Layout
 
 ```
 config/
-  poc_pos_and_px.yaml          # LSEG POC file manifest
+  poc_pos_and_px.yaml          # LSEG POC manifest (sod, trades, prices, security_master, …)
+  notify.env.example           # email/Slack template → copy to notify.env (gitignored)
   risk_management_poc.yaml     # POC / production-scale limits (~$90M GMV)
   risk_management_small_book.yaml  # small example-book limits
 src/ki_ops/
   engine.py, checks/, intents.py, portfolio.py, models.py, config.py
   alpha.py, poc_data.py, cli.py, listing.py, audit.py
-  extras/                      # EMS, fills, risk snapshot
+  extras/                      # EMS, fills, risk snapshot, email/Slack perturb job
 examples/
   sod_lseg_*.csv, trade_intents_lseg_*.csv
   lseg_security_master_dt.csv, lseg_ticker_mapping_dt.csv
   lseg_base_data_us_dt_*.csv, lseg_datastream2_px_*.csv
   sod_positions.csv, target_intents.csv
   extras/                      # EMS Portfolio CSV, small security master
+dags/                          # example Airflow DAG (copy into AIRFLOW_HOME/dags)
 tests/
 ```
 
-Sidecars (not the LSEG perturb path): `ki-ops extras check-ems`, `ki-ops extras summarize-trades`, `ki-ops extras risk-snapshot`, and `ki-ops poc-alpha` (dollar-panel parquet).
+Sidecars (not the LSEG perturb path): `ki-ops extras check-ems`, `ki-ops extras summarize-trades`, `ki-ops extras risk-snapshot`, `ki-ops extras notify-perturbs`, `ki-ops extras notify-config`, and `ki-ops poc-alpha` (dollar-panel parquet).

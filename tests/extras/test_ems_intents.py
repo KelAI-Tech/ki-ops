@@ -13,6 +13,7 @@ from ki_ops.extras.ems_intents import (
     EmsIntent,
     approx_px_from_alpha_dollars,
     approximate_ems_prices_from_alpha,
+    dollars_from_notional_csv,
     enrich_intents_with_prior_alpha_px,
     evaluate_ems_against_alpha_sod,
     load_ems_trade_intents_csv,
@@ -48,6 +49,36 @@ def test_px_is_abs_dollars_over_abs_qty():
     assert approx_px_from_alpha_dollars(Decimal("10"), Decimal("1910")) == Decimal("191")
     assert approx_px_from_alpha_dollars(Decimal("-5"), Decimal("-1000")) == Decimal("200")
     assert approx_px_from_alpha_dollars(Decimal("0"), Decimal("100")) is None
+
+
+def test_enrich_uses_csv_infocode_without_id_map():
+    intents = [EmsIntent("AAA", 10, "VWAP", security_id="1001")]
+    out = enrich_intents_with_prior_alpha_px(intents, {"1001": Decimal("1910")}, {})
+    assert out[0].px_approx == Decimal("191")
+    assert out[0].security_id == "1001"
+
+
+def test_dollars_from_notional_csv_aliases_ticker(tmp_path: Path):
+    p = tmp_path / "sod.csv"
+    p.write_text("infocode,ticker,notional\n1001,AAA,1910\n1002,BBB,-800\n", encoding="utf-8")
+    d = dollars_from_notional_csv(p)
+    assert d["1001"] == Decimal("1910")
+    assert d["AAA"] == Decimal("1910")
+    assert d["1002"] == Decimal("-800")
+
+
+def test_approximate_falls_back_to_sod_csv(tmp_path: Path):
+    sod = tmp_path / "sod.csv"
+    sod.write_text("infocode,ticker,notional\n1001,AAA,1910\n", encoding="utf-8")
+    intents = tmp_path / "Portfolio_20260813.csv"
+    intents.write_text("AAA,10,VWAP\n", encoding="utf-8")
+    enriched, summary, _prior = approximate_ems_prices_from_alpha(
+        intents, tmp_path / "missing.parquet", sod_csv=sod
+    )
+    assert summary["as_of"] == "2026-08-13"
+    assert summary["sod_source"] == "sod_csv"
+    assert enriched[0].px_approx == Decimal("191")
+    assert summary["n_priced"] == 1
 
 
 def test_enrich_uses_id_map_and_skips_zeros():
