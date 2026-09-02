@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from ki_ops.kotl.fake_flex import FakeFlexAdapter
-from ki_ops.kotl.flex_map import FlexOrderDefaults, flex_orders_from_rebalance_csv
+from ki_ops.kotl.flex_map import (
+    FlexOrderDefaults,
+    flex_orders_from_rebalance_csv,
+    orders_to_flex_dicts,
+)
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
 from ki_ops.kotl.store import KotlStore
 
@@ -93,6 +97,79 @@ def submit_rebalance_csv(
         symbol_suffix=symbol_suffix,
         submit_id=pending.submit_id,
         flatten_missing_targets=flatten_missing_targets,
+    )
+    return submit_flex_orders(
+        store,
+        payloads,
+        env=env,
+        trade_date=trade_date,
+        adapter=adapter,
+        submitted_at=pending.submitted_at,
+        submit_id=pending.submit_id,
+    )
+
+
+def submit_kelai_shares(
+    store: KotlStore,
+    *,
+    trade_date: date,
+    shares_file: str | Path | None = None,
+    ds2_h5: str | Path | None = None,
+    sod_csv: str | Path | None = None,
+    assume_flat_sod: bool = False,
+    env: str = "FAKE",
+    defaults: FlexOrderDefaults | None = None,
+    symbol_suffix: str = ".US",
+    adapter: FlexSubmitAdapter | None = None,
+    submitted_at: datetime | None = None,
+    cache_dir: str | Path | None = None,
+) -> Submit:
+    """kelaidata shares trade file (S3) + ds2 H5 prices → submit.
+
+    Targets come from ``s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv``
+    (signed whole-share target positions per ticker); prices and the ticker
+    map come from ``ds2_data.h5`` on S3. Trades are ``target − SOD``; SOD must
+    be given explicitly (*sod_csv*, ticker-keyed with ``quantity`` and
+    ``market_price``) or waived with *assume_flat_sod* — there is no silent
+    default book.
+    """
+    from ki_ops.intents import derive_trade_intents, load_sod_positions_csv
+    from ki_ops.kotl.kelaidata_source import (
+        DEFAULT_CACHE_DIR,
+        DEFAULT_DS2_H5,
+        default_shares_path,
+        fetch,
+        load_ds2_snapshot,
+        load_shares_trade_file,
+        targets_from_shares,
+    )
+    from ki_ops.models import Portfolio
+
+    if sod_csv is None and not assume_flat_sod:
+        raise ValueError(
+            "SOD is required: pass sod_csv, or set assume_flat_sod=True to "
+            "trade the full target book from a flat start"
+        )
+
+    cache = cache_dir or DEFAULT_CACHE_DIR
+    shares_path = fetch(shares_file or default_shares_path(trade_date), cache_dir=cache)
+    ds2_path = fetch(ds2_h5 or DEFAULT_DS2_H5, cache_dir=cache)
+
+    shares = load_shares_trade_file(shares_path)
+    snapshot = load_ds2_snapshot(ds2_path, trade_date=trade_date)
+    targets = targets_from_shares(shares, snapshot)
+
+    sod = load_sod_positions_csv(sod_csv) if sod_csv is not None else Portfolio()
+    orders = derive_trade_intents(sod, targets, flatten_missing_targets=True)
+    if not orders:
+        raise ValueError(f"no trades: SOD already matches the {trade_date} target book")
+
+    pending = Submit.new(env=env, ok=False, payload=(), submitted_at=submitted_at)
+    payloads = orders_to_flex_dicts(
+        orders,
+        defaults=defaults,
+        symbol_suffix=symbol_suffix,
+        submit_id=pending.submit_id,
     )
     return submit_flex_orders(
         store,
