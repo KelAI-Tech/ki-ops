@@ -37,7 +37,7 @@ def register_kotl_parser(sub) -> None:
         "--shares",
         default=None,
         help="shares trade file, s3:// or local "
-        "(default: s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv)",
+        "(default: s3://kelaitrading/portfolio/shares/Portfolio_<YYYYMMDD>.csv)",
     )
     sk.add_argument(
         "--ds2",

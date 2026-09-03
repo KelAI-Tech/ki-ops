@@ -2,7 +2,7 @@
 
 Two inputs, both produced by the kelaidata pipeline:
 
-- **Shares trade file** — ``s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv``,
+- **Shares trade file** — ``s3://kelaitrading/portfolio/shares/Portfolio_<YYYYMMDD>.csv``,
   written by ``dollar_to_shares``: headerless ``TICKER,shares[,VWAP]`` rows,
   signed whole-share **target positions** for the trade date.
 - **ds2 H5** — ``s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5``: wide
@@ -29,7 +29,7 @@ from ki_ops.intents import TargetIntent
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = ROOT / "data" / "kotl" / "cache"
 
-DEFAULT_SHARES_TEMPLATE = "s3://kelaitrading/portfolio/shares/{yyyymmdd}.csv"
+DEFAULT_SHARES_TEMPLATE = "s3://kelaitrading/portfolio/shares/Portfolio_{yyyymmdd}.csv"
 DEFAULT_DS2_H5 = "s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5"
 
 DS2_NAMESPACE = "ds2_data"

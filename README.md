@@ -217,7 +217,7 @@ ki-ops is pre-trade (intents + gates). **KOTL** is the KelAI-side **sent / done 
 v1: CSV/Parquet store (`submits.csv`, `working_orders.csv`), CLI below, poll Flex (no subscribe yet). Flex helpers live under [`vendor/flextrade/kelai_flex_sample_codes/`](vendor/flextrade/kelai_flex_sample_codes/) (Brooklyn SDK is local/gitignored).
 
 **kelaidata S3 inputs:** `kotl submit-kelai` pulls the trade-dated shares file
-(`s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv`, headerless
+(`s3://kelaitrading/portfolio/shares/Portfolio_<YYYYMMDD>.csv`, headerless
 `TICKER,shares,VWAP` from `dollar_to_shares`) and prior-close prices + the
 point-in-time ticker map straight from the ds2 H5
 (`s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5`, read row-wise with h5py —

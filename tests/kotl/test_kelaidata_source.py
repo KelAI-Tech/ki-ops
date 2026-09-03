@@ -58,7 +58,7 @@ def make_ds2_h5(path, *, tsla_close_nan: bool = False):
 
 
 def test_default_shares_path():
-    assert default_shares_path(TD) == "s3://kelaitrading/portfolio/shares/20260806.csv"
+    assert default_shares_path(TD) == "s3://kelaitrading/portfolio/shares/Portfolio_20260806.csv"
 
 
 def test_parse_s3_url():

@@ -126,7 +126,7 @@ def submit_kelai_shares(
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices → submit.
 
-    Targets come from ``s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv``
+    Targets come from ``s3://kelaitrading/portfolio/shares/Portfolio_<YYYYMMDD>.csv``
     (signed whole-share target positions per ticker); prices and the ticker
     map come from ``ds2_data.h5`` on S3. Trades are ``target − SOD``; SOD must
     be given explicitly (*sod_csv*, ticker-keyed with ``quantity`` and
