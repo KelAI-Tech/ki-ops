@@ -315,7 +315,7 @@ settings or the sconf.
 ## 9b. Network path — current: Windows FortiClient + dumb TCP proxy
 
 ```
-Linux (ki-ops / ECS)  ── TCP 172.31.85.215:50051 ──►  Windows Server 2022
+Linux (ki-ops / ECS)  ── TCP 172.31.88.47:50051 ──►  Windows Server 2022
                                                        netsh portproxy (dumb TCP)
                                                        FortiClient 7.0.1 IPsec (IIPServices)
                                                               │ IKEv1 agg + PSK + XAuth
@@ -323,13 +323,15 @@ Linux (ki-ops / ECS)  ── TCP 172.31.85.215:50051 ──►  Windows Server 2
                                                      35.245.224.15 ──► Flex UAT 172.20.194.76:50051
 ```
 
-**Provisioned (2026-09-02, us-east-1):**
+**Provisioned (2026-09-03, us-east-1, via the `kelai-infra` CFN stack
+`flextrade-win-proxy` + golden AMI v2 — full terminate-and-recreate verified
+zero-touch, no RDP ever):**
 
 | Resource | Value |
 |---|---|
-| Windows instance | `i-058c546859266751c` (`flextrade-win-proxy`, t3.medium, Server 2022), private `172.31.85.215` |
+| Windows instance | `i-0350b56fcbfb0c8e6` (`flextrade-win-proxy`, t3.medium, Server 2022, golden AMI v2 via CFN stack), private `172.31.88.47` |
 | Proxy | `netsh portproxy` `0.0.0.0:50051 → 172.20.194.76:50051` (no parsing/buffering/retries; `iphlpsvc` auto-start) |
-| SGs | `flextrade-win-proxy-sg` `sg-0c90af6421f62b431` (50051 from `flextrade-client-sg` `sg-09485e536f9ba3703` + preproc /32; RDP from VPC) |
+| SGs | CFN-managed `sg-0db52681b27485ae8` (50051 from `flextrade-client-sg` `sg-09485e536f9ba3703` + preproc /32 via `ExtraProxyIngressCidr`; RDP from VPC) |
 | IAM | `flextrade-win-proxy-role` (SSM + read `kelai/flextrade/*` secrets + read sconf in S3) |
 | Secrets | `kelai/flextrade/api-token`, `…/vpn-credentials`, `…/win-proxy-admin` (RDP Administrator) |
 | Test harness | `~/flex_uat_test.py` on preproc (venv `~/flexvenv`, grpcio; token from Secrets Manager) |
