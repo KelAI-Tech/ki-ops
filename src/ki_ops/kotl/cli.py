@@ -28,6 +28,32 @@ def register_kotl_parser(sub) -> None:
     sr.add_argument("--trade-date", type=date.fromisoformat, required=True)
     sr.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
 
+    sk = ks.add_parser(
+        "submit-kelai",
+        help="fake submit from kelaidata shares trade file (S3 CSV) + ds2 H5 prices",
+    )
+    sk.add_argument("--trade-date", type=date.fromisoformat, required=True)
+    sk.add_argument(
+        "--shares",
+        default=None,
+        help="shares trade file, s3:// or local "
+        "(default: s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv)",
+    )
+    sk.add_argument(
+        "--ds2",
+        default=None,
+        help="ds2 H5, s3:// or local (default: s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5)",
+    )
+    sod_group = sk.add_mutually_exclusive_group(required=True)
+    sod_group.add_argument("--sod", type=Path, default=None, help="SOD CSV (ticker, quantity, market_price)")
+    sod_group.add_argument(
+        "--assume-flat-sod",
+        action="store_true",
+        help="no SOD book: trade the full target file from flat",
+    )
+    sk.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    sk.add_argument("--cache-dir", type=Path, default=None, help="S3 download cache (default: data/kotl/cache)")
+
     rf = ks.add_parser("refresh", help="refresh from KOTL fills JSON or kelai get_orders export")
     rf.add_argument("--trade-date", type=date.fromisoformat, required=True)
     rf.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
@@ -55,6 +81,32 @@ def run_kotl(args) -> int:
                 {
                     "submit_id": submit.submit_id,
                     "trade_date": args.trade_date.isoformat(),
+                    "order_count": len(submit.flex_order_ids),
+                    "flex_order_ids": list(submit.flex_order_ids),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if cmd == "submit-kelai":
+        from ki_ops.kotl.submit import submit_kelai_shares
+
+        submit = submit_kelai_shares(
+            store,
+            trade_date=args.trade_date,
+            shares_file=args.shares,
+            ds2_h5=args.ds2,
+            sod_csv=args.sod,
+            assume_flat_sod=args.assume_flat_sod,
+            cache_dir=args.cache_dir,
+        )
+        print(
+            json.dumps(
+                {
+                    "submit_id": submit.submit_id,
+                    "trade_date": args.trade_date.isoformat(),
+                    "shares_file": args.shares or "s3 default",
                     "order_count": len(submit.flex_order_ids),
                     "flex_order_ids": list(submit.flex_order_ids),
                 },

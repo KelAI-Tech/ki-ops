@@ -216,7 +216,20 @@ ki-ops is pre-trade (intents + gates). **KOTL** is the KelAI-side **sent / done 
 
 v1: CSV/Parquet store (`submits.csv`, `working_orders.csv`), CLI below, poll Flex (no subscribe yet). Flex helpers live under [`vendor/flextrade/kelai_flex_sample_codes/`](vendor/flextrade/kelai_flex_sample_codes/) (Brooklyn SDK is local/gitignored).
 
+**kelaidata S3 inputs:** `kotl submit-kelai` pulls the trade-dated shares file
+(`s3://kelaitrading/portfolio/shares/<YYYYMMDD>.csv`, headerless
+`TICKER,shares,VWAP` from `dollar_to_shares`) and prior-close prices + the
+point-in-time ticker map straight from the ds2 H5
+(`s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5`, read row-wise with h5py —
+no CSV exports). SOD must be explicit (`--sod` CSV or `--assume-flat-sod`);
+missing prices, duplicate tickers, and fractional shares abort the submit.
+Requires `pip install "ki-ops[kelaidata]"` (h5py, numpy, boto3); S3 downloads
+are ETag-cached under `data/kotl/cache/`.
+
 ```bash
+ki-ops kotl submit-kelai --trade-date 2026-08-06 --sod sod.csv          # S3 defaults
+ki-ops kotl submit-kelai --trade-date 2026-08-06 --assume-flat-sod \
+  --shares local_20260806.csv --ds2 local_ds2_data.h5                   # local override
 ki-ops kotl submit-rebalance --trade-date 2026-08-06
 ki-ops kotl refresh --trade-date 2026-08-06 --fixture examples/kotl/refresh_partial.json
 # or kelai get_orders export (JSON/CSV, GetOrderInfo2 flatten shape):
