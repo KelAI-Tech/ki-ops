@@ -197,6 +197,31 @@ Slack shows the subject plus JSON in a code block (truncated if very long; email
 
 [`dags/ki_ops_poc_perturbs.py`](dags/ki_ops_poc_perturbs.py) is an optional Airflow example (Airflow is not a package dependency). Cron is the same CLI entrypoint.
 
+## Releasing (wheel for kelaidata / MWAA)
+
+ki-ops ships to the kelaidata Airflow environment as a pure-python wheel in
+the MWAA wheelhouse (`plugins.zip`, installed offline with
+`--find-links /usr/local/airflow/plugins --no-index`). It is never imported
+as source by kelaidata — the DAG shells out to the pinned `ki-ops` CLI.
+
+To cut a release:
+
+1. Bump `[project].version` in `pyproject.toml` on `main`.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+The [release workflow](.github/workflows/release.yml) runs the test suite,
+builds the wheel, fails if the tag does not match the pyproject version or
+the wheel is not `py3-none-any`, and attaches
+`ki_ops-<version>-py3-none-any.whl` (+ sdist + `SHA256SUMS`) to a GitHub
+release.
+
+On the kelaidata side: `scripts/fetch_ki_ops_wheel.sh v0.2.0` downloads the
+wheel into its local `plugins/` wheelhouse, and `ki-ops==0.2.0` is pinned in
+`requirements_airflow.txt`. Runtime dependencies (`PyYAML`; `h5py`/`numpy`/
+`boto3` for the `[kelaidata]` extra) already have wheels in that wheelhouse.
+`scripts/mwaa_release.py build` then validates and packages it like every
+other bundled wheel.
+
 ## Layout
 
 ```
