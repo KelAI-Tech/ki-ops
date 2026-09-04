@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ki-ops"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic KI Ops library for trade analysis, portfolio holdings, pre-trade checks, and market-neutral risk snapshots"
 readme = "README.md"
 requires-python = ">=3.9"
