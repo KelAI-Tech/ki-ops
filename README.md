@@ -236,7 +236,20 @@ ki-ops kotl refresh --trade-date 2026-08-06 --fixture examples/kotl/refresh_part
 ki-ops kotl refresh --trade-date 2026-08-06 --fixture examples/kotl/get_order_info2_sample.json
 ki-ops kotl status --trade-date 2026-08-06
 ki-ops kotl status --trade-date 2026-08-06 --json
+ki-ops kotl eod --trade-date 2026-08-06 [--fixture PATH] [--tolerance N] [--json] [--notify] [--eod-dir PATH]
 ```
+
+**End-of-day loop:** `kotl eod` refreshes fills (fixture/export for now, live
+GetOrderInfo2 later), rebuilds the status report, checks flatness
+(`sum(|leaves|) <= --tolerance`), and freezes an **immutable** snapshot under
+`<data-dir>/eod/<trade_date>/` — `working_orders.csv`, `report.json`, and
+`eod_fills_<date>.csv` (`symbol,side,filled_qty,avg_fill_px`, non-zero fills
+only) for next-morning SOD recon. Stdout ends with a summary JSON (`flat`,
+`open_count`, `cancelled_count`, `total_abs_leaves`, paths). Exit `0` when
+flat, **exit `3` when not flat** (distinct from the pre-trade gate's `2` =
+blocked). `--notify` emails/Slacks the summary via the same plumbing as
+`extras notify-perturbs` (`config/notify.env`); a notify failure is reported
+in the summary but never changes the exit code.
 
 Offline demo uses fake submit + refresh fixtures under `examples/kotl/`:
 
