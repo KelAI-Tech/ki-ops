@@ -1,0 +1,19 @@
+{
+  "trade_date": "2026-08-06",
+  "fills": [
+    {"symbol": "AAPL.US", "filledQuantity": 10, "weightedAvgPrice": 191.2, "status": "PARTIALLY_FILLED"},
+    {"symbol": "AMD.US", "filledQuantity": 80, "status": "FILLED"},
+    {"symbol": "AMZN.US", "filledQuantity": 12, "status": "FILLED"},
+    {"symbol": "AVGO.US", "filledQuantity": 0, "status": "TRADABLE"},
+    {"symbol": "BA.US", "filledQuantity": 15, "status": "PARTIALLY_FILLED"},
+    {"symbol": "COIN.US", "filledQuantity": 55.4, "status": "FILLED"},
+    {"symbol": "JPM.US", "filledQuantity": 0, "status": "TRADABLE"},
+    {"symbol": "META.US", "filledQuantity": 20, "status": "FILLED"},
+    {"symbol": "MSFT.US", "filledQuantity": 7, "status": "PARTIALLY_FILLED"},
+    {"symbol": "NVDA.US", "filledQuantity": 20, "status": "FILLED"},
+    {"symbol": "ORCL.US", "filledQuantity": 0, "status": "TRADABLE"},
+    {"symbol": "TSLA.US", "filledQuantity": 30, "status": "FILLED"},
+    {"symbol": "V.US", "filledQuantity": 30, "status": "FILLED"},
+    {"symbol": "XOM.US", "filledQuantity": 60, "status": "PARTIALLY_FILLED"}
+  ]
+}
