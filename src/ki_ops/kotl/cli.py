@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -63,6 +64,37 @@ def register_kotl_parser(sub) -> None:
     st.add_argument("--trade-date", type=date.fromisoformat, required=True)
     st.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     st.add_argument("--json", action="store_true", help="JSON instead of table")
+
+    eod = ks.add_parser(
+        "eod",
+        help="end-of-day: refresh, flatness check, immutable snapshot + fills CSV (exit 3 when not flat)",
+    )
+    eod.add_argument("--trade-date", type=date.fromisoformat, required=True)
+    eod.add_argument(
+        "--fixture",
+        type=Path,
+        default=DEFAULT_FIXTURE,
+        help="refresh source: KOTL fills JSON or kelai get_orders export (live GetOrderInfo2 later)",
+    )
+    eod.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    eod.add_argument(
+        "--tolerance",
+        default="0",
+        help="share tolerance for flatness: flat when sum(|leaves|) <= N (default 0)",
+    )
+    eod.add_argument("--json", action="store_true", help="summary JSON only (default: table + summary)")
+    eod.add_argument(
+        "--notify",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="email/Slack the summary via the notify-perturbs plumbing (config/notify.env)",
+    )
+    eod.add_argument(
+        "--eod-dir",
+        type=Path,
+        default=None,
+        help="snapshot root (default: <data-dir>/eod); one immutable folder per trade date",
+    )
 
 
 def run_kotl(args) -> int:
@@ -132,6 +164,38 @@ def run_kotl(args) -> int:
             )
         )
         return 0
+
+    if cmd == "eod":
+        from decimal import Decimal
+
+        from ki_ops.kotl.eod import run_eod
+
+        summary, report = run_eod(
+            store,
+            trade_date=args.trade_date,
+            fixture=args.fixture,
+            tolerance=Decimal(args.tolerance),
+            eod_dir=args.eod_dir,
+        )
+        if args.notify:
+            from ki_ops.extras.notify import dispatch, load_notify_settings
+
+            subject = (
+                f"ki-ops kotl eod {args.trade_date.isoformat()}: flat={summary['flat']} "
+                f"total_abs_leaves={summary['total_abs_leaves']}"
+            )
+            try:
+                summary["notify"] = dispatch(
+                    settings=load_notify_settings(),
+                    subject=subject,
+                    body=json.dumps(summary, indent=2),
+                )
+            except Exception as exc:  # notify must never flip the EOD verdict
+                summary["notify"] = {"error": str(exc)}
+        if not args.json:
+            print(format_status_table(report))
+        print(json.dumps(summary, indent=2))
+        return 0 if summary["flat"] else 3
 
     if cmd == "status":
         orders = store.load_working_orders(trade_date=args.trade_date)
