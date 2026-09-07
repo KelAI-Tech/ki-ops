@@ -118,6 +118,50 @@ def test_gate_pass_with_prior(tmp_path, capsys):
     assert json.loads(out_json.read_text()) == payload
 
 
+def test_gate_s3_config_is_fetched(tmp_path, capsys, monkeypatch):
+    """An ``s3://`` --config is resolved through fetch() (cache), not open()."""
+    import ki_ops.gate as gate_mod
+
+    cfg = write_config(tmp_path)
+    s3_uri = "s3://kelaitrading/config/ki_ops/risk.yaml"
+    real_fetch = gate_mod.fetch
+
+    def fake_fetch(path, *, cache_dir):
+        if str(path) == s3_uri:
+            return cfg
+        return real_fetch(path, cache_dir=cache_dir)
+
+    monkeypatch.setattr(gate_mod, "fetch", fake_fetch)
+    dollar = write_dollar_book(tmp_path / "Portfolio_20260806.csv", {"101": "50000", "102": "-50000"})
+    argv = [
+        "gate",
+        "--strategy-id", STRATEGY,
+        "--trade-date", TD.isoformat(),
+        "--config", s3_uri,
+        "--cache-dir", str(tmp_path / "cache"),
+        "--dollar-file", str(dollar),
+    ]
+    rc = cli_main(argv)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["config"] == s3_uri  # verdict records the S3 URI, not the cache path
+    assert payload["max_net_exposure"] == "0.1000"
+    assert "config" in payload["input_hashes"]
+
+
+def test_sma_ima_config_matches_mandate():
+    """config/risk_management_sma_ima.yaml carries the SMA/IMA mandate limits."""
+    from ki_ops.config import load_risk_settings
+
+    repo_yaml = Path(__file__).resolve().parents[1] / "config" / "risk_management_sma_ima.yaml"
+    settings = load_risk_settings(repo_yaml)
+    assert settings.max_net_exposure == Decimal("0.02")  # |net| <= 10% AUM at 5x leverage
+    assert settings.max_position_concentration == Decimal("0.05")  # IMA 5% of GMV
+    assert settings.max_turnover == Decimal("0.25")  # two-way, kelaisim convention
+    assert settings.max_adv_participation == Decimal("0.10")  # warn-only
+    assert settings.max_portfolio_value == Decimal("125000000")  # 500% of $25M AUM
+
+
 def test_gate_net_exposure_block(tmp_path, capsys):
     dollar = write_dollar_book(tmp_path / "Portfolio_20260806.csv", {"101": "80000", "102": "-20000"})
     write_dollar_book(tmp_path / "Portfolio_20260805.csv", {"101": "79000", "102": "-21000"})

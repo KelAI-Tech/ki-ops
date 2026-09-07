@@ -1,0 +1,63 @@
+# SMA / IMA risk mandate limits for the KelAI SMA.
+#
+# Mandate frame: $25M AUM, max 5x leverage (=> $125M GMV at full deployment).
+# Sources: kelaisim experiments/tmp_phase2_neut/ima_checks.py and
+# docs/plans/sma/sma_phase2_prod_neutralization.md. The gate only sees the
+# book (GMV), never AUM, so AUM-relative mandate limits are expressed here in
+# their leverage-safe scale-invariant (per-GMV) form.
+#
+# The authoritative runtime copy lives at
+#   s3://kelaitrading/config/ki_ops/risk_management_sma_ima.yaml
+# and is what the kelaidata ki_ops_gate task points at (via
+# KI_OPS_GATE_CONFIG), so a limit change is an S3 upload — no wheel release
+# or Airflow redeploy. Keep this repo copy in sync: it is the reviewed
+# source of record.
+risk_management:
+  enabled: true
+
+  # max abs share qty per name; sized for full IMA scale ($125M GMV) where a
+  # 1.25%-of-GMV position in a ~$5 name is ~300k shares.
+  max_position_size: 300000
+  # IMA gross cap: 500% of $25M AUM.
+  max_portfolio_value: 125000000
+  # ~2% of AUM; the IMA monthly stop is -6.5% of AUM.
+  max_daily_loss: 500000
+
+  # IMA max single position: 5% of GMV. The C5 recipe caps names at 1.25% of
+  # GMV, so a breach here means the pipeline broke, not the strategy.
+  max_position_concentration: 0.05
+
+  max_position_volatility: 0.3
+  volatility_lookback: 30
+
+  use_stop_losses: false
+  default_stop_loss: 0.05
+  trailing_stop: true
+  trailing_stop_distance: 0.02
+
+  # Order size checks off (matches the POC config).
+  enforce_order_size_limits: false
+  min_order_size: 1
+  max_order_size: 750000
+  max_orders_per_minute: 100000
+
+  enforce_market_hours: false
+  pre_market_trading: false
+  after_hours_trading: false
+
+  # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / prior GMV.
+  # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
+  max_turnover: 0.25
+
+  # IMA net limit: |net| <= 10% of AUM. At the full 5x leverage that is
+  # |net|/GMV <= 2%, which is the form the gate can enforce without knowing
+  # AUM (and stays inside the mandate at any lower leverage). The
+  # neutralized dollar book runs ~0.2% of GMV, so this still has ~10x
+  # headroom; the $100k-pilot SHARES book (+43% net from integer-share
+  # rounding) is blocked either way.
+  max_net_exposure: 0.02
+
+  # IMA liquidity is framed at 20% ADV/day; per-order participation over
+  # 10% warns (does not block).
+  max_adv_participation: 0.10
+  allow_shorts: true
