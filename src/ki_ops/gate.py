@@ -412,7 +412,10 @@ def run_gate_checks(
 
     config = config or DEFAULT_GATE_CONFIG
     cache = cache_dir or DEFAULT_CACHE_DIR
-    settings = load_risk_settings(config)
+    # The risk YAML may live on S3 (s3://kelaitrading/config/…) so limit
+    # changes are an S3 upload, not a wheel release / Airflow redeploy.
+    config_local = fetch(config, cache_dir=cache)
+    settings = load_risk_settings(config_local)
 
     dollar_spec = dollar_file or dollar_book_path(strategy_id, trade_date, env=env)
     dollar_local = fetch(dollar_spec, cache_dir=cache)
@@ -469,7 +472,7 @@ def run_gate_checks(
 
     hashes = input_hashes(
         {
-            "config": config,
+            "config": config_local,
             "dollar": dollar_local,
             "prior": prior_local,
             "shares": shares_local,
@@ -543,7 +546,7 @@ def register_gate_parser(sub) -> None:
         "--config",
         dest="gate_config",
         default=str(DEFAULT_GATE_CONFIG),
-        help="risk YAML (defaults to config/risk_management_poc.yaml)",
+        help="risk YAML, s3:// or local (defaults to config/risk_management_poc.yaml)",
     )
     g.add_argument(
         "--json-out",

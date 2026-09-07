@@ -172,10 +172,12 @@ Exit code `2` means a **blocking** check failed.
 ```bash
 ki-ops gate --strategy-id df_combo_..._neutralized --trade-date 2026-08-06 \
   [--env prod|dev] [--dollar-file PATH] [--prior-file PATH] [--shares-file PATH] \
-  [--ds2 PATH] [--config config/risk_management_poc.yaml] [--json-out PATH-or-s3://]
+  [--ds2 PATH] [--config PATH-or-s3://] [--json-out PATH-or-s3://]
 ```
 
 Checks (limits from the risk YAML): GMV > 0, `|net|/GMV` vs `max_net_exposure`, per-name `|dollars|/GMV` vs `max_position_concentration`, two-way turnover vs the latest prior `Portfolio_*.csv` in the same folder vs `max_turnover` (prior missing → warning, check skipped). Shares side adds net/GMV, day-over-day churn, and a dropped-names count vs the dollar book.
+
+`--config` accepts an `s3://` URI (fetched through the ETag cache like every other S3 input), so limits can change without a wheel release or Airflow redeploy. The SMA/IMA mandate limits live in [`config/risk_management_sma_ima.yaml`](config/risk_management_sma_ima.yaml) (repo source of record); the runtime copy the kelaidata gate task reads is `s3://kelaitrading/config/ki_ops/risk_management_sma_ima.yaml` — re-upload after changing the repo copy. `--config` defaults to the POC limits (`config/risk_management_poc.yaml`).
 
 Exit codes (Airflow contract):
 
