@@ -171,7 +171,7 @@ def _parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser(
         "run-perturb-baseline",
-        help="POC baseline: full pre-trade gate on sod + trade intents (~24% two-way TO)",
+        help="POC baseline: full pre-trade gate on sod + trade intents (~24%% two-way TO)",
     )
     _add_poc_csv_args(rp)
 
