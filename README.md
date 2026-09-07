@@ -165,6 +165,28 @@ print(result.to_dict())  # "passed", violations, warnings, turnover, …
 
 Exit code `2` means a **blocking** check failed.
 
+## Gate (kelaidata pipeline pre-trade gate)
+
+`ki-ops gate` runs in the kelaidata `lseg_strategy_pipeline_combo` DAG right before `dollar_to_shares`. It validates the **neutralized dollar book** (`s3://kelaitrading/portfolio/dollar/<strategy_id>/Portfolio_<YYYYMMDD>.csv`, header `SecurityID,$_value`; `--env dev` uses `portfolio_dev`) and, when a converted shares file exists (or `--shares-file` is given), re-prices it with the ds2 H5 prior close and re-runs the same limits — this catches conversion bugs like a one-sided shares book built from a neutral dollar book.
+
+```bash
+ki-ops gate --strategy-id df_combo_..._neutralized --trade-date 2026-08-06 \
+  [--env prod|dev] [--dollar-file PATH] [--prior-file PATH] [--shares-file PATH] \
+  [--ds2 PATH] [--config config/risk_management_poc.yaml] [--json-out PATH-or-s3://]
+```
+
+Checks (limits from the risk YAML): GMV > 0, `|net|/GMV` vs `max_net_exposure`, per-name `|dollars|/GMV` vs `max_position_concentration`, two-way turnover vs the latest prior `Portfolio_*.csv` in the same folder vs `max_turnover` (prior missing → warning, check skipped). Shares side adds net/GMV, day-over-day churn, and a dropped-names count vs the dollar book.
+
+Exit codes (Airflow contract):
+
+| Exit | Meaning | stdout |
+|------|---------|--------|
+| `0` | passed (`true` or `"with warnings"`) | full verdict JSON |
+| `1` | infra error (missing input, S3 failure…) | `{"passed": false, "error": …, "error_type": "infra", "ki_ops_version": …}` |
+| `2` | a blocking risk check failed | full verdict JSON with `violation_codes` |
+
+The verdict JSON mirrors the perturb commands: `passed` (`true` / `false` / `"with warnings"`), `violation_codes` / `violations`, `warning_codes` / `warnings`, `input_hashes`, `config_hash`, plus `ki_ops_version`, `dollar` / `shares` metric blocks, and `corp_action_check: "not_implemented"` (Snowflake DS2Adj corp-action check is a schema-reserved follow-up). `--json-out` writes the same payload to a local file or an `s3://` URI.
+
 ## Email + Slack notifications
 
 `ki-ops extras notify-perturbs` runs all three perturb commands, captures their JSON stdout, and sends **one email** plus an optional **Slack** post. Settings load from `config/notify.env` (gitignored; copy [`config/notify.env.example`](config/notify.env.example)). Process env vars override the file.
