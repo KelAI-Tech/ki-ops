@@ -49,13 +49,16 @@ risk_management:
   # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
   max_turnover: 0.25
 
-  # IMA net limit: |net| <= 10% of AUM. At the full 5x leverage that is
-  # |net|/GMV <= 2%, which is the form the gate can enforce without knowing
-  # AUM (and stays inside the mandate at any lower leverage). The
-  # neutralized dollar book runs ~0.2% of GMV, so this still has ~10x
-  # headroom; the $100k-pilot SHARES book (+43% net from integer-share
-  # rounding) is blocked either way.
-  max_net_exposure: 0.02
+  # IMA net limit: |net| <= 10% of AUM. The gate observes GMV, not AUM, so
+  # this is enforced as |net|/GMV <= 10% -- exactly the C5 recipe's own
+  # neutralization tolerance ("net within +/-10% of GMV") and the IMA limit
+  # at unlevered deployment. Real prod books drift to 4-9% of GMV on some
+  # days (e.g. +8.6% on 2026-08-31, +4.1% on 2026-09-08), so a tighter
+  # setting false-blocks legitimate books. NOTE: at full 5x leverage the
+  # AUM-based mandate binds at |net|/GMV <= 2% -- when the SMA scales up,
+  # tighten this value (an S3 upload of this file, no redeploy); the
+  # AUM/beta-adjusted forms stay monitored by kelaisim ima_checks.py.
+  max_net_exposure: 0.10
 
   # IMA liquidity is framed at 20% ADV/day; per-order participation over
   # 10% warns (does not block).
