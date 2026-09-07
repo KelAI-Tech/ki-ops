@@ -155,7 +155,7 @@ def test_sma_ima_config_matches_mandate():
 
     repo_yaml = Path(__file__).resolve().parents[1] / "config" / "risk_management_sma_ima.yaml"
     settings = load_risk_settings(repo_yaml)
-    assert settings.max_net_exposure == Decimal("0.02")  # |net| <= 10% AUM at 5x leverage
+    assert settings.max_net_exposure == Decimal("0.10")  # IMA |net| <= 10%, per-GMV form
     assert settings.max_position_concentration == Decimal("0.05")  # IMA 5% of GMV
     assert settings.max_turnover == Decimal("0.25")  # two-way, kelaisim convention
     assert settings.max_adv_participation == Decimal("0.10")  # warn-only
