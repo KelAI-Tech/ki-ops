@@ -311,6 +311,42 @@ class LiveFlexAdapter:
             # positionGroup (see module docstring); payload "fund" stays
             # ledger-only.
 
+        def _dump_create_results(results, submitted_origin_ids) -> str:
+            """Raw CreateOrders results → JSON evidence file (join anomalies)."""
+            import tempfile
+            from datetime import datetime, timezone
+
+            payload = {
+                "dumped_at": datetime.now(timezone.utc).isoformat(),
+                "submitted_origin_ids": list(submitted_origin_ids),
+                "results": [
+                    {
+                        "orderId": str(r.orderId),
+                        "success": bool(r.success),
+                        "description": str(getattr(r, "description", "") or ""),
+                        "validationIssues": [
+                            str(getattr(v, "description", v))
+                            for v in getattr(r, "validationIssues", [])
+                        ],
+                        "complianceIssues": [
+                            str(getattr(v, "description", v))
+                            for v in getattr(r, "complianceIssues", [])
+                        ],
+                    }
+                    for r in results
+                ],
+            }
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix="kotl_create_results_",
+                suffix=".json",
+                delete=False,
+                encoding="utf-8",
+            )
+            with handle as f:
+                json.dump(payload, f, indent=1)
+            return handle.name
+
         channel = _open_channel(self.config)
         try:
             stub = OrderServiceModule.OrderServiceStub(channel)
@@ -327,30 +363,63 @@ class LiveFlexAdapter:
             if close is not None:
                 close()
 
-        if len(raw_results) != len(order_list):
-            raise RuntimeError(
-                f"CreateOrders returned {len(raw_results)} results for "
-                f"{len(order_list)} orders — cannot join results to orders"
-            )
-
         # The stream yields results in completion order, not submission order
         # (observed live in UAT 2026-09-08: 1568/1569 results out of place), so
         # positional zip misattributes success/rejection. Join on originId,
         # which Flex echoes back as the result orderId, and return results in
         # submission order — callers zip them against the payload list.
-        result_by_origin: dict[str, Any] = {}
+        #
+        # An order can produce MORE THAN ONE result message (observed live
+        # 2026-09-08: 2,082 results for 1,911 orders): interim states followed
+        # by a terminal one. Keep the LAST result received per originId and
+        # log the extras. Unknown result ids or submitted orders with no
+        # result at all remain hard errors — those would misstate the book.
+        known = set(origin_ids)
+        result_groups: dict[str, list] = {}
+        unknown_results = []
         for result in raw_results:
             key = str(result.orderId)
-            if key in result_by_origin:
-                raise RuntimeError(f"CreateOrders returned duplicate result orderId {key!r}")
-            result_by_origin[key] = result
-        missing = [o for o in origin_ids if o not in result_by_origin]
-        if missing:
-            shown = ", ".join(missing[:5])
-            raise RuntimeError(
-                f"CreateOrders results do not cover {len(missing)} submitted "
-                f"originId(s) (e.g. {shown}) — cannot join results to orders"
+            if key in known:
+                result_groups.setdefault(key, []).append(result)
+            else:
+                unknown_results.append(result)
+        problems = []
+        if unknown_results:
+            shown = ", ".join(
+                f"{r.orderId!r} success={bool(r.success)}" for r in unknown_results[:5]
             )
+            problems.append(
+                f"{len(unknown_results)} result(s) with orderIds not among the "
+                f"submitted originIds (e.g. {shown})"
+            )
+        missing = [o for o in origin_ids if o not in result_groups]
+        if missing:
+            problems.append(
+                f"no result for {len(missing)} submitted originId(s) "
+                f"(e.g. {', '.join(missing[:5])})"
+            )
+        if problems:
+            dump = _dump_create_results(raw_results, origin_ids)
+            raise RuntimeError(
+                "CreateOrders results cannot be joined to orders: "
+                + "; ".join(problems)
+                + f" — raw results dumped to {dump}"
+            )
+        multi = {k: v for k, v in result_groups.items() if len(v) > 1}
+        if multi:
+            extras = sum(len(v) - 1 for v in multi.values())
+            sample_key = next(iter(multi))
+            sample = " | ".join(
+                f"success={bool(r.success)} desc={str(getattr(r, 'description', ''))[:60]!r}"
+                for r in multi[sample_key]
+            )
+            print(
+                f"CreateOrders: {extras} extra interim result(s) across "
+                f"{len(multi)} order(s) — keeping the last result per originId "
+                f"(e.g. {sample_key}: {sample}); raw dump: "
+                f"{_dump_create_results(raw_results, origin_ids)}"
+            )
+        result_by_origin = {key: group[-1] for key, group in result_groups.items()}
 
         out: list[dict] = []
         for origin_id, payload in zip(origin_ids, order_list):

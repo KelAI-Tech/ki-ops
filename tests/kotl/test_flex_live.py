@@ -185,23 +185,50 @@ def test_create_orders_send_to_ems_off(backend):
     assert backend.last_create_request.sendToEms is False
 
 
-def test_create_orders_result_count_mismatch_raises(backend):
+def test_create_orders_missing_result_raises(backend):
     backend.create_results = [make_create_result("abc-1")]
     adapter = LiveFlexAdapter(CONFIG)
-    with pytest.raises(RuntimeError, match="cannot join"):
-        adapter.create_orders([_payload("AAPL.US", 1, "BUY"), _payload("MSFT.US", 2, "BUY")])
-
-
-def test_create_orders_unknown_result_id_raises(backend):
-    backend.create_results = [make_create_result("abc-1"), make_create_result("FLEX-99")]
-    adapter = LiveFlexAdapter(CONFIG)
-    with pytest.raises(RuntimeError, match="do not cover"):
+    with pytest.raises(RuntimeError, match="no result for 1 submitted originId"):
         adapter.create_orders(
             [
                 _payload("AAPL.US", 1, "BUY", origin_id="abc-1"),
                 _payload("MSFT.US", 2, "BUY", origin_id="abc-2"),
             ]
         )
+
+
+def test_create_orders_unknown_result_id_raises(backend):
+    backend.create_results = [make_create_result("abc-1"), make_create_result("FLEX-99")]
+    adapter = LiveFlexAdapter(CONFIG)
+    with pytest.raises(RuntimeError, match="not among the submitted originIds"):
+        adapter.create_orders(
+            [
+                _payload("AAPL.US", 1, "BUY", origin_id="abc-1"),
+                _payload("MSFT.US", 2, "BUY", origin_id="abc-2"),
+            ]
+        )
+
+
+def test_create_orders_keeps_last_result_per_origin(backend, capsys):
+    # Observed live (UAT 2026-09-08): an order can produce interim results
+    # before the terminal one — 2,082 results for 1,911 orders. The last
+    # result per originId wins; extras are logged, order stays submission-order.
+    backend.create_results = [
+        make_create_result("abc-1", success=False, description="interim"),
+        make_create_result("abc-2"),
+        make_create_result("abc-1", success=True, description="booked"),
+    ]
+    adapter = LiveFlexAdapter(CONFIG)
+    results = adapter.create_orders(
+        [
+            _payload("AAPL.US", 1, "BUY", origin_id="abc-1"),
+            _payload("MSFT.US", 2, "BUY", origin_id="abc-2"),
+        ]
+    )
+    assert [r["orderId"] for r in results] == ["abc-1", "abc-2"]
+    assert results[0]["success"] is True  # terminal result, not the interim one
+    out = capsys.readouterr().out
+    assert "1 extra interim result(s) across 1 order(s)" in out
 
 
 def test_create_orders_empty_raises(backend):
