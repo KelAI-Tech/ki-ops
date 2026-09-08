@@ -370,17 +370,31 @@ class LiveFlexAdapter:
         # submission order — callers zip them against the payload list.
         #
         # An order can produce MORE THAN ONE result message (observed live
-        # 2026-09-08: 2,082 results for 1,911 orders): interim states followed
-        # by a terminal one. Keep the LAST result received per originId and
-        # log the extras. Unknown result ids or submitted orders with no
-        # result at all remain hard errors — those would misstate the book.
+        # 2026-09-08: 2,082 results for 1,911 orders). Two live-verified cases:
+        #
+        # - interim states followed by a terminal one — keep the LAST result
+        #   received per originId and log the extras;
+        # - **fund-split child orders**: Flex splits an order across the
+        #   position group's fund allocations and returns one result per child
+        #   keyed ``<originId>-B``, ``<originId>-C``, … with NO result under
+        #   the parent id (live: 171 of 1,911 orders split into exactly B+C).
+        #   Children join back to their parent; the parent result is the
+        #   AND of the children's successes.
+        #
+        # Unknown result ids or submitted orders with no result at all remain
+        # hard errors — those would misstate the book.
         known = set(origin_ids)
         result_groups: dict[str, list] = {}
+        child_groups: dict[str, list] = {}
         unknown_results = []
         for result in raw_results:
             key = str(result.orderId)
             if key in known:
                 result_groups.setdefault(key, []).append(result)
+                continue
+            parent, dash, suffix = key.rpartition("-")
+            if dash and parent in known and len(suffix) == 1 and suffix.isalpha():
+                child_groups.setdefault(parent, []).append(result)
             else:
                 unknown_results.append(result)
         problems = []
@@ -392,7 +406,9 @@ class LiveFlexAdapter:
                 f"{len(unknown_results)} result(s) with orderIds not among the "
                 f"submitted originIds (e.g. {shown})"
             )
-        missing = [o for o in origin_ids if o not in result_groups]
+        missing = [
+            o for o in origin_ids if o not in result_groups and o not in child_groups
+        ]
         if missing:
             problems.append(
                 f"no result for {len(missing)} submitted originId(s) "
@@ -404,6 +420,16 @@ class LiveFlexAdapter:
                 "CreateOrders results cannot be joined to orders: "
                 + "; ".join(problems)
                 + f" — raw results dumped to {dump}"
+            )
+        if child_groups:
+            sample_key = next(iter(child_groups))
+            sample_children = ", ".join(
+                str(r.orderId) for r in child_groups[sample_key]
+            )
+            print(
+                f"CreateOrders: {len(child_groups)} order(s) fund-split by Flex "
+                f"into child orders (e.g. {sample_key} → {sample_children}) — "
+                "parent success is the AND of its children"
             )
         multi = {k: v for k, v in result_groups.items() if len(v) > 1}
         if multi:
@@ -421,25 +447,48 @@ class LiveFlexAdapter:
             )
         result_by_origin = {key: group[-1] for key, group in result_groups.items()}
 
+        def _issues(results) -> list[str]:
+            return [
+                str(getattr(v, "description", v))
+                for r in results
+                for v in list(getattr(r, "validationIssues", []))
+                + list(getattr(r, "complianceIssues", []))
+            ]
+
         out: list[dict] = []
         for origin_id, payload in zip(origin_ids, order_list):
-            result = result_by_origin[origin_id]
-            issues = [
-                str(getattr(v, "description", v))
-                for v in list(getattr(result, "validationIssues", []))
-                + list(getattr(result, "complianceIssues", []))
-            ]
-            out.append(
-                {
+            children = child_groups.get(origin_id)
+            if children:
+                child_ids = sorted(str(r.orderId) for r in children)
+                row = {
+                    # The ledger keys on the parent originId — the durable
+                    # handle KOTL owns; child ids ride along for refresh/audit.
+                    "orderId": origin_id,
+                    "success": all(bool(r.success) for r in children),
+                    "description": "; ".join(
+                        text
+                        for text in (
+                            str(getattr(r, "description", "") or "") for r in children
+                        )
+                        if text
+                    ),
+                    "issues": _issues(children),
+                    "childOrderIds": child_ids,
+                }
+            else:
+                result = result_by_origin[origin_id]
+                row = {
                     "orderId": str(result.orderId),
                     "success": bool(result.success),
-                    "symbol": payload.get("symbol"),
-                    "side": payload.get("side"),
-                    "quantity": payload.get("quantity"),
                     "description": str(getattr(result, "description", "") or ""),
-                    "issues": issues,
+                    "issues": _issues([result]),
                 }
+            row.update(
+                symbol=payload.get("symbol"),
+                side=payload.get("side"),
+                quantity=payload.get("quantity"),
             )
+            out.append(row)
         return out
 
 
@@ -520,6 +569,69 @@ def fetch_order_rows(config: FlexConfig, trade_date: str | date) -> list[dict[st
     return rows
 
 
+def aggregate_split_order_rows(
+    rows: list[dict[str, Any]], stored_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Fold Flex fund-split child rows (``<parent>-B``/``-C`` …) into one parent row.
+
+    Flex splits an order across the position group's fund allocations; the
+    ledger keys on the parent originId, so child rows must re-aggregate before
+    the refresh join: quantities and fills sum, the average price is
+    fill-weighted, and when children disagree on status the least-filled
+    child's status wins (conservative: the order stays working until every
+    child is done). ``fund`` is kept only when unanimous — a split parent has
+    no single fund.
+    """
+    stored = {str(s).upper() for s in stored_ids}
+    parents: dict[str, list[dict[str, Any]]] = {}
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        order_id = str(row.get("orderId") or "")
+        parent, dash, suffix = order_id.rpartition("-")
+        if (
+            dash
+            and len(suffix) == 1
+            and suffix.isalpha()
+            and parent.upper() in stored
+            and order_id.upper() not in stored
+        ):
+            parents.setdefault(parent, []).append(row)
+        else:
+            out.append(row)
+    for parent, children in parents.items():
+        quantity = sum(float(c.get("quantity") or 0) for c in children)
+        filled = sum(float(c.get("filledQuantity") or 0) for c in children)
+        avg_price = (
+            sum(
+                float(c.get("filledQuantity") or 0) * float(c.get("weightedAvgPrice") or 0)
+                for c in children
+            )
+            / filled
+            if filled
+            else 0.0
+        )
+        least_done = max(
+            children,
+            key=lambda c: float(c.get("quantity") or 0) - float(c.get("filledQuantity") or 0),
+        )
+        funds = {str(c.get("fund_acc_tgt") or c.get("fund") or "") for c in children}
+        fund_value = next(iter(funds)) if len(funds) == 1 else ""
+        merged = dict(children[0])
+        merged.update(
+            orderId=parent,
+            quantity=quantity,
+            filledQuantity=filled,
+            weightedAvgPrice=avg_price,
+            status=least_done.get("status"),
+            childOrderIds=sorted(str(c.get("orderId")) for c in children),
+        )
+        for key in ("fund", "fund_acc_tgt"):
+            if key in merged:
+                merged[key] = fund_value
+        out.append(merged)
+    return out
+
+
 class LiveRefreshSource:
     """Refresh source over live ``GetOrderInfo2`` (drop-in for the fixtures)."""
 
@@ -530,6 +642,7 @@ class LiveRefreshSource:
         from ki_ops.kotl.kelai_refresh import KelaiRefreshSource
 
         rows = fetch_order_rows(self.config, trade_date)
+        rows = aggregate_split_order_rows(rows, [w.flex_order_id for w in stored])
         source = KelaiRefreshSource(rows, trade_date=date.fromisoformat(trade_date))
         return source.fetch_orders(trade_date, stored=stored)
 

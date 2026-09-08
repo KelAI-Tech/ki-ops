@@ -231,6 +231,64 @@ def test_create_orders_keeps_last_result_per_origin(backend, capsys):
     assert "1 extra interim result(s) across 1 order(s)" in out
 
 
+def test_create_orders_fund_split_children_join_to_parent(backend, capsys):
+    # Observed live (UAT 2026-09-08): Flex splits an order across the position
+    # group's fund allocations — results come back as <originId>-B/-C with no
+    # result under the parent id (171 of 1,911 orders, exactly B+C each).
+    backend.create_results = [
+        make_create_result("abc-1-B"),
+        make_create_result("abc-2"),
+        make_create_result("abc-1-C"),
+    ]
+    adapter = LiveFlexAdapter(CONFIG)
+    results = adapter.create_orders(
+        [
+            _payload("AAPL.US", 10, "BUY", origin_id="abc-1"),
+            _payload("MSFT.US", 2, "BUY", origin_id="abc-2"),
+        ]
+    )
+    assert [r["orderId"] for r in results] == ["abc-1", "abc-2"]
+    assert results[0]["success"] is True
+    assert results[0]["childOrderIds"] == ["abc-1-B", "abc-1-C"]
+    assert "childOrderIds" not in results[1]
+    assert "1 order(s) fund-split by Flex" in capsys.readouterr().out
+
+
+def test_create_orders_fund_split_failing_child_fails_parent(backend):
+    backend.create_results = [
+        make_create_result("abc-1-B"),
+        make_create_result("abc-1-C", success=False, description="no entitlement"),
+    ]
+    adapter = LiveFlexAdapter(CONFIG)
+    (result,) = adapter.create_orders([_payload("AAPL.US", 10, "BUY", origin_id="abc-1")])
+    assert result["success"] is False
+    assert result["description"] == "no entitlement"
+
+
+def test_aggregate_split_order_rows():
+    from ki_ops.kotl.flex_live import aggregate_split_order_rows
+
+    rows = [
+        {"orderId": "p-1-B", "symbol": "AAPL.US", "quantity": 6.0, "filledQuantity": 6.0,
+         "weightedAvgPrice": 100.0, "status": 2, "fund_acc_tgt": "KEL-B"},
+        {"orderId": "p-1-C", "symbol": "AAPL.US", "quantity": 4.0, "filledQuantity": 2.0,
+         "weightedAvgPrice": 101.0, "status": 1, "fund_acc_tgt": "KEL-C"},
+        {"orderId": "p-2", "symbol": "MSFT.US", "quantity": 3.0, "filledQuantity": 0.0,
+         "weightedAvgPrice": 0.0, "status": 1, "fund_acc_tgt": "KEL-B"},
+    ]
+    out = aggregate_split_order_rows(rows, ["p-1", "p-2"])
+    by_id = {r["orderId"]: r for r in out}
+    assert set(by_id) == {"p-1", "p-2"}
+    merged = by_id["p-1"]
+    assert merged["quantity"] == 10.0
+    assert merged["filledQuantity"] == 8.0
+    assert merged["weightedAvgPrice"] == pytest.approx((6 * 100 + 2 * 101) / 8)
+    assert merged["status"] == 1  # least-filled child's status wins
+    assert merged["fund_acc_tgt"] == ""  # mixed funds: no single parent fund
+    assert merged["childOrderIds"] == ["p-1-B", "p-1-C"]
+    assert by_id["p-2"]["quantity"] == 3.0  # unsplit rows pass through
+
+
 def test_create_orders_empty_raises(backend):
     with pytest.raises(ValueError, match="empty"):
         LiveFlexAdapter(CONFIG).create_orders([])
