@@ -81,6 +81,10 @@ Releases are automatic. Every merge to `main` runs
 5. **Publishes a GitHub release** with the wheel, the sdist, and
    `SHA256SUMS`.
 
+A tag without a release is harmless (e.g. `v0.2.1`: its release run failed
+after tagging, and the next merge released `v0.2.2`) — derivation always
+bumps from the latest tag, never from the latest release.
+
 **Manual major/minor bump**: run the release workflow via
 `workflow_dispatch` with an explicit `version` input (e.g. `1.0.0`);
 subsequent merges derive from that tag (`1.0.1`, `1.0.2`, …).
@@ -114,7 +118,7 @@ side:
 
 ```bash
 # in the kelaidata repo — vendor the wheel from the GitHub release:
-./scripts/fetch_ki_ops_wheel.sh vX.Y.Z
+./scripts/fetch_ki_ops_wheel.sh v0.2.2    # latest release at time of writing
 ```
 
 The script downloads `ki_ops-X.Y.Z-py3-none-any.whl` from the
