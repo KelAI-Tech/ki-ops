@@ -17,6 +17,7 @@ from ki_ops.kotl.submit import submit_rebalance_csv
 # Exit codes (0 ok, 2 pre-trade gate blocked, 3 EOD not flat are taken):
 EXIT_RECON_DIVERGENCE = 4
 EXIT_SUBMIT_REFUSED = 5
+EXIT_UNRESOLVED_SECURITIES = 6
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
@@ -152,6 +153,15 @@ def register_kotl_parser(sub) -> None:
         "(default 100000000; env KOTL_MAX_GROSS_NOTIONAL)",
     )
     sk.add_argument(
+        "--unresolved",
+        choices=("block", "skip"),
+        default="block",
+        help="symbols missing from the Flex security master (pre-submit "
+        "SecurityService lookup, live envs): block the submit (default, exit 6) "
+        "or skip them and submit resolved names only; the unresolved list is "
+        "always written as unresolved_<submit_id>.csv next to the trade file",
+    )
+    sk.add_argument(
         "--trade-file-out",
         default=None,
         help="trade file destination, local path or s3:// URL (default: "
@@ -261,6 +271,7 @@ def run_kotl(args) -> int:
         from ki_ops.kotl.submit import (
             ReconDivergenceError,
             SubmitRefusedError,
+            UnresolvedSecuritiesError,
             submit_kelai_shares,
         )
 
@@ -291,10 +302,14 @@ def run_kotl(args) -> int:
                 max_orders=getattr(args, "max_orders", None),
                 max_gross_notional=getattr(args, "max_gross_notional", None),
                 trade_file_out=getattr(args, "trade_file_out", None),
+                unresolved=getattr(args, "unresolved", "block"),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")
             return EXIT_RECON_DIVERGENCE
+        except UnresolvedSecuritiesError as exc:
+            print(f"SUBMIT BLOCKED: {exc}")
+            return EXIT_UNRESOLVED_SECURITIES
         except SubmitRefusedError as exc:
             print(f"SUBMIT REFUSED: {exc}")
             return EXIT_SUBMIT_REFUSED

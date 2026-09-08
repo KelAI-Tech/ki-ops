@@ -11,30 +11,41 @@ import pytest
 pytest.importorskip("h5py")
 
 from ki_ops.kotl.fake_flex import FakeFlexAdapter
+from ki_ops.kotl.flex_live import FlexConfig
 from ki_ops.kotl.store import KotlStore
 from ki_ops.kotl.submit import SubmitRefusedError, has_ok_submit, submit_kelai_shares
+from tests.kotl.fake_flex_sdk import FakeFlexBackend, install_fake_sdk, make_security
 from tests.kotl.test_kelaidata_source import make_ds2_h5
 
 TD = date(2026, 8, 6)
 TS = datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc)
 
+FLEX_CONFIG = FlexConfig(endpoint="127.0.0.1:50051", token="tok")
+
 
 @pytest.fixture()
-def env_setup(tmp_path):
+def env_setup(tmp_path, monkeypatch):
     shares = tmp_path / "Portfolio_20260806.csv"
     shares.write_text("AAPL,50,VWAP\nMSFT,-30,VWAP\n")
+    # UAT/PROD submits resolve symbols via the SecurityService first — give the
+    # fake master both names so the pre-existing rails behave as before.
+    backend = FakeFlexBackend()
+    backend.security_master = [make_security("AAPL.US", 15), make_security("MSFT.US", 540)]
+    install_fake_sdk(monkeypatch, backend)
     return {
         "store": KotlStore(tmp_path / "kotl"),
         "shares": shares,
         "h5": make_ds2_h5(tmp_path / "ds2.h5"),
         "cache": tmp_path / "cache",
         "tmp": tmp_path,
+        "backend": backend,
     }
 
 
 def _submit(env_setup, **kwargs):
     kwargs.setdefault("sod_source", "flat")
     kwargs.setdefault("adapter", FakeFlexAdapter())
+    kwargs.setdefault("flex_config", FLEX_CONFIG)
     return submit_kelai_shares(
         env_setup["store"],
         trade_date=TD,

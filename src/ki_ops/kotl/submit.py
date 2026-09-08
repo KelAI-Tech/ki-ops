@@ -14,7 +14,12 @@ SOD sources:
 
 Safety rails on the live path: idempotency (one ok submit per
 ``(trade_date, env)`` unless forced), ``--dry-run`` (no gRPC, no ledger
-write), and order-count / gross-notional caps checked before ``CreateOrders``.
+write), order-count / gross-notional caps checked before ``CreateOrders``,
+and **pre-submit security resolution** via the Flex ``SecurityService``
+(:mod:`ki_ops.kotl.flex_symbols`): payload symbols are rewritten to the
+canonical master spelling and names absent from the master block the submit
+(``--unresolved block``, exit 6) or are skipped (``--unresolved skip``), with
+an ``unresolved_<submit_id>.csv`` report either way.
 """
 
 from __future__ import annotations
@@ -58,6 +63,21 @@ class ReconDivergenceError(RuntimeError):
 
 class SubmitRefusedError(RuntimeError):
     """Safety rail refusal — idempotency or caps (CLI exit 5)."""
+
+
+class UnresolvedSecuritiesError(SubmitRefusedError):
+    """Order symbols absent from the Flex security master (CLI exit 6).
+
+    Raised before ``CreateOrders`` when pre-submit ``SecurityService`` lookup
+    (FlexTrade's recommended workflow) cannot resolve every order symbol and
+    the unresolved mode is ``block`` (the default). The unresolved list — the
+    names to send FlexTrade so they seed the master — is on ``unresolved``
+    and has already been written as a CSV report.
+    """
+
+    def __init__(self, message: str, unresolved: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.unresolved = list(unresolved)
 
 
 @dataclass(frozen=True)
@@ -286,6 +306,144 @@ def _resolve_sod_source(
     )
 
 
+def _unresolved_csv_dest(
+    *,
+    trade_date: date,
+    submit_id: str,
+    strategy_id: str | None,
+    data_dir,
+    trade_file_out: str | None,
+    dry_run: bool,
+) -> str:
+    """Unresolved-securities CSV path: alongside the trade file."""
+    from ki_ops.kotl import trade_file as trade_file_mod
+
+    base = trade_file_out or trade_file_mod.default_trade_file_dest(
+        trade_date=trade_date,
+        submit_id=submit_id,
+        strategy_id=strategy_id,
+        data_dir=data_dir,
+        dry_run=dry_run,
+    )
+    name = f"unresolved_{submit_id}{'_dryrun' if dry_run else ''}.csv"
+    base = str(base)
+    if "/" in base:
+        return f"{base.rsplit('/', 1)[0]}/{name}"
+    return name
+
+
+def _resolve_payload_symbols(
+    payloads: list[dict],
+    orders: list,
+    *,
+    env: str,
+    flex_config,
+    symbol_suffix: str,
+    data_dir,
+    unresolved_mode: str,
+    dry_run: bool,
+    trade_date: date,
+    submit_id: str,
+    strategy_id: str | None,
+    trade_file_out: str | None,
+) -> tuple[list[dict], list]:
+    """Pre-submit SecurityService resolution: rewrite payload symbols to canonical.
+
+    Blocks (or skips, per *unresolved_mode*) names absent from the Flex master
+    and writes the unresolved CSV report. On *dry_run* a resolution outage
+    only warns and every unresolved consequence is reported, never raised.
+    """
+    from ki_ops.kotl.flex_symbols import (
+        CACHE_FILENAME,
+        build_unresolved_rows,
+        format_resolution_summary,
+        format_unresolved_table,
+        resolve_flex_symbols,
+        write_unresolved_csv,
+    )
+
+    tickers = [_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads]
+    try:
+        if flex_config is None:
+            from ki_ops.kotl.flex_live import load_flex_config
+
+            flex_config = load_flex_config(flex_env=env.upper())
+        cache_path = Path(data_dir) / CACHE_FILENAME if data_dir is not None else None
+        resolved, unresolved_names, details = resolve_flex_symbols(
+            flex_config,
+            tickers,
+            suffix=symbol_suffix,
+            cache_path=cache_path,
+        )
+    except Exception as exc:
+        if dry_run:
+            print(
+                f"DRY RUN: flex symbol resolution unavailable ({exc}) — "
+                "payload symbols left as-is"
+            )
+            return payloads, orders
+        raise
+
+    print(format_resolution_summary(resolved, unresolved_names, details))
+
+    # Rewrite in place: canonical master symbol out, original kept for audit.
+    for payload in payloads:
+        bare = _bare_ticker(payload["symbol"], suffix=symbol_suffix)
+        canonical = resolved.get(bare)
+        if canonical and canonical != payload["symbol"]:
+            payload["sourceSymbol"] = payload["symbol"]
+            payload["symbol"] = canonical
+
+    if not unresolved_names:
+        return payloads, orders
+
+    rows = build_unresolved_rows(unresolved_names, details, payloads, suffix=symbol_suffix)
+    print(format_unresolved_table(rows))
+    dest = _unresolved_csv_dest(
+        trade_date=trade_date,
+        submit_id=submit_id,
+        strategy_id=strategy_id,
+        data_dir=data_dir,
+        trade_file_out=trade_file_out,
+        dry_run=dry_run,
+    )
+    written = write_unresolved_csv(rows, dest)
+    print(f"unresolved securities file: {written}")
+
+    if unresolved_mode == "block":
+        message = (
+            f"{len(unresolved_names)} order symbol(s) not in the Flex security "
+            f"master (see {written}) — send the list to FlexTrade, or pass "
+            "--unresolved skip to submit resolved names only"
+        )
+        if dry_run:
+            print(f"DRY RUN: UNRESOLVED SECURITIES — a live submit would block (exit 6): {message}")
+            return payloads, orders
+        raise UnresolvedSecuritiesError(
+            f"UNRESOLVED SECURITIES: {message}", unresolved_names
+        )
+
+    # skip mode: submit resolved names only.
+    unresolved_set = set(unresolved_names)
+    kept = [
+        (payload, order)
+        for payload, order in zip(payloads, orders)
+        if _bare_ticker(str(payload.get("sourceSymbol") or payload["symbol"]), suffix=symbol_suffix)
+        not in unresolved_set
+    ]
+    if not kept:
+        raise UnresolvedSecuritiesError(
+            "UNRESOLVED SECURITIES: no order symbol resolved against the Flex "
+            f"security master (see {written})",
+            unresolved_names,
+        )
+    print(
+        f"--unresolved skip: submitting {len(kept)} resolved order(s), "
+        f"skipping {len(unresolved_names)} unresolved"
+    )
+    return [p for p, _ in kept], [o for _, o in kept]
+
+
 def submit_kelai_shares(
     store,
     *,
@@ -312,6 +470,7 @@ def submit_kelai_shares(
     max_gross_notional: Decimal | None = None,
     trade_file_out: str | None = None,
     write_trade_file: bool = True,
+    unresolved: str = "block",
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -320,6 +479,23 @@ def submit_kelai_shares(
     ticker); prices and the ticker map come from ``ds2_data.h5`` on S3. Trades
     are ``target − SOD``; the SOD book comes from *sod_source* (see module
     docstring) — there is no silent default book.
+
+    **Pre-submit security resolution** (FlexTrade's recommended workflow): for
+    live envs (UAT/PROD) every payload symbol is checked through the Flex
+    ``SecurityService`` first (:mod:`ki_ops.kotl.flex_symbols`) and rewritten
+    to the canonical master symbol (``BFB.US → BF/B.US``). Ledger *pricing*
+    keys stay in the ds2 (undotted) vocabulary — only the outgoing payload
+    symbol changes; the original spelling is kept on the payload as
+    ``sourceSymbol``. Working orders therefore store the **canonical Flex
+    symbol**, which is what ``GetOrderInfo2`` echoes back on refresh (refresh
+    joins on ``originId``/``orderId``, so this keeps the ledger coherent).
+    Names absent from the master **block the submit** (*unresolved*
+    ``"block"``, :class:`UnresolvedSecuritiesError`, CLI exit 6) unless
+    *unresolved* is ``"skip"`` (submit resolved names only); either way the
+    unresolved list is printed and written as ``unresolved_<submit_id>.csv``
+    next to the trade file — that CSV is the list to send FlexTrade so they
+    add the securities. On ``dry_run`` resolution is still attempted and
+    reported, but a resolution outage (no network to Flex) only warns.
 
     On ``dry_run`` the returned :class:`Submit` is **not** persisted and has no
     flex order ids; everything else (recon table, trade file, caps report) is
@@ -339,6 +515,8 @@ def submit_kelai_shares(
     from ki_ops.kotl import trade_file as trade_file_mod
     from ki_ops.models import Portfolio
 
+    if unresolved not in ("block", "skip"):
+        raise ValueError(f"unresolved must be 'block' or 'skip', got {unresolved!r}")
     source = _resolve_sod_source(sod_source, sod_csv, assume_flat_sod)
     recon_max_shares = (
         DEFAULT_RECON_MAX_SHARES if recon_max_shares is None else Decimal(recon_max_shares)
@@ -384,14 +562,14 @@ def submit_kelai_shares(
         if flex_positions is None:
             from ki_ops.kotl.flex_live import fetch_flex_positions, load_flex_config
 
-            cfg = flex_config or load_flex_config(
+            flex_config = flex_config or load_flex_config(
                 flex_env=env if env.upper() in ("UAT", "PROD") else "UAT"
             )
             flex_defaults = defaults or FlexOrderDefaults()
             # account/fund scoping use the live-verified booking defaults
             # (KELAI / KEL-LOMB, env-overridable) — NOT the payload fund key.
             flex_positions, _ = fetch_flex_positions(
-                cfg,
+                flex_config,
                 position_group=flex_defaults.position_group,
                 symbol_suffix=symbol_suffix,
             )
@@ -458,6 +636,23 @@ def submit_kelai_shares(
         symbol_suffix=symbol_suffix,
         submit_id=pending.submit_id,
     )
+
+    # --- pre-submit security resolution (live envs; see docstring) -----------
+    if env.upper() in ("UAT", "PROD"):
+        payloads, orders = _resolve_payload_symbols(
+            payloads,
+            orders,
+            env=env,
+            flex_config=flex_config,
+            symbol_suffix=symbol_suffix,
+            data_dir=getattr(store, "data_dir", None),
+            unresolved_mode=unresolved,
+            dry_run=dry_run,
+            trade_date=trade_date,
+            submit_id=pending.submit_id,
+            strategy_id=strategy_id,
+            trade_file_out=trade_file_out,
+        )
 
     # --- safety rails --------------------------------------------------------
     gross_notional = sum((abs(o.quantity) * o.limit_price for o in orders), Decimal("0"))
