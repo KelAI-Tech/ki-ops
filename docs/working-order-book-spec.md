@@ -1,7 +1,19 @@
 # KelAI Working Order Tracking Ledger (KOTL) - Spec (v1)
 
-Status: draft for review (no implementation yet)  
-Related: FlexTrade Brooklyn OMS (vendor, not in git); `vendor/flextrade/kelai_flex_sample_codes/`
+Status: v1 implemented (`src/ki_ops/kotl/`); this document is the original spec, kept for rationale.  
+Related: FlexTrade Brooklyn OMS (vendor, not in git); `vendor/flextrade/kelai_flex_sample_codes/`; `docs/flextrade-connectivity-guide.md`
+
+> **Implementation status (2026-09):** the offline loop (fake submit → refresh →
+> status → eod) shipped first; the **live Flex adapter now exists**
+> (`kotl/flex_live.py`: `CreateOrders` submit, `GetOrderInfo2` refresh via
+> `--source live`, `ReplayPositions` SOD via `--sod-source flex` with a
+> reconciliation guard against the prior target file). The store is CSV by
+> default with an optional **MySQL backend** (`--store mysql`:
+> `kotl_submits` / `kotl_working_orders` / `kotl_eod_snapshots`), and every
+> submit renders a **trade file** CSV (stdout table + local/S3 write). Safety
+> rails: `--dry-run`, per-(trade date, env) idempotency, order-count and
+> gross-notional caps. Exit codes: `3` EOD not flat, `4` recon divergence,
+> `5` submit refused. See the README KOTL section for the CLI contract.
 
 ---
 
