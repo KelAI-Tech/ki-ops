@@ -9,6 +9,8 @@ __pycache__/
 htmlcov/
 dist/
 build/
+# Generated into the wheel at build time by setup.py; never committed.
+src/ki_ops/_build_info.py
 .DS_Store
 .idea/
 .ipynb_checkpoints/

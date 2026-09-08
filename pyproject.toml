@@ -1,10 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ki-ops"
-version = "0.2.0"
+# The version is derived from git tags by setuptools-scm: an exact `vX.Y.Z`
+# tag builds X.Y.Z, an untagged commit builds a dev version carrying the
+# commit sha (e.g. 0.2.1.dev3+g1a2b3c4). Releases are cut automatically on
+# merge to main (.github/workflows/release.yml), so only tagged commits can
+# ever produce a wheel that satisfies kelaidata's `ki-ops==X.Y.Z` pin.
+dynamic = ["version"]
 description = "Deterministic KI Ops library for trade analysis, portfolio holdings, pre-trade checks, and market-neutral risk snapshots"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,6 +44,12 @@ ki-ops = "ki_ops.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+# Defaults: exact tag -> X.Y.Z, otherwise guess-next-dev + node-and-date
+# (dev version with the commit sha). Presence of this table enables scm
+# versioning; setup.py additionally embeds the full commit sha into the
+# wheel as ki_ops._build_info.GIT_SHA.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

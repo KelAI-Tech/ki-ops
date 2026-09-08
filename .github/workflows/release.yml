@@ -1,31 +1,55 @@
 name: release
 
-# Build and publish the ki-ops wheel when a version tag is pushed.
+# Auto-release: every merge to main cuts a release with a derived tag.
+#
+# The version is derived from the latest v* tag by bumping the patch number
+# (v0.2.0 -> v0.2.1). A manual major/minor bump is a workflow_dispatch run
+# with an explicit `version` input (e.g. 1.0.0); subsequent merges then
+# derive from that tag (1.0.1, 1.0.2, ...).
+#
+# The wheel version comes from the git tag via setuptools-scm (pyproject has
+# no static version), so a released wheel can only ever carry the version of
+# an existing tag. Ad-hoc wheels built from untagged commits get scm dev
+# versions like 0.2.1.dev3+g1a2b3c4 that no `ki-ops==X.Y.Z` pin can match —
+# the kelaidata wheelhouse can only consume real releases.
 #
 # Consumers (kelaidata MWAA) install offline from a bundled wheelhouse
 # (`--find-links /usr/local/airflow/plugins --no-index`), so the artifact of
-# record is the pure-python wheel attached to the GitHub release:
-#
-#   git tag v0.2.0 && git push origin v0.2.0
-#   -> release v0.2.0 with ki_ops-0.2.0-py3-none-any.whl (+ sdist + SHA256SUMS)
-#
-# kelaidata then vendors it with scripts/fetch_ki_ops_wheel.sh and pins
-# `ki-ops==0.2.0` in requirements_airflow.txt. No AWS credentials are needed
-# here; publishing uses only the workflow's GITHUB_TOKEN.
+# record is the pure-python wheel attached to the GitHub release. kelaidata
+# vendors it with scripts/fetch_ki_ops_wheel.sh and pins `ki-ops==X.Y.Z` in
+# requirements_airflow.txt. No AWS credentials are needed here; publishing
+# uses only the workflow's GITHUB_TOKEN.
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Explicit version for a manual major/minor bump (e.g. 1.0.0).
+          Leave empty to auto-bump the patch of the latest tag.
+        required: false
+        default: ""
 
 permissions:
   contents: write
+
+# Serialize releases so two merges cannot race the tag derivation.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: setuptools-scm and the tag derivation below
+          # both need them.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -33,22 +57,34 @@ jobs:
           # runtime the wheel targets even though the package supports >=3.9.
           python-version: "3.11"
 
-      - name: Verify tag matches pyproject version
+      - name: Derive release version
+        id: version
+        env:
+          EXPLICIT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          python - <<'EOF'
-          import os
-          import sys
-          import tomllib
-
-          with open("pyproject.toml", "rb") as handle:
-              version = tomllib.load(handle)["project"]["version"]
-          tag = os.environ["GITHUB_REF_NAME"]
-          if tag != f"v{version}":
-              sys.exit(
-                  f"tag {tag!r} does not match pyproject version v{version}; "
-                  "bump [project].version before tagging"
-              )
-          EOF
+          set -euo pipefail
+          latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+          latest="${latest:-v0.0.0}"
+          if [ -n "$EXPLICIT_VERSION" ]; then
+            version="$EXPLICIT_VERSION"
+            if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version input '$version' is not X.Y.Z" >&2
+              exit 1
+            fi
+          else
+            base="${latest#v}"
+            major="${base%%.*}"; rest="${base#*.}"
+            minor="${rest%%.*}"; patch="${rest#*.}"
+            version="${major}.${minor}.$((patch + 1))"
+          fi
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::tag ${tag} already exists" >&2
+            exit 1
+          fi
+          echo "latest existing tag: ${latest}; releasing ${tag}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Install
         run: |
@@ -59,16 +95,51 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+      - name: Tag release commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "ki-ops $TAG (auto-release from main @ $GITHUB_SHA)"
+          git push origin "refs/tags/$TAG"
+
       - name: Build wheel and sdist
+        # Built after tagging so setuptools-scm resolves the exact-tag
+        # version and the wheel is ki_ops-<version>-py3-none-any.whl.
         run: python -m build
 
       - name: Verify pure-python wheel
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           ls -l dist/
-          version="${GITHUB_REF_NAME#v}"
           # The MWAA wheelhouse install is offline; a platform-specific wheel
           # would silently fail to resolve there, so fail the release instead.
-          test -f "dist/ki_ops-${version}-py3-none-any.whl"
+          test -f "dist/ki_ops-${VERSION}-py3-none-any.whl"
+
+      - name: Verify embedded git SHA
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python -m pip install --force-reinstall "dist/ki_ops-${VERSION}-py3-none-any.whl"
+          python - <<'EOF'
+          import os
+          import sys
+
+          # Import the installed wheel, not the checkout's src/ tree.
+          sys.path = [p for p in sys.path if not p.endswith("/src")]
+          os.chdir("/tmp")
+
+          import ki_ops
+
+          sha = os.environ["GITHUB_SHA"]
+          if ki_ops.__git_sha__ != sha:
+              sys.exit(
+                  f"wheel embeds git sha {ki_ops.__git_sha__!r}, expected {sha!r}"
+              )
+          print(f"ki-ops {ki_ops.__version__} @ {ki_ops.__git_sha__}")
+          EOF
 
       - name: Checksums
         run: |
@@ -78,8 +149,9 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             dist/*.whl dist/*.tar.gz dist/SHA256SUMS \
-            --title "ki-ops $GITHUB_REF_NAME" \
-            --notes "Pure-python wheel for the MWAA wheelhouse. Verify with SHA256SUMS. Consume in kelaidata via scripts/fetch_ki_ops_wheel.sh $GITHUB_REF_NAME."
+            --title "ki-ops $TAG" \
+            --notes "Auto-release from main @ ${GITHUB_SHA}. Pure-python wheel for the MWAA wheelhouse; verify with SHA256SUMS. Consume in kelaidata via scripts/fetch_ki_ops_wheel.sh $TAG."

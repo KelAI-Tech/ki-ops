@@ -276,30 +276,45 @@ Offline demo uses fake submit + refresh fixtures under `examples/kotl/`:
 
 `refresh` auto-detects fixture format. Data dir default: `data/kotl/` (gitignored).
 
-## Releasing (wheel for kelaidata / MWAA)
+## Branching and releasing (wheel for kelaidata / MWAA)
+
+Branch flow: feature branches PR into **`uat`**, never into `main`. `main`
+is protected (PRs only, no direct pushes, admins included) and the required
+[`uat-gate`](.github/workflows/uat-gate.yml) check fails any PR into `main`
+whose head is not `uat`, so the only path to `main` is a `uat -> main` PR.
+
+Releases are automatic. Every merge to `main` runs the
+[release workflow](.github/workflows/release.yml), which:
+
+1. Derives the next tag by bumping the patch of the latest `v*` tag
+   (`v0.2.0 -> v0.2.1`). For a **major/minor bump**, run the workflow
+   manually (workflow_dispatch) with an explicit `version` input
+   (e.g. `1.0.0`); later merges derive from that tag.
+2. Runs the test suite, tags the merge commit, and builds the wheel at the
+   tag. The version comes from the tag via setuptools-scm (`pyproject.toml`
+   has no static version), and `setup.py` embeds the source commit into the
+   wheel as `ki_ops.__git_sha__` (surfaced by `ki-ops --version`).
+3. Fails unless the wheel is `py3-none-any` (the MWAA wheelhouse install is
+   offline; a platform wheel would silently fail to resolve there) and
+   unless the embedded sha matches the released commit.
+4. Attaches `ki_ops-<version>-py3-none-any.whl` (+ sdist + `SHA256SUMS`) to
+   a GitHub release.
+
+Wheels built by hand from untagged commits get scm dev versions like
+`0.2.1.dev3+g1a2b3c4` — self-identifying, and never a match for the exact
+`ki-ops==X.Y.Z` pin kelaidata installs with.
 
 ki-ops ships to the kelaidata Airflow environment as a pure-python wheel in
 the MWAA wheelhouse (`plugins.zip`, installed offline with
 `--find-links /usr/local/airflow/plugins --no-index`). It is never imported
-as source by kelaidata — the DAG shells out to the pinned `ki-ops` CLI.
-
-To cut a release:
-
-1. Bump `[project].version` in `pyproject.toml` on `main`.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-
-The [release workflow](.github/workflows/release.yml) runs the test suite,
-builds the wheel, fails if the tag does not match the pyproject version or
-the wheel is not `py3-none-any`, and attaches
-`ki_ops-<version>-py3-none-any.whl` (+ sdist + `SHA256SUMS`) to a GitHub
-release.
-
-On the kelaidata side: `scripts/fetch_ki_ops_wheel.sh v0.2.0` downloads the
-wheel into its local `plugins/` wheelhouse, and `ki-ops==0.2.0` is pinned in
-`requirements_airflow.txt`. Runtime dependencies (`PyYAML`; `h5py`/`numpy`/
-`boto3` for the `[kelaidata]` extra) already have wheels in that wheelhouse.
-`scripts/mwaa_release.py build` then validates and packages it like every
-other bundled wheel.
+as source by kelaidata — the DAG shells out to the pinned `ki-ops` CLI. On
+the kelaidata side: `scripts/fetch_ki_ops_wheel.sh vX.Y.Z` downloads the
+wheel from the GitHub release into its local `plugins/` wheelhouse, and
+`ki-ops==X.Y.Z` is pinned in `requirements_airflow.txt`. Runtime
+dependencies (`PyYAML`; `h5py`/`numpy`/`boto3` for the `[kelaidata]` extra)
+already have wheels in that wheelhouse. `scripts/mwaa_release.py build` then
+verifies every vendored ki-ops wheel against the SHA256SUMS of its GitHub
+release before packaging — a wheel that is not a released tag cannot ship.
 
 ## Layout
 

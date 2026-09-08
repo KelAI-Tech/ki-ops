@@ -46,4 +46,26 @@ __all__ = [
     "targets_from_dollar_row",
 ]
 
-__version__ = "0.2.0"
+def _distribution_version() -> str:
+    """Single-source version: the installed distribution metadata.
+
+    The version is derived from git tags by setuptools-scm at build time
+    (see pyproject.toml). When running straight from a source tree with no
+    installed distribution, there is no version to report.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("ki-ops")
+    except Exception:  # pragma: no cover - uninstalled source tree
+        return "0+source"
+
+
+__version__ = _distribution_version()
+
+try:
+    # Generated into the wheel at build time by setup.py; absent in source
+    # checkouts and sdists built without git metadata.
+    from ki_ops._build_info import GIT_SHA as __git_sha__  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - source tree / no build info
+    __git_sha__ = "unknown"

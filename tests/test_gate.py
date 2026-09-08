@@ -17,6 +17,7 @@ import pytest
 pytest.importorskip("h5py")
 pytest.importorskip("numpy")
 
+import ki_ops
 from ki_ops.cli import main as cli_main
 from ki_ops.gate import (
     dollar_book_path,
@@ -107,7 +108,7 @@ def test_gate_pass_with_prior(tmp_path, capsys):
         tmp_path, capsys, "--dollar-file", str(dollar), "--json-out", str(out_json)
     )
     assert rc == 0
-    assert payload["ki_ops_version"] == "0.2.0"
+    assert payload["ki_ops_version"] == ki_ops.__version__
     assert payload["output"]["passed"] is True
     assert payload["output"]["violation_codes"] == []
     assert payload["output"]["dollar"]["net_exposure"] == "0.0000"
@@ -320,7 +321,7 @@ def test_gate_infra_error_exits_1_with_json(tmp_path, capsys):
     assert payload["passed"] is False
     assert payload["error_type"] == "infra"
     assert "does_not_exist.csv" in payload["error"]
-    assert payload["ki_ops_version"] == "0.2.0"
+    assert payload["ki_ops_version"] == ki_ops.__version__
 
 
 def test_gate_zero_gmv_blocks(tmp_path, capsys):
