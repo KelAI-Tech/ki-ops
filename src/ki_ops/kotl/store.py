@@ -34,11 +34,14 @@ class KotlStoreProtocol(Protocol):
 
     def upsert_working_orders(self, orders: Iterable[WorkingOrder]) -> None: ...
 
+    def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None: ...
+
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = ROOT / "data" / "kotl"
 
 SUBMITS_FILE = "submits.csv"
 WORKING_ORDERS_FILE = "working_orders.csv"
+CLAIMS_DIR = "claims"
 
 SUBMIT_FIELDS = (
     "submit_id",
@@ -145,6 +148,24 @@ class KotlStore:
         for order in orders:
             by_id[order.flex_order_id] = order
         self._write_working_orders(by_id.values())
+
+    def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None:
+        """Once-a-day submission claim: ``None`` when this call won the claim,
+        else the ``submit_id`` that already holds it.
+
+        ``O_CREAT|O_EXCL`` on a per-``(trade_date, env)`` file — atomic on a
+        local filesystem; the MySQL store is the concurrency-safe live backend
+        (this fallback is documented as single-host only).
+        """
+        claims = self.data_dir / CLAIMS_DIR
+        claims.mkdir(parents=True, exist_ok=True)
+        path = claims / f"{env.upper()}_{trade_date.strftime('%Y%m%d')}.claim"
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(submit_id)
+        except FileExistsError:
+            return path.read_text(encoding="utf-8").strip() or "unknown"
+        return None
 
     def _load_all_working_orders(self) -> list[WorkingOrder]:
         if not self.working_orders_path.exists():

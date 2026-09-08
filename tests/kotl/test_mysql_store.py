@@ -174,7 +174,12 @@ def mysql_store(mysql_store_params):
     store.ensure_schema()
     conn = store.connection()
     cur = conn.cursor()
-    for table in ("kotl_submits", "kotl_working_orders", "kotl_eod_snapshots"):
+    for table in (
+        "kotl_submits",
+        "kotl_working_orders",
+        "kotl_eod_snapshots",
+        "kotl_submit_claims",
+    ):
         cur.execute(f"DELETE FROM {table}")
     conn.commit()
     cur.close()
@@ -292,3 +297,28 @@ def test_mysql_ensure_schema_idempotent(mysql_store):
     mysql_store.ensure_schema()
     mysql_store.ensure_schema()
     assert mysql_store.load_submits() == []
+
+
+def test_mysql_claim_is_atomic_once_a_day(mysql_store):
+    # First claimer wins; every later claimer sees the winner's submit_id.
+    assert mysql_store.claim_submission(TD, "UAT", "sub-first") is None
+    assert mysql_store.claim_submission(TD, "UAT", "sub-second") == "sub-first"
+    assert mysql_store.claim_submission(TD, "UAT", "sub-third") == "sub-first"
+    # Different env or date is an independent claim.
+    assert mysql_store.claim_submission(TD, "PROD", "sub-prod") is None
+    assert mysql_store.claim_submission(date(2026, 9, 5), "UAT", "sub-next-day") is None
+
+
+def test_mysql_claim_two_writer_race(mysql_store, mysql_store_params):
+    """Two connections claim concurrently — exactly one wins (PK serializes)."""
+    other = MysqlKotlStore(**mysql_store_params)
+    try:
+        results = [
+            mysql_store.claim_submission(TD, "UAT", "writer-a"),
+            other.claim_submission(TD, "UAT", "writer-b"),
+        ]
+        assert results.count(None) == 1
+        loser = next(r for r in results if r is not None)
+        assert loser == "writer-a"  # first insert won; loser sees the winner
+    finally:
+        other.close()

@@ -77,6 +77,17 @@ _DDL = (
         PRIMARY KEY (trade_date, created_at)
     )
     """,
+    # Once-a-day submission claim: the PK insert is the atomic gate that makes
+    # concurrent duplicate runs impossible (target mode; see kotl/submit.py).
+    """
+    CREATE TABLE IF NOT EXISTS kotl_submit_claims (
+        trade_date DATE NOT NULL,
+        env VARCHAR(16) NOT NULL,
+        submit_id VARCHAR(64) NOT NULL,
+        claimed_at DATETIME(6) NOT NULL,
+        PRIMARY KEY (trade_date, env)
+    )
+    """,
 )
 
 
@@ -387,6 +398,46 @@ class MysqlKotlStore:
                 rows,
             )
             conn.commit()
+        finally:
+            cur.close()
+
+    # --- submission claims ---------------------------------------------------
+
+    def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None:
+        """Once-a-day submission claim: ``None`` when this call won the claim,
+        else the ``submit_id`` that already holds it.
+
+        A plain PK ``INSERT`` — MySQL serializes concurrent claimers, so two
+        simultaneous pipeline runs can never both pass (duplicate-key loses).
+        """
+        import mysql.connector
+
+        conn = self.connection()
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO kotl_submit_claims (trade_date, env, submit_id, claimed_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        trade_date,
+                        env.upper(),
+                        submit_id,
+                        _to_db_ts(datetime.now(timezone.utc)),
+                    ),
+                )
+                conn.commit()
+                return None
+            except mysql.connector.IntegrityError:
+                conn.rollback()
+                cur.execute(
+                    "SELECT submit_id FROM kotl_submit_claims WHERE trade_date = %s AND env = %s",
+                    (trade_date, env.upper()),
+                )
+                row = cur.fetchone()
+                return str(row[0]) if row else "unknown"
         finally:
             cur.close()
 
