@@ -279,12 +279,21 @@ FlexTrade's recommended workflow: on live envs every payload symbol is checked
 through `SecurityService.BatchLookup` **before** `CreateOrders` and rewritten
 to the canonical master symbol (undotted ds2 class shares map via the dotted
 ticker alias: `BFB` → lookup `BF.B` → canonical `BF/B.US`). FlexTrade's
-preferred identifier is the **SEDOL** (or the Flex symbol itself); the Lookup
-`symbol` field matches *any* master identifier — a SEDOL string resolves
-(verified live: `2046251` → `AAPL.US`) — so pass `sedols=` to
-`resolve_flex_symbols` once a SEDOL source exists (neither the ds2 H5 nor
-kelaidb carries SEDOLs today; resolution is symbol-only by default).
-Resolutions are cached in `<data-dir>/flex_symbols_cache.json`; unresolved
+preferred identifier is the **SEDOL**, tried first: `--sedol-source`
+(default `snowflake`, env `KOTL_SEDOL_SOURCE`) maps each book infocode to its
+SEDOL through the **daily kelai security master**
+`KELAI.LSEG.SECURITY_MASTER_DT` (canary: `KELAI.LSEG_CANARY`) built by the
+kelaidata Airflow pipeline — connection via the same service-account
+conventions ([`kotl/security_master.py`](src/ki_ops/kotl/security_master.py),
+`pip install "ki-ops[secmaster]"`); pass a CSV path (`infocode,sedol`) for an
+offline map or `none` for symbol-only. SEDOL hits catch ticker-change renames
+the ds2 vocabulary misses (`FISV` → `FI.US`, printed with the company name for
+review); an **exchange guard** rejects any resolution not ending in the
+expected market suffix (`.US`) — live-verified necessity: some UAT master
+records key placeholder instruments by the SEDOL string itself, and
+dual-listed SEDOLs can point at the Canadian line (`CCJ` → `CCO.CN`) — those
+fall back to the plain `TICKER.US` lookup instead of trading the wrong
+listing. Resolutions are cached in `<data-dir>/flex_symbols_cache.json`; unresolved
 names are re-checked every run. Names absent from the master **block the
 submit** (**exit 6**) unless `--unresolved skip` (submit resolved names only);
 either way `unresolved_<submit_id>.csv` is written next to the trade file —

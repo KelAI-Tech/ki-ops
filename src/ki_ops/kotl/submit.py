@@ -332,6 +332,57 @@ def _unresolved_csv_dest(
     return name
 
 
+def _load_book_sedols(
+    sedol_source: str | None,
+    infocode_by_ticker: dict[str, str],
+    *,
+    env: str,
+    cache_dir,
+) -> dict[str, str]:
+    """Book ticker → SEDOL map for pre-submit Flex resolution.
+
+    Sources (*sedol_source*, else ``KOTL_SEDOL_SOURCE``, default
+    ``"snowflake"``):
+
+    - ``"snowflake"`` — the daily kelai security master
+      ``KELAI.LSEG[_CANARY].SECURITY_MASTER_DT``
+      (:mod:`ki_ops.kotl.security_master`; schema picked by *env*);
+    - a local path / ``s3://`` URL — CSV with ``infocode,sedol`` columns
+      (offline override);
+    - ``"none"`` / ``""`` — disable, resolution runs symbol-only.
+
+    A load failure only warns — resolution then runs symbol-only, and
+    genuinely unknown names still block the submit downstream.
+    """
+    source = sedol_source if sedol_source is not None else os.environ.get("KOTL_SEDOL_SOURCE")
+    if source is None:
+        source = "snowflake"
+    source = str(source).strip()
+    if source.lower() in ("", "none"):
+        return {}
+    try:
+        if source.lower() == "snowflake":
+            from ki_ops.kotl.security_master import fetch_sedols_by_ticker, secmaster_schema
+
+            sedols = fetch_sedols_by_ticker(infocode_by_ticker, env=env)
+            label = f"snowflake KELAI.{secmaster_schema(env)}.SECURITY_MASTER_DT"
+        else:
+            from ki_ops.kotl.flex_symbols import load_sedol_map, sedols_by_ticker
+
+            sedols = sedols_by_ticker(
+                load_sedol_map(source, cache_dir=cache_dir), infocode_by_ticker
+            )
+            label = source
+    except Exception as exc:
+        print(
+            f"WARNING: SEDOL source {source} unavailable ({exc}) — "
+            "flex symbol resolution will run symbol-only"
+        )
+        return {}
+    print(f"sedol map: {len(sedols)} of {len(infocode_by_ticker)} book tickers ({label})")
+    return sedols
+
+
 def _resolve_payload_symbols(
     payloads: list[dict],
     orders: list,
@@ -346,6 +397,7 @@ def _resolve_payload_symbols(
     submit_id: str,
     strategy_id: str | None,
     trade_file_out: str | None,
+    sedols: dict[str, str] | None = None,
 ) -> tuple[list[dict], list]:
     """Pre-submit SecurityService resolution: rewrite payload symbols to canonical.
 
@@ -372,6 +424,7 @@ def _resolve_payload_symbols(
         resolved, unresolved_names, details = resolve_flex_symbols(
             flex_config,
             tickers,
+            sedols=sedols,
             suffix=symbol_suffix,
             cache_path=cache_path,
         )
@@ -471,6 +524,7 @@ def submit_kelai_shares(
     trade_file_out: str | None = None,
     write_trade_file: bool = True,
     unresolved: str = "block",
+    sedol_source: str | None = None,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -483,7 +537,12 @@ def submit_kelai_shares(
     **Pre-submit security resolution** (FlexTrade's recommended workflow): for
     live envs (UAT/PROD) every payload symbol is checked through the Flex
     ``SecurityService`` first (:mod:`ki_ops.kotl.flex_symbols`) and rewritten
-    to the canonical master symbol (``BFB.US → BF/B.US``). Ledger *pricing*
+    to the canonical master symbol (``BFB.US → BF/B.US``). Lookup tries the
+    **SEDOL first** (FlexTrade's preferred identifier): *sedol_source*
+    (default ``"snowflake"``) maps each book infocode to its SEDOL via the
+    daily kelai security master ``KELAI.LSEG[_CANARY].SECURITY_MASTER_DT``
+    (:mod:`ki_ops.kotl.security_master`); pass a CSV path/URL for an offline
+    map or ``"none"`` for symbol-only resolution. Ledger *pricing*
     keys stay in the ds2 (undotted) vocabulary — only the outgoing payload
     symbol changes; the original spelling is kept on the payload as
     ``sourceSymbol``. Working orders therefore store the **canonical Flex
@@ -639,6 +698,17 @@ def submit_kelai_shares(
 
     # --- pre-submit security resolution (live envs; see docstring) -----------
     if env.upper() in ("UAT", "PROD"):
+        payload_tickers = {_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads}
+        sedols = _load_book_sedols(
+            sedol_source,
+            {
+                ticker: infocode
+                for ticker, infocode in snapshot.infocode_by_ticker.items()
+                if ticker in payload_tickers
+            },
+            env=env,
+            cache_dir=cache,
+        )
         payloads, orders = _resolve_payload_symbols(
             payloads,
             orders,
@@ -652,6 +722,7 @@ def submit_kelai_shares(
             submit_id=pending.submit_id,
             strategy_id=strategy_id,
             trade_file_out=trade_file_out,
+            sedols=sedols,
         )
 
     # --- safety rails --------------------------------------------------------

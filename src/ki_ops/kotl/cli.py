@@ -162,6 +162,15 @@ def register_kotl_parser(sub) -> None:
         "always written as unresolved_<submit_id>.csv next to the trade file",
     )
     sk.add_argument(
+        "--sedol-source",
+        default=None,
+        help="book SEDOL map for pre-submit lookup (SEDOL is FlexTrade's "
+        "preferred identifier): 'snowflake' (default; daily kelai security "
+        "master KELAI.LSEG[_CANARY].SECURITY_MASTER_DT, schema by env), a CSV "
+        "path/s3:// URL with infocode,sedol columns, or 'none' for "
+        "symbol-only resolution (env KOTL_SEDOL_SOURCE)",
+    )
+    sk.add_argument(
         "--trade-file-out",
         default=None,
         help="trade file destination, local path or s3:// URL (default: "
@@ -303,6 +312,7 @@ def run_kotl(args) -> int:
                 max_gross_notional=getattr(args, "max_gross_notional", None),
                 trade_file_out=getattr(args, "trade_file_out", None),
                 unresolved=getattr(args, "unresolved", "block"),
+                sedol_source=getattr(args, "sedol_source", None),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")

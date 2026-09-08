@@ -22,13 +22,20 @@ Live-verified behavior (UAT, 2026-09-08):
 - The canonical payload symbol is ``response.security.commonData.symbol``
   (NOT ``response.security.symbol``).
 
-SEDOL availability (checked 2026-09-08): neither the ds2 H5
-(``s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5`` — price/volume panels +
-TICKER vocabulary only) nor the kelaidb MySQL instance (single ``kelai``
-schema: alphas/backtests tables, no security master, no SEDOL column in any
-schema) carries SEDOLs today. Resolution therefore works **symbol-only** by
-default; pass ``sedols={ticker: sedol}`` once a SEDOL source exists and those
-are tried first, per FlexTrade's preference.
+SEDOL source: the kelai security master — the Snowflake dynamic table
+``KELAI.LSEG.SECURITY_MASTER_DT`` (canary: ``KELAI.LSEG_CANARY``), rebuilt
+daily by the kelaidata Airflow pipeline and keyed by ds2 infocode — see
+:mod:`ki_ops.kotl.security_master`. SEDOL candidates are tried first, per
+FlexTrade's preference; names without a SEDOL fall back to the symbol
+candidates. A CSV override (columns ``infocode,sedol``) is supported via
+:func:`load_sedol_map` for offline runs.
+
+Exchange guard: ISIN was rejected as a candidate identifier because it is
+entity-level — live UAT resolves TD's ISIN to ``TD.CN`` (Toronto), which
+would silently trade the wrong exchange. SEDOL is listing-level, but
+:func:`resolve_flex_symbols` still refuses any resolution whose canonical
+symbol does not end with the expected market *suffix* (``.US``) and treats it
+as a miss (``suffix_mismatches`` in the details).
 """
 
 from __future__ import annotations
@@ -187,6 +194,47 @@ def batch_lookup(
     return out
 
 
+def load_sedol_map(
+    source: str | Path,
+    *,
+    cache_dir: str | Path | None = None,
+) -> dict[str, str]:
+    """SEDOL reference CSV (local path or ``s3://``) → ``{infocode: sedol}``.
+
+    The file needs ``infocode`` and ``sedol`` columns (extra columns — ticker,
+    isin, name … — are welcome and ignored). Rows with a blank SEDOL are
+    dropped: those names simply fall back to symbol-based lookup candidates.
+    """
+    from ki_ops.kotl.kelaidata_source import DEFAULT_CACHE_DIR, fetch
+
+    path = fetch(str(source), cache_dir=cache_dir or DEFAULT_CACHE_DIR)
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        if not {"infocode", "sedol"} <= fields:
+            raise ValueError(
+                f"SEDOL file {source} needs 'infocode' and 'sedol' columns, "
+                f"got {sorted(fields)}"
+            )
+        return {
+            str(row["infocode"]).strip(): str(row["sedol"]).strip()
+            for row in reader
+            if str(row.get("sedol") or "").strip()
+        }
+
+
+def sedols_by_ticker(
+    sedol_by_infocode: dict[str, str],
+    infocode_by_ticker: dict[str, str],
+) -> dict[str, str]:
+    """Join the infocode-keyed SEDOL map onto book tickers (ds2 vocabulary)."""
+    return {
+        str(ticker).strip().upper(): sedol_by_infocode[str(infocode)]
+        for ticker, infocode in infocode_by_ticker.items()
+        if str(infocode) in sedol_by_infocode
+    }
+
+
 def candidate_queries(
     ticker: str,
     *,
@@ -310,6 +358,7 @@ def resolve_flex_symbols(
         for ticker in pending
     }
     tried: dict[str, list[str]] = {ticker: [] for ticker in pending}
+    suffix_mismatches: dict[str, list[str]] = {}
 
     round_no = 0
     while pending:
@@ -329,10 +378,19 @@ def resolve_flex_symbols(
             tried[ticker].append(query)
             if result is None:
                 continue
+            # Exchange guard: a lookup hit on another market (e.g. an ISIN or
+            # stale identifier resolving to TD.CN for a .US book) is a miss —
+            # never silently trade the wrong listing.
+            if suffix and not str(result["flex_symbol"]).upper().endswith(suffix.upper()):
+                suffix_mismatches.setdefault(ticker, []).append(
+                    f"{query}\u2192{result['flex_symbol']}"
+                )
+                continue
             still_pending.discard(ticker)
             entry = {
                 "flex_symbol": result["flex_symbol"],
                 "flex_security_id": result["flex_security_id"],
+                "description": result["description"],
                 "resolved_via": via,
                 "query": query,
                 "resolved_at": now,
@@ -346,6 +404,9 @@ def resolve_flex_symbols(
     unresolved = sorted(pending)
     for ticker in unresolved:
         details[ticker] = {"tried": list(tried.get(ticker, []))}
+    for ticker, misses in suffix_mismatches.items():
+        if ticker in details:
+            details[ticker]["suffix_mismatches"] = list(misses)
 
     _save_cache(cache_path, cache)
     return resolved, unresolved, details
@@ -438,10 +499,16 @@ def format_resolution_summary(
     by_via: dict[str, int] = {}
     rewrites = []
     for ticker, symbol in resolved.items():
-        via = str(details.get(ticker, {}).get("resolved_via", "?"))
+        detail = details.get(ticker, {})
+        via = str(detail.get("resolved_via", "?"))
         by_via[via] = by_via.get(via, 0) + 1
         if not symbol.startswith(ticker):
-            rewrites.append(f"{ticker}→{symbol}")
+            # Rewrites carry the master's company name: ticker-change renames
+            # (FISV→FI.US "Fiserv Inc") are human-verifiable at a glance in
+            # the submit log, and a wrong-instrument mapping stands out.
+            description = str(detail.get("description") or "")
+            suffix_note = f" ({description})" if description else ""
+            rewrites.append(f"{ticker}→{symbol}{suffix_note}")
     via_text = ", ".join(f"{k}={v}" for k, v in sorted(by_via.items()))
     lines = [
         f"flex symbol resolution: {len(resolved)} resolved ({via_text}), "

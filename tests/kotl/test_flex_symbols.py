@@ -145,6 +145,37 @@ def test_resolve_sedol_preferred(backend):
     assert details["AAPL"]["query"] == "2046251"
 
 
+def test_resolve_suffix_guard_falls_back_to_symbol(backend):
+    # Live-verified hazard: an entity-level identifier resolves to another
+    # exchange (TD's ISIN → TD.CN). A wrong-market hit must be treated as a
+    # miss so the next candidate (TD.US) wins — never trade the wrong listing.
+    backend.security_master.append(
+        make_security("TD.CN", 800, identifiers=[(ID_SEDOL, "2897222")])
+    )
+    backend.security_master.append(
+        make_security("TD.US", 801, identifiers=[(ID_TICKER, "TD")])
+    )
+    resolved, unresolved, details = resolve_flex_symbols(
+        CONFIG, ["TD"], sedols={"TD": "2897222"}
+    )
+    assert resolved == {"TD": "TD.US"}
+    assert unresolved == []
+    assert details["TD"]["resolved_via"] == "symbol"
+    assert details["TD"]["tried"] == ["2897222", "TD.US"]
+
+
+def test_resolve_suffix_guard_unresolved_records_mismatch(backend):
+    backend.security_master.append(
+        make_security("XYZ.CN", 802, identifiers=[(ID_SEDOL, "B000001")])
+    )
+    resolved, unresolved, details = resolve_flex_symbols(
+        CONFIG, ["XYZ"], sedols={"XYZ": "B000001"}
+    )
+    assert resolved == {}
+    assert unresolved == ["XYZ"]
+    assert details["XYZ"]["suffix_mismatches"] == ["B000001\u2192XYZ.CN"]
+
+
 def test_resolve_cache_reused_and_unresolved_rechecked(backend, tmp_path):
     cache = tmp_path / CACHE_FILENAME
     resolved, unresolved, _ = resolve_flex_symbols(
@@ -295,6 +326,58 @@ def test_submit_all_resolved_no_report(tmp_path, backend, submit_env):
     assert submit.ok
     assert {p["symbol"] for p in submit.payload} == {"AAPL.US", "BF/B.US"}
     assert not list((tmp_path / "kotl" / "trades").rglob("unresolved_*.csv"))
+
+
+def test_submit_sedol_source_snowflake(tmp_path, backend, submit_env, capsys, monkeypatch):
+    calls = {}
+
+    def fake_fetch(infocode_by_ticker, *, env, schema=None, connection=None):
+        calls["map"] = dict(infocode_by_ticker)
+        calls["env"] = env
+        return {"AAPL": "2046251"}
+
+    monkeypatch.setattr(
+        "ki_ops.kotl.security_master.fetch_sedols_by_ticker", fake_fetch
+    )
+    shares, h5 = submit_env
+    (shares / "Portfolio_20260806.csv").write_text("AAPL,50,VWAP\nBFB,10,VWAP\n")
+    store, submit = _submit_kelai(tmp_path, (shares, h5), sedol_source="snowflake")
+    out = capsys.readouterr().out
+    # only the book's tickers are sent to the security master, env forwarded
+    assert set(calls["map"]) == {"AAPL", "BFB"}
+    assert calls["env"] == "UAT"
+    assert "sedol map: 1 of 2 book tickers" in out
+    assert "sedol=1" in out  # AAPL resolved via its SEDOL candidate
+    assert {p["symbol"] for p in submit.payload} == {"AAPL.US", "BF/B.US"}
+
+
+def test_submit_sedol_source_csv(tmp_path, backend, submit_env, capsys):
+    shares, h5 = submit_env
+    (shares / "Portfolio_20260806.csv").write_text("AAPL,50,VWAP\nBFB,10,VWAP\n")
+    # fake H5 vocabulary assigns infocodes positionally: AAPL=101, BFB=103
+    sedol_csv = tmp_path / "sedols.csv"
+    sedol_csv.write_text("infocode,sedol,name\n101,2046251,APPLE\n103,,BROWN FORMAN\n")
+    store, submit = _submit_kelai(tmp_path, (shares, h5), sedol_source=str(sedol_csv))
+    out = capsys.readouterr().out
+    assert "sedol map: 1 of 2 book tickers" in out
+    assert "sedol=1" in out
+    assert {p["symbol"] for p in submit.payload} == {"AAPL.US", "BF/B.US"}
+
+
+def test_submit_sedol_source_failure_warns_symbol_only(
+    tmp_path, backend, submit_env, capsys, monkeypatch
+):
+    def boom(*args, **kwargs):
+        raise RuntimeError("snowflake down")
+
+    monkeypatch.setattr("ki_ops.kotl.security_master.fetch_sedols_by_ticker", boom)
+    shares, h5 = submit_env
+    (shares / "Portfolio_20260806.csv").write_text("AAPL,50,VWAP\nBFB,10,VWAP\n")
+    store, submit = _submit_kelai(tmp_path, (shares, h5), sedol_source="snowflake")
+    out = capsys.readouterr().out
+    assert "WARNING: SEDOL source snowflake unavailable (snowflake down)" in out
+    assert submit.ok  # symbol-only resolution still submits
+    assert {p["symbol"] for p in submit.payload} == {"AAPL.US", "BF/B.US"}
 
 
 def test_submit_dry_run_reports_would_block(tmp_path, submit_env, capsys):
