@@ -25,10 +25,15 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ki_ops.kotl.models import WorkingOrder
-from ki_ops.kotl.refresh import refresh_working_orders
+from ki_ops.kotl.refresh import FlexRefreshSource, refresh_working_orders
 from ki_ops.kotl.refresh_source import load_refresh_source
 from ki_ops.kotl.report import StatusReport, build_status_report
-from ki_ops.kotl.store import WORKING_ORDER_FIELDS, KotlStore, _working_order_to_row
+from ki_ops.kotl.store import (
+    DEFAULT_DATA_DIR,
+    WORKING_ORDER_FIELDS,
+    KotlStore,
+    _working_order_to_row,
+)
 
 FILLS_FIELDS = ("symbol", "side", "filled_qty", "avg_fill_px")
 
@@ -56,19 +61,30 @@ def run_eod(
     store: KotlStore,
     *,
     trade_date: date,
-    fixture: str | Path,
+    fixture: str | Path | None = None,
     tolerance: Decimal = Decimal("0"),
     eod_dir: str | Path | None = None,
+    source: FlexRefreshSource | None = None,
 ) -> tuple[dict[str, Any], StatusReport]:
     """Refresh → report → immutable snapshot under ``<eod_dir>/<trade_date>/``.
 
-    Returns ``(summary, report)``; the summary is the CLI's JSON stdout.
+    The refresh comes from *source* when given (e.g. a live
+    ``LiveRefreshSource``), else from the *fixture* path. Returns
+    ``(summary, report)``; the summary is the CLI's JSON stdout.
     """
-    refreshed = refresh_working_orders(store, trade_date, load_refresh_source(fixture))
+    if source is None:
+        if fixture is None:
+            raise ValueError("run_eod needs a fixture path or a refresh source")
+        source = load_refresh_source(fixture)
+    refreshed = refresh_working_orders(store, trade_date, source)
     orders = store.load_working_orders(trade_date=trade_date)
     report = build_status_report(orders, trade_date=trade_date, flat_tolerance=tolerance)
 
-    base = Path(eod_dir) if eod_dir is not None else store.data_dir / "eod"
+    base = (
+        Path(eod_dir)
+        if eod_dir is not None
+        else Path(getattr(store, "data_dir", DEFAULT_DATA_DIR)) / "eod"
+    )
     snap_dir = base / trade_date.isoformat()
     report_path = snap_dir / "report.json"
     if report_path.exists():
@@ -91,7 +107,7 @@ def run_eod(
     summary: dict[str, Any] = {
         "command": "kotl-eod",
         "trade_date": trade_date.isoformat(),
-        "fixture": str(fixture),
+        "fixture": str(fixture) if fixture is not None else "live",
         "refreshed_count": len(refreshed),
         "flat": report.flat,
         "flat_tolerance": str(tolerance),

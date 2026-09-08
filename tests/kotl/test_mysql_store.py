@@ -67,6 +67,32 @@ def test_resolve_db_params_secret_fields(monkeypatch):
     assert params["schema"] == "kelai_canary"  # --db-schema beats secret dbname
 
 
+def test_cli_build_store_mysql_from_env(monkeypatch, tmp_path):
+    from ki_ops.kotl.cli import _build_store
+
+    monkeypatch.setenv("KOTL_DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("KOTL_DB_PORT", "3307")
+    monkeypatch.setenv("KOTL_DB_USER", "root")
+    monkeypatch.setenv("KOTL_DB_PASSWORD", "pw")
+
+    class Args:
+        store = "mysql"
+        db_secret = None
+        db_schema = "kelai_canary"
+        data_dir = tmp_path
+
+    store = _build_store(Args())  # lazy: no connection until first use
+    assert isinstance(store, MysqlKotlStore)
+    assert store.schema == "kelai_canary"
+    assert store.port == 3307
+
+    class CsvArgs:
+        store = "csv"
+        data_dir = tmp_path
+
+    assert isinstance(_build_store(CsvArgs()), KotlStore)
+
+
 def test_resolve_db_params_missing(monkeypatch):
     for var in ("KOTL_DB_HOST", "KOTL_DB_PORT", "KOTL_DB_USER", "KOTL_DB_PASSWORD", "KOTL_DB_SCHEMA"):
         monkeypatch.delenv(var, raising=False)
