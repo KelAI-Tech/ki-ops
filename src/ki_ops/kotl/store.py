@@ -7,10 +7,32 @@ import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Protocol, Sequence
 
 from ki_ops.kotl.enums import OrderStatus
 from ki_ops.kotl.models import Submit, WorkingOrder
+
+
+class KotlStoreProtocol(Protocol):
+    """Minimal ledger surface used by submit/refresh/eod/report.
+
+    ``KotlStore`` (CSV, default) and ``MysqlKotlStore`` both satisfy it.
+    """
+
+    def append_submit(self, submit: Submit) -> None: ...
+
+    def load_submits(self) -> list[Submit]: ...
+
+    def load_working_orders(
+        self,
+        *,
+        trade_date: date | None = None,
+        submit_id: str | None = None,
+    ) -> list[WorkingOrder]: ...
+
+    def get_working_order(self, flex_order_id: str) -> WorkingOrder | None: ...
+
+    def upsert_working_orders(self, orders: Iterable[WorkingOrder]) -> None: ...
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = ROOT / "data" / "kotl"
