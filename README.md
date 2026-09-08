@@ -274,6 +274,26 @@ with `--strategy-id`, else `<data-dir>/trades/…`). Requires
 `pip install "ki-ops[kelaidata]"` (h5py, numpy, boto3); S3 downloads are
 ETag-cached under `data/kotl/cache/`.
 
+**Pre-submit security resolution** ([`kotl/flex_symbols.py`](src/ki_ops/kotl/flex_symbols.py)) —
+FlexTrade's recommended workflow: on live envs every payload symbol is checked
+through `SecurityService.BatchLookup` **before** `CreateOrders` and rewritten
+to the canonical master symbol (undotted ds2 class shares map via the dotted
+ticker alias: `BFB` → lookup `BF.B` → canonical `BF/B.US`). FlexTrade's
+preferred identifier is the **SEDOL** (or the Flex symbol itself); the Lookup
+`symbol` field matches *any* master identifier — a SEDOL string resolves
+(verified live: `2046251` → `AAPL.US`) — so pass `sedols=` to
+`resolve_flex_symbols` once a SEDOL source exists (neither the ds2 H5 nor
+kelaidb carries SEDOLs today; resolution is symbol-only by default).
+Resolutions are cached in `<data-dir>/flex_symbols_cache.json`; unresolved
+names are re-checked every run. Names absent from the master **block the
+submit** (**exit 6**) unless `--unresolved skip` (submit resolved names only);
+either way `unresolved_<submit_id>.csv` is written next to the trade file —
+that CSV is the list to send FlexTrade so they add the securities to the
+master. Working orders store the canonical Flex symbol (what `GetOrderInfo2`
+echoes back); ds2 tickers remain the pricing keys. Note: Flex ViewService
+view type 5 is an alternative positions view to `ReplayPositions` for SOD —
+noted for reference, the SOD source is unchanged.
+
 ```bash
 ki-ops kotl submit-kelai --trade-date 2026-08-06 --sod sod.csv          # S3 defaults, FAKE adapter
 ki-ops kotl submit-kelai --trade-date 2026-08-06 --assume-flat-sod \
