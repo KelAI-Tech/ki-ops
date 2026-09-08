@@ -1,0 +1,289 @@
+"""LiveFlexAdapter / LiveRefreshSource / fetch_flex_positions against a fake SDK."""
+
+from __future__ import annotations
+
+import sys
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from ki_ops.kotl import flex_live
+from ki_ops.kotl.flex_live import (
+    FlexConfig,
+    FlexSdkMissingError,
+    LiveFlexAdapter,
+    LiveRefreshSource,
+    fetch_flex_positions,
+    is_plain_us_equity,
+    load_flex_config,
+)
+from ki_ops.kotl.models import WorkingOrder
+from ki_ops.kotl.store import KotlStore
+from tests.kotl.fake_flex_sdk import (
+    FakeFlexBackend,
+    install_fake_sdk,
+    make_create_result,
+    make_order_info,
+    make_position,
+)
+
+CONFIG = FlexConfig(endpoint="127.0.0.1:50051", token="tok", batch_user="KELAI-BATCH")
+
+
+@pytest.fixture()
+def backend(monkeypatch):
+    be = FakeFlexBackend()
+    install_fake_sdk(monkeypatch, be)
+    return be
+
+
+# ---------------------------------------------------------------------------
+# config resolution
+# ---------------------------------------------------------------------------
+
+
+def test_flex_config_from_env(monkeypatch):
+    monkeypatch.setenv("KOTL_FLEX_ENDPOINT", "172.31.88.47:50051")
+    monkeypatch.setenv("KOTL_FLEX_TOKEN", "envtok")
+    monkeypatch.setenv("KOTL_FLEX_BATCH_USER", "JCO")
+    monkeypatch.setenv("KOTL_FLEX_SEND_TO_EMS", "false")
+    cfg = load_flex_config(flex_env="UAT")
+    assert cfg.endpoint == "172.31.88.47:50051"
+    assert cfg.token == "envtok"
+    assert cfg.batch_user == "JCO"
+    assert cfg.send_to_ems is False
+    assert cfg.metadata == [("authorization", "Bearer envtok")]
+
+
+def test_flex_config_from_secret(monkeypatch):
+    monkeypatch.delenv("KOTL_FLEX_ENDPOINT", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_TOKEN", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_BATCH_USER", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_SEND_TO_EMS", raising=False)
+    monkeypatch.setattr(
+        flex_live,
+        "_load_flex_secret",
+        lambda secret_id, region: {
+            "token": "sekret",
+            "uat_endpoint": "10.0.0.1:50051",
+            "prod_endpoint": "10.0.0.2:50051",
+            "metadata_key": "authorization",
+            "scheme": "Bearer",
+        },
+    )
+    cfg = load_flex_config(flex_env="UAT")
+    assert cfg.endpoint == "10.0.0.1:50051"
+    assert cfg.token == "sekret"
+    assert cfg.send_to_ems is True
+
+    prod = load_flex_config(flex_env="PROD")
+    assert prod.endpoint == "10.0.0.2:50051"
+
+
+def test_flex_config_env_endpoint_secret_token(monkeypatch):
+    monkeypatch.setenv("KOTL_FLEX_ENDPOINT", "proxy:50051")
+    monkeypatch.delenv("KOTL_FLEX_TOKEN", raising=False)
+    monkeypatch.setattr(
+        flex_live, "_load_flex_secret", lambda secret_id, region: {"token": "fromsecret"}
+    )
+    cfg = load_flex_config()
+    assert cfg.endpoint == "proxy:50051"
+    assert cfg.token == "fromsecret"
+
+
+# ---------------------------------------------------------------------------
+# SDK loading
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_missing_raises_clear_error(monkeypatch):
+    for mod in ("API", "API.Orders_pb2", "API.Orders_pb2_grpc", "API.DomainCommons_pb2"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    monkeypatch.delenv("KOTL_FLEX_SDK_PATH", raising=False)
+    with pytest.raises(FlexSdkMissingError, match="KOTL_FLEX_SDK_PATH"):
+        flex_live._load_sdk(None)
+
+
+# ---------------------------------------------------------------------------
+# CreateOrders
+# ---------------------------------------------------------------------------
+
+
+def _payload(symbol: str, qty: float, side: str) -> dict:
+    return {
+        "symbol": symbol,
+        "quantity": qty,
+        "side": side,
+        "orderType": "MARKET",
+        "fund": "KELAI",
+        "positionGroup": "USATop2000_strategy_v1",
+        "user": "SFA",
+        "owner": "SFA",
+        "trader": "SFA",
+        "manualFill": False,
+        "brokerAutomationType": "AUTOROUTE",
+        "timeInForce": "GFD",
+        "algo": "VWAP_AMRS",
+        "broker": "KEL-GS-EQ-LT",
+        "notes": "submit_id=abc",
+    }
+
+
+def test_create_orders_maps_fields_and_collects_stream(backend):
+    backend.create_results = [
+        make_create_result("FLEX-1"),
+        make_create_result("FLEX-2"),
+        make_create_result("FLEX-3", success=False, description="bad symbol"),
+    ]
+    backend.create_chunk_size = 2  # results split across two streamed responses
+
+    adapter = LiveFlexAdapter(CONFIG)
+    orders = [
+        _payload("AAPL.US", 18, "SELL"),
+        _payload("MSFT.US", 30, "BUY"),
+        _payload("ZZZ.US", 5, "BUY"),
+    ]
+    results = adapter.create_orders(orders)
+
+    assert [r["orderId"] for r in results] == ["FLEX-1", "FLEX-2", "FLEX-3"]
+    assert [r["success"] for r in results] == [True, True, False]
+    assert [r["symbol"] for r in results] == ["AAPL.US", "MSFT.US", "ZZZ.US"]
+    assert results[2]["description"] == "bad symbol"
+
+    req = backend.last_create_request
+    assert req.user == "KELAI-BATCH"  # configurable, not hardcoded "MGO"
+    assert req.sendToEms is True
+    assert req.complianceInputs.ruleSets == [0]  # PRE_TRADE appended
+
+    first = req.orders[0]
+    assert first.symbol == "AAPL.US"
+    assert first.side == 1  # SELL enum
+    assert first.orderType == 0  # MARKET enum
+    assert first.timeInForce == 0  # GFD enum
+    assert first.owner == "SFA"  # owner exists on the proto and is copied
+    assert first.originId  # stamped for traceability
+    assert first.notes == "submit_id=abc"
+    assert first.brokerAutomation.predefinedType == 3  # AUTOROUTE
+    assert not hasattr(first, "fund")  # no fund field on the Order proto
+
+    assert backend.last_metadata == [("authorization", "Bearer tok")]
+    assert backend.channels_opened[0].endpoint == "127.0.0.1:50051"
+    assert backend.channels_opened[0].closed
+
+
+def test_create_orders_send_to_ems_off(backend):
+    backend.create_results = [make_create_result("FLEX-1")]
+    adapter = LiveFlexAdapter(
+        FlexConfig(endpoint="e:1", token="t", send_to_ems=False)
+    )
+    adapter.create_orders([_payload("AAPL.US", 1, "BUY")])
+    assert backend.last_create_request.sendToEms is False
+
+
+def test_create_orders_result_count_mismatch_raises(backend):
+    backend.create_results = [make_create_result("FLEX-1")]
+    adapter = LiveFlexAdapter(CONFIG)
+    with pytest.raises(RuntimeError, match="cannot join"):
+        adapter.create_orders([_payload("AAPL.US", 1, "BUY"), _payload("MSFT.US", 2, "BUY")])
+
+
+def test_create_orders_empty_raises(backend):
+    with pytest.raises(ValueError, match="empty"):
+        LiveFlexAdapter(CONFIG).create_orders([])
+
+
+# ---------------------------------------------------------------------------
+# GetOrderInfo2 refresh source
+# ---------------------------------------------------------------------------
+
+
+def test_live_refresh_source_updates_ledger(backend, tmp_path):
+    td = date(2026, 9, 4)
+    store = KotlStore(tmp_path)
+    wo = WorkingOrder.from_submit_line(
+        submit_id="S1",
+        flex_order_id="FLEX-1",
+        trade_date=td,
+        symbol="AAPL.US",
+        side="SELL",
+        fund="KELAI",
+        position_group="USATop2000_strategy_v1",
+        unsigned_sent_qty=18,
+        submitted_at=datetime(2026, 9, 4, 14, 0, tzinfo=timezone.utc),
+    )
+    store.upsert_working_orders([wo])
+
+    backend.order_infos = [
+        make_order_info(
+            "FLEX-1",
+            "AAPL.US",
+            side=1,
+            quantity=18,
+            filled_quantity=10,
+            status=4,  # PARTIALLY_FILLED enum int
+            weighted_avg_price=191.2,
+            trade_date="09/04/2026",
+        )
+    ]
+
+    from ki_ops.kotl.refresh import refresh_working_orders
+
+    updated = refresh_working_orders(store, td, LiveRefreshSource(CONFIG))
+    assert len(updated) == 1
+    row = updated[0]
+    assert row.filled_qty == Decimal("-10")
+    assert row.leaves_qty == Decimal("-8")
+    assert row.status.value == "partial"
+    assert row.avg_fill_px == Decimal("191.2")
+
+    # request used MM/DD/YYYY dates and ALL_ORDERS
+    assert backend.last_query_request.fromDate == "09/04/2026"
+    assert backend.last_query_request.toDate == "09/04/2026"
+    assert backend.last_query_request.queryType == 4
+
+
+# ---------------------------------------------------------------------------
+# ReplayPositions
+# ---------------------------------------------------------------------------
+
+
+def test_is_plain_us_equity():
+    assert is_plain_us_equity("NKE.US")
+    assert is_plain_us_equity("BRK-B.US")
+    assert not is_plain_us_equity("18880.KS")
+    assert not is_plain_us_equity("AAPL 250117P00150000.US")  # option
+    assert not is_plain_us_equity("AAPL")
+
+
+def test_fetch_flex_positions_filters_and_signs(backend):
+    backend.positions = [
+        make_position("NKE.US", -100.0),
+        make_position("AAPL.US", 250.0),
+        make_position("18880.KS", 50.0),  # non-US listing → dropped
+        make_position("AAPL 250117P00150000.US", -1.0),  # option → dropped
+        make_position("TSLA.US", 10.0, fund="OTHERFUND"),  # wrong fund → dropped
+        make_position("MSFT.US", 0.0),  # zero qty → dropped
+    ]
+    positions, raw = fetch_flex_positions(CONFIG)
+    assert positions == {"NKE.US": Decimal("-100"), "AAPL.US": Decimal("250")}
+    assert len(raw) == 6  # raw rows unfiltered for diagnostics
+    assert backend.last_replay_request.sequenceId == 0
+
+
+def test_fetch_flex_positions_group_markers(backend):
+    from types import SimpleNamespace
+
+    ours = make_position("NKE.US", -100.0)
+    ours.attributes = [
+        SimpleNamespace(key="positionGroup", value=SimpleNamespace(stringValue="USATop2000_strategy_v1"))
+    ]
+    theirs = make_position("IBM.US", 40.0)
+    theirs.attributes = [
+        SimpleNamespace(key="positionGroup", value=SimpleNamespace(stringValue="OTHER_group"))
+    ]
+    unmarked = make_position("AMD.US", 5.0)  # no group marker → fund filter governs
+    backend.positions = [ours, theirs, unmarked]
+
+    positions, _ = fetch_flex_positions(CONFIG)
+    assert positions == {"NKE.US": Decimal("-100"), "AMD.US": Decimal("5")}
