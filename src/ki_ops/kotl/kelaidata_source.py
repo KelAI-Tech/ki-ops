@@ -30,6 +30,9 @@ ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = ROOT / "data" / "kotl" / "cache"
 
 DEFAULT_SHARES_TEMPLATE = "s3://kelaitrading/portfolio/shares/Portfolio_{yyyymmdd}.csv"
+STRATEGY_SHARES_TEMPLATE = (
+    "s3://kelaitrading/portfolio/shares/{strategy_id}/Portfolio_{yyyymmdd}.csv"
+)
 DEFAULT_DS2_H5 = "s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5"
 
 DS2_NAMESPACE = "ds2_data"
@@ -37,8 +40,16 @@ TICKER_VOCABULARY = "metadata/TICKERS"
 _TICKER_MISSING_CODE = -1
 
 
-def default_shares_path(trade_date: date) -> str:
-    return DEFAULT_SHARES_TEMPLATE.format(yyyymmdd=trade_date.strftime("%Y%m%d"))
+def default_shares_path(trade_date: date, *, strategy_id: str | None = None) -> str:
+    """Shares trade file path; strategy subfolder when *strategy_id* is given.
+
+    The pipeline writes per-strategy subfolders (e.g. ``USATop2000_neutralized``);
+    the legacy flat path remains the default when *strategy_id* is omitted.
+    """
+    yyyymmdd = trade_date.strftime("%Y%m%d")
+    if strategy_id:
+        return STRATEGY_SHARES_TEMPLATE.format(strategy_id=strategy_id, yyyymmdd=yyyymmdd)
+    return DEFAULT_SHARES_TEMPLATE.format(yyyymmdd=yyyymmdd)
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
