@@ -17,9 +17,11 @@ class FlexOrderDefaults:
 
     fund: str = "KELAI"
     position_group: str = "USATop2000_strategy_v1"
-    user: str = "SFA"
-    owner: str = "SFA"
-    trader: str = "SFA"
+    # The Flex API token is issued for JCO; UAT rejects other users with
+    # "User JCO is not entitled to trade as <user>" (verified live 2026-09-08).
+    user: str = "JCO"
+    owner: str = "JCO"
+    trader: str = "JCO"
     order_type: str = "MARKET"
     time_in_force: str = "GFD"
     algo: str = "VWAP_AMRS"

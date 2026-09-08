@@ -382,9 +382,10 @@ def submit_kelai_shares(
                 flex_env=env if env.upper() in ("UAT", "PROD") else "UAT"
             )
             flex_defaults = defaults or FlexOrderDefaults()
+            # account/fund scoping use the live-verified booking defaults
+            # (KELAI / KEL-LOMB, env-overridable) — NOT the payload fund key.
             flex_positions, _ = fetch_flex_positions(
                 cfg,
-                fund=flex_defaults.fund,
                 position_group=flex_defaults.position_group,
                 symbol_suffix=symbol_suffix,
             )

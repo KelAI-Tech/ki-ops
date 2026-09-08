@@ -28,9 +28,12 @@ Sample-code gotchas fixed here (guide §8):
 - ``CreateOrders`` returns a **stream** of ``CreateOrdersResponse``; per-order
   ``CreateOrderResult`` rows are collected while iterating (the sample's
   post-hoc ``hasattr`` checks ran on a consumed stream and were dead code).
-  ``CreateOrderResult`` carries no symbol/originId, so results are joined to
-  the input orders positionally; ``originId`` is still stamped on each order
-  for server-side traceability, and a count mismatch is a hard error.
+  ``CreateOrderResult`` carries no symbol echo, so results are joined to the
+  input orders positionally, and a count mismatch is a hard error.
+- **``originId`` is the durable order key** (verified live in UAT 2026-09-08):
+  Flex echoes it back as ``orderId`` in both the create results and
+  ``GetOrderInfo2``, so it must be globally unique — it is stamped as
+  ``<submit_id>-<i>``.
 - ``sendToEms`` is configurable (``KOTL_FLEX_SEND_TO_EMS``, default true) and
   the ``PRE_TRADE`` compliance rule set is always appended.
 """
@@ -50,10 +53,19 @@ from typing import Any, Sequence
 from ki_ops.kotl.models import WorkingOrder
 
 FLEX_SECRET_ID = "kelai/flextrade/api-token"
-DEFAULT_BATCH_USER = "SFA"
+# The API token is issued for user JCO; UAT rejects other users with
+# "User JCO is not entitled to trade as <user>" (verified live 2026-09-08).
+DEFAULT_BATCH_USER = "JCO"
 DEFAULT_METADATA_KEY = "authorization"
 DEFAULT_SCHEME = "Bearer"
 DEFAULT_REGION = "us-east-1"
+
+# SOD position scoping (verified against live UAT ReplayPositions 2026-09-08):
+# rows carry account=KELAI and the *booking* fund derived from the position
+# group's fund splits (KEL-LOMB for USATop2000_strategy_v1) — not the payload
+# "fund" key.
+DEFAULT_SOD_ACCOUNT = "KELAI"
+DEFAULT_SOD_FUND = "KEL-LOMB"
 
 GRPC_OPTIONS = [
     ("grpc.max_message_length", 512 * 1024 * 1024),
@@ -226,6 +238,19 @@ def _mmddyyyy(trade_date: str | date) -> str:
     return d.strftime("%m/%d/%Y")
 
 
+_SUBMIT_ID_RE = re.compile(r"submit_id=([0-9a-fA-F-]{8,})")
+
+
+def _origin_prefix(order: dict) -> str:
+    """Unique originId prefix: the submit_id stamped in notes, else a UUID."""
+    match = _SUBMIT_ID_RE.search(str(order.get("notes") or ""))
+    if match:
+        return match.group(1)
+    import uuid
+
+    return uuid.uuid4().hex
+
+
 # ---------------------------------------------------------------------------
 # CreateOrders
 # ---------------------------------------------------------------------------
@@ -249,9 +274,12 @@ class LiveFlexAdapter:
 
         for i, order in enumerate(order_list, start=1):
             proto = request.orders.add()
-            # CreateOrderResult has no symbol/originId echo; originId is
-            # stamped anyway so the server maps it to the flexOrderId.
-            proto.originId = str(order.get("originId") or f"kotl-{i}")
+            # Flex exposes originId as the queryable orderId in both the create
+            # results and GetOrderInfo2 (verified live 2026-09-08), and KOTL
+            # keys working orders on it — so it must be globally unique. Use
+            # <submit_id>-<i> (submit_id is stamped into notes by the submit
+            # path); fall back to a fresh UUID prefix.
+            proto.originId = str(order.get("originId") or f"{_origin_prefix(order)}-{i}")
             proto.symbol = str(order["symbol"])
             proto.quantity = float(order["quantity"])
             proto.price = float(order.get("price") or 0)
@@ -472,7 +500,8 @@ def is_plain_us_equity(symbol: str, *, suffix: str = ".US") -> bool:
 def fetch_flex_positions(
     config: FlexConfig,
     *,
-    fund: str = "KELAI",
+    account: str | None = None,
+    fund: str | None = None,
     position_group: str = "USATop2000_strategy_v1",
     symbol_suffix: str = ".US",
 ) -> tuple[dict[str, Decimal], list[dict[str, Any]]]:
@@ -481,10 +510,18 @@ def fetch_flex_positions(
     Returns ``(positions, raw_rows)``:
 
     - *positions*: ``{flex_symbol: signed Decimal qty}`` filtered to the given
-      *fund* / *position_group* and to plain-equity ``symbol_suffix`` symbols
-      (non-US listings and option symbols are dropped), zero rows excluded.
+      *account* / *fund* / *position_group* and to plain-equity
+      ``symbol_suffix`` symbols (non-US listings and option symbols are
+      dropped), zero rows excluded. *account* defaults to
+      ``KOTL_FLEX_SOD_ACCOUNT`` env or ``KELAI``; *fund* defaults to
+      ``KOTL_FLEX_SOD_FUND`` env or ``KEL-LOMB`` (the **booking** fund the
+      position group allocates to — not the payload ``fund`` key).
     - *raw_rows*: every replayed row, unfiltered, for diagnostics.
     """
+    if account is None:
+        account = os.environ.get("KOTL_FLEX_SOD_ACCOUNT") or DEFAULT_SOD_ACCOUNT
+    if fund is None:
+        fund = os.environ.get("KOTL_FLEX_SOD_FUND") or DEFAULT_SOD_FUND
     Orders_pb2, OrderServiceModule, _ = _load_sdk(config.sdk_path)
 
     request = Orders_pb2.ReplayPositionsRequest(sequenceId=0)
@@ -503,6 +540,8 @@ def fetch_flex_positions(
     positions: dict[str, Decimal] = {}
     for row in raw_rows:
         symbol = str(row["symbol"]).strip().upper()
+        if account and row.get("account") and str(row["account"]) != account:
+            continue
         if fund and row.get("fund") and str(row["fund"]) != fund:
             continue
         if position_group and not _matches_group(row, position_group):

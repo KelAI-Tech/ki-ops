@@ -78,7 +78,8 @@ def make_position(
     symbol: str,
     quantity: float,
     *,
-    fund: str = "KELAI",
+    # Live UAT reality: account is KELAI, booking fund is KEL-LOMB.
+    fund: str = "KEL-LOMB",
     account: str = "KELAI",
     strategies: list | None = None,
     **extra,
