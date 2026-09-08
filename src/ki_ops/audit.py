@@ -42,5 +42,9 @@ def input_hashes(paths: Mapping[str, str | Path | None]) -> dict[str, str]:
 def write_json_out(path: str | Path, payload: Mapping[str, Any]) -> Path:
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    body = json.dumps(payload, indent=2, default=str)
+    needle = '\n  "output":'
+    if needle in body:
+        body = body.replace(needle, "\n" + needle, 1)
+    dest.write_text(body + "\n", encoding="utf-8")
     return dest

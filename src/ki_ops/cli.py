@@ -518,10 +518,13 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         adv_csv=getattr(args, "adv", None) or poc.adv,
         as_of=as_of,
     )
-    print(json.dumps(out, indent=2, default=str))
+    from ki_ops.gate import format_verdict_json
+
+    body = format_verdict_json(out)
+    print(body, end="")
     if getattr(args, "json_out", None):
         write_json_out(args.json_out, out)
-    return 0 if out.get("passed") else 2
+    return 0 if out["output"]["passed"] else 2
 
 
 def main(argv: list[str] | None = None) -> int:

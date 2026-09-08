@@ -361,6 +361,9 @@ def check_shares_book(
         if shares.get(ticker_by_infocode.get(sid, ""), Decimal("0")) == 0
     ]
     metrics["names_dropped"] = len(dropped)
+    warnings.extend(
+        _adv_participation_warnings(shares, prior_shares, snapshot, settings)
+    )
     if dropped:
         shown = ", ".join(dropped[:20])
         warnings.append(
@@ -373,9 +376,59 @@ def check_shares_book(
     return violations, warnings, metrics
 
 
+def _adv_participation_warnings(shares, prior_shares, snapshot, settings) -> list[CheckViolation]:
+    """Warn when traded dollar volume / ADV20 exceeds ``max_adv_participation``.
+
+    ADV20 is dollar volume. Traded dollars are abs(share change) × prior close.
+    Without a prior shares file the trade is unknown, so the check is skipped.
+    """
+    cap = settings.max_adv_participation
+    if cap <= 0 or prior_shares is None:
+        return []
+    out: list[CheckViolation] = []
+    missing: list[str] = []
+    names = set(shares) | set(prior_shares)
+    for ticker in names:
+        traded_shares = abs(shares.get(ticker, Decimal("0")) - prior_shares.get(ticker, Decimal("0")))
+        if traded_shares == 0:
+            continue
+        px = snapshot.price(ticker)
+        if px is None or px <= 0:
+            continue
+        adv = snapshot.adv_by_ticker.get(ticker.upper())
+        if adv is None or adv <= 0:
+            missing.append(ticker)
+            continue
+        ratio = (traded_shares * px) / adv
+        if ratio > cap:
+            out.append(
+                warn(
+                    "MAX_ADV_PARTICIPATION",
+                    f"{ratio:.4f} of ADV dollar volume > {cap}",
+                    ticker,
+                )
+            )
+    for ticker in missing[:20]:
+        out.append(warn("MISSING_ADV", "no ADV in snapshot; liquidity unknown", ticker))
+    if len(missing) > 20:
+        out.append(
+            warn("MISSING_ADV", f"{len(missing)} names have no ADV in snapshot; liquidity unknown")
+        )
+    return out
+
+
+def format_verdict_json(payload: dict[str, Any]) -> str:
+    """Pretty JSON with a blank line between the ``input`` and ``output`` sections."""
+    body = json.dumps(payload, indent=2, default=str)
+    needle = '\n  "output":'
+    if needle in body:
+        body = body.replace(needle, "\n" + needle, 1)
+    return body + "\n"
+
+
 def write_verdict(dest: str, payload: dict[str, Any]) -> str:
     """Write the verdict JSON to a local path or an ``s3://`` URI."""
-    body = json.dumps(payload, indent=2, default=str) + "\n"
+    body = format_verdict_json(payload)
     if dest.startswith("s3://"):
         import boto3
 
@@ -464,11 +517,6 @@ def run_gate_checks(
         )
         violations += s_violations
         warnings += s_warnings
-        shares_metrics = {
-            "file": str(shares_spec),
-            "prior_file": str(prior_shares_spec) if prior_shares_spec else None,
-            **shares_metrics,
-        }
 
     hashes = input_hashes(
         {
@@ -481,31 +529,44 @@ def run_gate_checks(
         }
     )
     allowed = not violations
+    ds2_spec = (ds2 or DEFAULT_DS2_H5) if shares_spec is not None else None
+    two_way_turnover = dollar_metrics.pop("turnover", None)
     return {
         "command": "gate",
         "ki_ops_version": __version__,
-        "strategy_id": strategy_id,
-        "trade_date": trade_date.isoformat(),
-        "env": env,
-        "config": str(config),
-        "config_hash": settings_hash(settings),
-        "input_hashes": hashes,
-        "dollar_file": str(dollar_spec),
-        "prior_file": str(prior_spec) if prior_spec else None,
-        "max_net_exposure": format_decimal(settings.max_net_exposure, places=_RATIO),
-        "max_position_concentration": format_decimal(
-            settings.max_position_concentration, places=_RATIO
-        ),
-        "max_turnover": format_decimal(settings.max_turnover, places=_RATIO),
-        "turnover_convention": TURNOVER_CONVENTION,
-        "dollar": dollar_metrics,
-        "shares": shares_metrics,
-        "corp_action_check": "not_implemented",
-        "passed": passed_status(allowed, warnings),
-        "violation_codes": sorted({v.code for v in violations}),
-        "violations": [v.to_dict() for v in violations],
-        "warning_codes": sorted({v.code for v in warnings}),
-        "warnings": [v.to_dict() for v in warnings],
+        "input": {
+            "strategy_id": strategy_id,
+            "trade_date": trade_date.isoformat(),
+            "env": env,
+            "config": str(config),
+            "config_hash": settings_hash(settings),
+            "input_hashes": hashes,
+            "dollar_file": str(dollar_spec),
+            "prior_file": str(prior_spec) if prior_spec else None,
+            "shares_file": str(shares_spec) if shares_spec else None,
+            "prior_shares_file": str(prior_shares_spec) if prior_shares_spec else None,
+            "ds2_file": str(ds2_spec) if ds2_spec else None,
+            "max_net_exposure": format_decimal(settings.max_net_exposure, places=_RATIO),
+            "max_position_concentration": format_decimal(
+                settings.max_position_concentration, places=_RATIO
+            ),
+            "max_turnover": format_decimal(settings.max_turnover, places=_RATIO),
+            "max_adv_participation": format_decimal(
+                settings.max_adv_participation, places=_RATIO
+            ),
+            "turnover_convention": TURNOVER_CONVENTION,
+        },
+        "output": {
+            "passed": passed_status(allowed, warnings),
+            "2-way turnover": two_way_turnover,
+            "dollar": dollar_metrics,
+            "shares": shares_metrics,
+            "corp_action_check": "not_implemented",
+            "violation_codes": sorted({v.code for v in violations}),
+            "violations": [v.to_dict() for v in violations],
+            "warning_codes": sorted({v.code for v in warnings}),
+            "warnings": [v.to_dict() for v in warnings],
+        },
     }
 
 
@@ -593,5 +654,5 @@ def run_gate(args) -> int:
             )
         )
         return 1
-    print(json.dumps(payload, indent=2, default=str))
-    return 0 if payload["passed"] else 2
+    print(format_verdict_json(payload), end="")
+    return 0 if payload["output"]["passed"] else 2

@@ -130,11 +130,11 @@ def test_missing_price_blocks_run_perturb(tmp_path: Path, capsys):
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 2
-    assert out["passed"] is False
-    assert "MISSING_PRICE" in out["violation_codes"]
-    assert "MISSING_PRICE_SOD" in out["warning_codes"]
-    assert "1002" in out["violations"][-1]["message"] or any(
-        "1002" in v["message"] for v in out["violations"]
+    assert out["output"]["passed"] is False
+    assert "MISSING_PRICE" in out["output"]["violation_codes"]
+    assert "MISSING_PRICE_SOD" in out["output"]["warning_codes"]
+    assert "1002" in out["output"]["violations"][-1]["message"] or any(
+        "1002" in v["message"] for v in out["output"]["violations"]
     )
 
 

@@ -107,14 +107,16 @@ def test_gate_pass_with_prior(tmp_path, capsys):
         tmp_path, capsys, "--dollar-file", str(dollar), "--json-out", str(out_json)
     )
     assert rc == 0
-    assert payload["passed"] is True
-    assert payload["violation_codes"] == []
-    assert payload["dollar"]["net_exposure"] == "0.0000"
-    assert payload["dollar"]["turnover"] == "0.0417"  # 4000 traded / 96000 prior GMV
     assert payload["ki_ops_version"] == "0.2.0"
-    assert payload["corp_action_check"] == "not_implemented"
-    assert payload["shares"] is None  # offline run: shares check skipped
-    assert payload["input_hashes"].keys() >= {"config", "dollar", "prior"}
+    assert payload["output"]["passed"] is True
+    assert payload["output"]["violation_codes"] == []
+    assert payload["output"]["dollar"]["net_exposure"] == "0.0000"
+    assert "turnover" not in payload["output"]["dollar"]
+    assert payload["output"]["2-way turnover"] == "0.0417"  # 4000 traded / 96000 prior GMV
+    assert payload["output"]["corp_action_check"] == "not_implemented"
+    assert payload["output"]["shares"] is None  # offline run: shares check skipped
+    assert payload["input"]["input_hashes"].keys() >= {"config", "dollar", "prior"}
+    assert payload["input"]["shares_file"] is None
     assert json.loads(out_json.read_text()) == payload
 
 
@@ -144,9 +146,9 @@ def test_gate_s3_config_is_fetched(tmp_path, capsys, monkeypatch):
     rc = cli_main(argv)
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert payload["config"] == s3_uri  # verdict records the S3 URI, not the cache path
-    assert payload["max_net_exposure"] == "0.1000"
-    assert "config" in payload["input_hashes"]
+    assert payload["input"]["config"] == s3_uri  # verdict records the S3 URI, not the cache path
+    assert payload["input"]["max_net_exposure"] == "0.1000"
+    assert "config" in payload["input"]["input_hashes"]
 
 
 def test_sma_ima_config_matches_mandate():
@@ -167,8 +169,8 @@ def test_gate_net_exposure_block(tmp_path, capsys):
     write_dollar_book(tmp_path / "Portfolio_20260805.csv", {"101": "79000", "102": "-21000"})
     rc, payload = run_gate_cli(tmp_path, capsys, "--dollar-file", str(dollar))
     assert rc == 2
-    assert payload["passed"] is False
-    assert "MAX_NET_EXPOSURE" in payload["violation_codes"]
+    assert payload["output"]["passed"] is False
+    assert "MAX_NET_EXPOSURE" in payload["output"]["violation_codes"]
 
 
 def test_gate_concentration_block(tmp_path, capsys):
@@ -182,8 +184,8 @@ def test_gate_concentration_block(tmp_path, capsys):
     )
     rc, payload = run_gate_cli(tmp_path, capsys, "--dollar-file", str(dollar))
     assert rc == 2
-    assert "MAX_POSITION_CONCENTRATION" in payload["violation_codes"]
-    assert [v["symbol"] for v in payload["violations"]] == ["101"]
+    assert "MAX_POSITION_CONCENTRATION" in payload["output"]["violation_codes"]
+    assert [v["symbol"] for v in payload["output"]["violations"]] == ["101"]
 
 
 def test_gate_turnover_block_vs_prior(tmp_path, capsys):
@@ -193,17 +195,18 @@ def test_gate_turnover_block_vs_prior(tmp_path, capsys):
         tmp_path, capsys, "--dollar-file", str(dollar), "--prior-file", str(prior)
     )
     assert rc == 2
-    assert "MAX_TURNOVER" in payload["violation_codes"]
-    assert payload["dollar"]["turnover"] == "2.0000"
+    assert "MAX_TURNOVER" in payload["output"]["violation_codes"]
+    assert payload["output"]["2-way turnover"] == "2.0000"
 
 
 def test_gate_missing_prior_warns(tmp_path, capsys):
     dollar = write_dollar_book(tmp_path / "Portfolio_20260806.csv", {"101": "50000", "102": "-50000"})
     rc, payload = run_gate_cli(tmp_path, capsys, "--dollar-file", str(dollar))
     assert rc == 0
-    assert payload["passed"] == "with warnings"
-    assert "PRIOR_BOOK_MISSING" in payload["warning_codes"]
-    assert payload["dollar"]["turnover"] is None
+    assert payload["output"]["passed"] == "with warnings"
+    assert "PRIOR_BOOK_MISSING" in payload["output"]["warning_codes"]
+    assert "turnover" not in payload["output"]["dollar"]
+    assert payload["output"]["2-way turnover"] is None
 
 
 def test_gate_shares_net_breach(tmp_path, capsys):
@@ -226,12 +229,12 @@ def test_gate_shares_net_breach(tmp_path, capsys):
         str(h5),
     )
     assert rc == 2
-    assert payload["passed"] is False
-    assert payload["violation_codes"] == ["SHARES_MAX_NET_EXPOSURE"]
-    assert payload["shares"]["net_exposure"] == "1.0000"
-    assert payload["shares"]["px_as_of"] == "2026-08-05"
-    assert payload["shares"]["names_dropped"] == 0
-    assert "SHARES_PRIOR_MISSING" in payload["warning_codes"]
+    assert payload["output"]["passed"] is False
+    assert payload["output"]["violation_codes"] == ["SHARES_MAX_NET_EXPOSURE"]
+    assert payload["output"]["shares"]["net_exposure"] == "1.0000"
+    assert payload["output"]["shares"]["px_as_of"] == "2026-08-05"
+    assert payload["output"]["shares"]["names_dropped"] == 0
+    assert "SHARES_PRIOR_MISSING" in payload["output"]["warning_codes"]
 
 
 def test_gate_shares_dropped_names_and_churn(tmp_path, capsys):
@@ -257,11 +260,56 @@ def test_gate_shares_dropped_names_and_churn(tmp_path, capsys):
         str(h5),
     )
     assert rc == 0
-    assert payload["passed"] == "with warnings"
-    assert payload["shares"]["names_dropped"] == 2
-    assert "SHARES_NAMES_DROPPED" in payload["warning_codes"]
-    assert payload["shares"]["churn"] is not None
-    assert Decimal(payload["shares"]["churn"]) < Decimal("0.25")
+    assert payload["output"]["passed"] == "with warnings"
+    assert payload["output"]["shares"]["names_dropped"] == 2
+    assert "SHARES_NAMES_DROPPED" in payload["output"]["warning_codes"]
+    assert payload["output"]["shares"]["churn"] is not None
+    assert Decimal(payload["output"]["shares"]["churn"]) < Decimal("0.25")
+
+
+def test_gate_adv_participation_warns(tmp_path, capsys):
+    """Traded dollar volume / ADV20 over the limit warns; it does not block."""
+    cfg = tmp_path / "risk.yaml"
+    cfg.write_text(
+        "risk_management:\n"
+        "  max_net_exposure: 0.10\n"
+        "  max_turnover: 0.25\n"
+        "  max_position_concentration: 0.5\n"
+        "  max_adv_participation: 0.10\n"
+    )
+    dollar = write_dollar_book(tmp_path / "d" / "Portfolio_20260806.csv", {"101": "47875", "102": "-47875"})
+    h5 = make_ds2_h5(tmp_path / "ds2_data.h5")
+    shares = tmp_path / "s" / "Portfolio_20260806.csv"
+    shares.parent.mkdir()
+    # Trade $ = abs(share change) × prior close. AAPL trades 200000 × 191.5
+    # vs ADV20 $1.1e6. MSFT trades 100 shares, under the cap.
+    shares.write_text("AAPL,200000,VWAP\nMSFT,-75842,VWAP\n")
+    (shares.parent / "Portfolio_20260805.csv").write_text("AAPL,0,VWAP\nMSFT,-75742,VWAP\n")
+
+    argv = [
+        "gate",
+        "--strategy-id",
+        STRATEGY,
+        "--trade-date",
+        TD.isoformat(),
+        "--config",
+        str(cfg),
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--dollar-file",
+        str(dollar),
+        "--shares-file",
+        str(shares),
+        "--ds2",
+        str(h5),
+    ]
+    rc = cli_main(argv)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["input"]["max_adv_participation"] == "0.1000"
+    assert payload["output"]["passed"] == "with warnings"
+    assert "MAX_ADV_PARTICIPATION" in payload["output"]["warning_codes"]
+    assert [v["symbol"] for v in payload["output"]["warnings"] if v["code"] == "MAX_ADV_PARTICIPATION"] == ["AAPL"]
 
 
 def test_gate_infra_error_exits_1_with_json(tmp_path, capsys):
@@ -280,4 +328,4 @@ def test_gate_zero_gmv_blocks(tmp_path, capsys):
     dollar.write_text("SecurityID,$_value\n101,0\n")
     rc, payload = run_gate_cli(tmp_path, capsys, "--dollar-file", str(dollar))
     assert rc == 2
-    assert "ZERO_GMV" in payload["violation_codes"]
+    assert "ZERO_GMV" in payload["output"]["violation_codes"]

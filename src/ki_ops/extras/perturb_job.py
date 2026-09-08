@@ -47,7 +47,7 @@ def subject_for(blocks: Sequence[tuple[str, int, str]]) -> str:
         passed = "?"
         try:
             payload = json.loads(stdout)
-            passed = str(payload.get("passed", "?"))
+            passed = str((payload.get("output") or {}).get("passed", payload.get("passed", "?")))
         except json.JSONDecodeError:
             pass
         short = command.replace("run-perturb-", "")
