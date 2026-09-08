@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
+
+# A full-portfolio submit serializes ~2k orders into one payload_json cell,
+# far past the stdlib's 128 KiB default field cap (hit live 2026-09-08).
+csv.field_size_limit(sys.maxsize)
 
 from ki_ops.kotl.enums import OrderStatus
 from ki_ops.kotl.models import Submit, WorkingOrder
