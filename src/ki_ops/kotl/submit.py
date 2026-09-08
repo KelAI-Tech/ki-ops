@@ -333,6 +333,7 @@ def submit_kelai_shares(
         fetch,
         load_ds2_snapshot,
         load_shares_trade_file,
+        normalize_tickers_to_ds2,
         targets_from_shares,
     )
     from ki_ops.kotl import trade_file as trade_file_mod
@@ -353,8 +354,10 @@ def submit_kelai_shares(
     shares_path = fetch(shares_url, cache_dir=cache)
     ds2_path = fetch(ds2_h5 or DEFAULT_DS2_H5, cache_dir=cache)
 
-    shares = load_shares_trade_file(shares_path)
     snapshot = load_ds2_snapshot(ds2_path, trade_date=trade_date)
+    shares = normalize_tickers_to_ds2(
+        load_shares_trade_file(shares_path), snapshot, label="targets"
+    )
     targets = targets_from_shares(shares, snapshot)
     target_tickers = set(shares)
 
@@ -365,7 +368,10 @@ def submit_kelai_shares(
         if prior is None:
             return None
         prior_path = fetch(prior, cache_dir=cache)
-        return load_shares_trade_file(prior_path), prior
+        book = normalize_tickers_to_ds2(
+            load_shares_trade_file(prior_path), snapshot, label="prior-target SOD"
+        )
+        return book, prior
 
     # --- SOD book ----------------------------------------------------------
     if source == "csv":
@@ -389,9 +395,14 @@ def submit_kelai_shares(
                 position_group=flex_defaults.position_group,
                 symbol_suffix=symbol_suffix,
             )
-        bare_book = {
-            _bare_ticker(sym, suffix=symbol_suffix): qty for sym, qty in flex_positions.items()
-        }
+        bare_book = normalize_tickers_to_ds2(
+            {
+                _bare_ticker(sym, suffix=symbol_suffix): qty
+                for sym, qty in flex_positions.items()
+            },
+            snapshot,
+            label="flex SOD",
+        )
         sod = _sod_from_shares(bare_book, snapshot, target_tickers, label="flex")
 
         # Reconciliation guard: Flex book vs yesterday's target file.

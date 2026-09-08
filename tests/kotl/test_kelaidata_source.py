@@ -16,6 +16,7 @@ from ki_ops.kotl.kelaidata_source import (
     fetch,
     load_ds2_snapshot,
     load_shares_trade_file,
+    normalize_tickers_to_ds2,
     parse_s3_url,
     targets_from_shares,
 )
@@ -137,6 +138,44 @@ def test_snapshot_price_lookup_is_case_insensitive():
         infocode_by_ticker={"AAPL": "101"},
     )
     assert snap.price("aapl") == Decimal("191.5")
+
+
+def _snap(close: dict[str, str]) -> Ds2Snapshot:
+    return Ds2Snapshot(
+        px_as_of=date(2026, 8, 5),
+        close_by_ticker={t: Decimal(p) for t, p in close.items()},
+        adv_by_ticker={},
+        infocode_by_ticker={t: str(100 + i) for i, t in enumerate(close)},
+    )
+
+
+def test_normalize_tickers_to_ds2_dotted_to_undotted():
+    """Book uses ``BRK.B`` but ds2's vocabulary spells it ``BRKB``."""
+    snap = _snap({"BRKB": "480", "AAPL": "191.5"})
+    book = {"BRK.B": Decimal("5"), "AAPL": Decimal("2")}
+    assert normalize_tickers_to_ds2(book, snap) == {
+        "BRKB": Decimal("5"),
+        "AAPL": Decimal("2"),
+    }
+
+
+def test_normalize_tickers_to_ds2_undotted_to_dotted():
+    """Book uses ``BRKB`` but ds2's vocabulary spells it ``BRK.B``."""
+    snap = _snap({"BRK.B": "480"})
+    assert normalize_tickers_to_ds2({"BRKB": Decimal("-3")}, snap) == {"BRK.B": Decimal("-3")}
+
+
+def test_normalize_tickers_to_ds2_merges_both_spellings():
+    snap = _snap({"BRKB": "480"})
+    book = {"BRK.B": Decimal("5"), "BRKB": Decimal("-5")}
+    assert normalize_tickers_to_ds2(book, snap) == {}  # net zero drops the row
+
+
+def test_normalize_tickers_to_ds2_leaves_unpriced_tickers_alone():
+    """No alias with a close → keep the raw spelling for the strict-pricing error."""
+    snap = _snap({"AAPL": "191.5"})
+    book = {"BF.B": Decimal("7")}
+    assert normalize_tickers_to_ds2(book, snap) == {"BF.B": Decimal("7")}
 
 
 def test_submit_kelai_shares_end_to_end(tmp_path):

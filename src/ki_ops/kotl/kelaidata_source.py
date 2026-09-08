@@ -251,6 +251,43 @@ def load_ds2_snapshot(
     )
 
 
+def normalize_tickers_to_ds2(
+    shares_by_ticker: dict[str, Decimal],
+    snapshot: Ds2Snapshot,
+    *,
+    label: str = "shares",
+) -> dict[str, Decimal]:
+    """Remap class-share tickers to the ds2 spelling (``BRK.B`` ↔ ``BRKB``).
+
+    The upstream pipeline has flipped between dotted and undotted class-share
+    symbology across dates; a book and its prior file must join on one
+    vocabulary or the delta double-trades the same security under two names.
+    A ticker is remapped only when it has no ds2 close itself and its dotted/
+    undotted alias does; quantities merge when both spellings appear.
+    """
+    dotted_by_undotted: dict[str, str] = {}
+    for t in snapshot.close_by_ticker:
+        if "." in t:
+            dotted_by_undotted.setdefault(t.replace(".", ""), t)
+
+    out: dict[str, Decimal] = {}
+    remapped: list[str] = []
+    for ticker, qty in shares_by_ticker.items():
+        if snapshot.price(ticker) is None:
+            alias = ticker.replace(".", "") if "." in ticker else dotted_by_undotted.get(ticker)
+            if alias is not None and snapshot.price(alias) is not None:
+                remapped.append(f"{ticker}→{alias}")
+                ticker = alias
+        out[ticker] = out.get(ticker, Decimal(0)) + qty
+    if remapped:
+        shown = ", ".join(sorted(remapped)[:20])
+        print(
+            f"{label}: remapped {len(remapped)} ticker(s) to the ds2 spelling: "
+            f"{shown}{' …' if len(remapped) > 20 else ''}"
+        )
+    return {t: q for t, q in out.items() if q != 0}
+
+
 def targets_from_shares(
     shares_by_ticker: dict[str, Decimal],
     snapshot: Ds2Snapshot,
