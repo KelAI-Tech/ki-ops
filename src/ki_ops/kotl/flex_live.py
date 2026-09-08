@@ -272,6 +272,7 @@ class LiveFlexAdapter:
         request.sendToEms = self.config.send_to_ems
         request.complianceInputs.ruleSets.append(DomainCommons_pb2.PRE_TRADE)
 
+        origin_ids: list[str] = []
         for i, order in enumerate(order_list, start=1):
             proto = request.orders.add()
             # Flex exposes originId as the queryable orderId in both the create
@@ -280,6 +281,7 @@ class LiveFlexAdapter:
             # <submit_id>-<i> (submit_id is stamped into notes by the submit
             # path); fall back to a fresh UUID prefix.
             proto.originId = str(order.get("originId") or f"{_origin_prefix(order)}-{i}")
+            origin_ids.append(proto.originId)
             proto.symbol = str(order["symbol"])
             proto.quantity = float(order["quantity"])
             proto.price = float(order.get("price") or 0)
@@ -331,8 +333,28 @@ class LiveFlexAdapter:
                 f"{len(order_list)} orders — cannot join results to orders"
             )
 
+        # The stream yields results in completion order, not submission order
+        # (observed live in UAT 2026-09-08: 1568/1569 results out of place), so
+        # positional zip misattributes success/rejection. Join on originId,
+        # which Flex echoes back as the result orderId, and return results in
+        # submission order — callers zip them against the payload list.
+        result_by_origin: dict[str, Any] = {}
+        for result in raw_results:
+            key = str(result.orderId)
+            if key in result_by_origin:
+                raise RuntimeError(f"CreateOrders returned duplicate result orderId {key!r}")
+            result_by_origin[key] = result
+        missing = [o for o in origin_ids if o not in result_by_origin]
+        if missing:
+            shown = ", ".join(missing[:5])
+            raise RuntimeError(
+                f"CreateOrders results do not cover {len(missing)} submitted "
+                f"originId(s) (e.g. {shown}) — cannot join results to orders"
+            )
+
         out: list[dict] = []
-        for payload, result in zip(order_list, raw_results):
+        for origin_id, payload in zip(origin_ids, order_list):
+            result = result_by_origin[origin_id]
             issues = [
                 str(getattr(v, "description", v))
                 for v in list(getattr(result, "validationIssues", []))

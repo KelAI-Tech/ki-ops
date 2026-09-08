@@ -110,11 +110,12 @@ def test_sdk_missing_raises_clear_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _payload(symbol: str, qty: float, side: str) -> dict:
+def _payload(symbol: str, qty: float, side: str, *, origin_id: str | None = None) -> dict:
     return {
         "symbol": symbol,
         "quantity": qty,
         "side": side,
+        **({"originId": origin_id} if origin_id else {}),
         "orderType": "MARKET",
         "fund": "KELAI",
         "positionGroup": "USATop2000_strategy_v1",
@@ -131,22 +132,25 @@ def _payload(symbol: str, qty: float, side: str) -> dict:
 
 
 def test_create_orders_maps_fields_and_collects_stream(backend):
+    # Flex echoes originId back as the result orderId, and the stream yields
+    # results in completion order, not submission order (observed live in UAT
+    # 2026-09-08) — the adapter must join on originId, not position.
     backend.create_results = [
-        make_create_result("FLEX-1"),
-        make_create_result("FLEX-2"),
-        make_create_result("FLEX-3", success=False, description="bad symbol"),
+        make_create_result("abc-3", success=False, description="bad symbol"),
+        make_create_result("abc-1"),
+        make_create_result("abc-2"),
     ]
     backend.create_chunk_size = 2  # results split across two streamed responses
 
     adapter = LiveFlexAdapter(CONFIG)
     orders = [
-        _payload("AAPL.US", 18, "SELL"),
-        _payload("MSFT.US", 30, "BUY"),
-        _payload("ZZZ.US", 5, "BUY"),
+        _payload("AAPL.US", 18, "SELL", origin_id="abc-1"),
+        _payload("MSFT.US", 30, "BUY", origin_id="abc-2"),
+        _payload("ZZZ.US", 5, "BUY", origin_id="abc-3"),
     ]
     results = adapter.create_orders(orders)
 
-    assert [r["orderId"] for r in results] == ["FLEX-1", "FLEX-2", "FLEX-3"]
+    assert [r["orderId"] for r in results] == ["abc-1", "abc-2", "abc-3"]
     assert [r["success"] for r in results] == [True, True, False]
     assert [r["symbol"] for r in results] == ["AAPL.US", "MSFT.US", "ZZZ.US"]
     assert results[2]["description"] == "bad symbol"
@@ -173,19 +177,31 @@ def test_create_orders_maps_fields_and_collects_stream(backend):
 
 
 def test_create_orders_send_to_ems_off(backend):
-    backend.create_results = [make_create_result("FLEX-1")]
+    backend.create_results = [make_create_result("abc-1")]
     adapter = LiveFlexAdapter(
         FlexConfig(endpoint="e:1", token="t", send_to_ems=False)
     )
-    adapter.create_orders([_payload("AAPL.US", 1, "BUY")])
+    adapter.create_orders([_payload("AAPL.US", 1, "BUY", origin_id="abc-1")])
     assert backend.last_create_request.sendToEms is False
 
 
 def test_create_orders_result_count_mismatch_raises(backend):
-    backend.create_results = [make_create_result("FLEX-1")]
+    backend.create_results = [make_create_result("abc-1")]
     adapter = LiveFlexAdapter(CONFIG)
     with pytest.raises(RuntimeError, match="cannot join"):
         adapter.create_orders([_payload("AAPL.US", 1, "BUY"), _payload("MSFT.US", 2, "BUY")])
+
+
+def test_create_orders_unknown_result_id_raises(backend):
+    backend.create_results = [make_create_result("abc-1"), make_create_result("FLEX-99")]
+    adapter = LiveFlexAdapter(CONFIG)
+    with pytest.raises(RuntimeError, match="do not cover"):
+        adapter.create_orders(
+            [
+                _payload("AAPL.US", 1, "BUY", origin_id="abc-1"),
+                _payload("MSFT.US", 2, "BUY", origin_id="abc-2"),
+            ]
+        )
 
 
 def test_create_orders_empty_raises(backend):
