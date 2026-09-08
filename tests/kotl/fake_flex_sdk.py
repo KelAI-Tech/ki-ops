@@ -64,6 +64,69 @@ class FakeOrderQueryRequest:
         self.values = []
 
 
+class FakeLookupSecurityRequest:
+    def __init__(self, symbol: str = "", flexSecurityId: int = 0) -> None:  # noqa: N803
+        self.symbol = symbol
+        self.flexSecurityId = flexSecurityId
+
+
+class _LookupList(list):
+    def add(self) -> FakeLookupSecurityRequest:
+        entry = FakeLookupSecurityRequest()
+        self.append(entry)
+        return entry
+
+
+class FakeBatchLookupSecurityRequest:
+    def __init__(self) -> None:
+        self.security = _LookupList()
+
+
+# SecurityIdentifierType enum numbers (Securities.proto).
+ID_SYMBOL, ID_TICKER, ID_CUSIP, ID_ISIN, ID_SEDOL, ID_BLOOMBERG, ID_FIGI = 1, 2, 3, 4, 5, 7, 16
+
+
+def make_security(
+    symbol: str,
+    flex_id: int,
+    *,
+    identifiers: list | None = None,
+    description: str = "",
+    security_type: str = "EQUITY",
+    exchange_mic: str = "XNAS",
+):
+    """One Flex master entry: canonical *symbol* + ``(type, value)`` identifiers.
+
+    The canonical SYMBOL identifier is always present; pass extra identifiers
+    for tickers/SEDOLs, e.g. ``[(ID_TICKER, "BF.B"), (ID_SEDOL, "2146838")]``.
+    """
+    id_rows = [SimpleNamespace(identifier=symbol, identifierType=ID_SYMBOL)]
+    for id_type, value in identifiers or []:
+        id_rows.append(SimpleNamespace(identifier=value, identifierType=id_type))
+    return SimpleNamespace(
+        commonData=SimpleNamespace(
+            flexSecurityId=flex_id,
+            symbol=symbol,
+            description=description,
+            securityType=security_type,
+            exchangeMIC=exchange_mic,
+            identifierList=SimpleNamespace(identifier=id_rows),
+        )
+    )
+
+
+_EMPTY_SECURITY = SimpleNamespace(
+    commonData=SimpleNamespace(
+        flexSecurityId=0,
+        symbol="",
+        description="",
+        securityType="",
+        exchangeMIC="",
+        identifierList=SimpleNamespace(identifier=[]),
+    )
+)
+
+
 def make_create_result(order_id: str, *, success: bool = True, description: str = ""):
     return SimpleNamespace(
         success=success,
@@ -150,9 +213,16 @@ class FakeFlexBackend:
         self.create_chunk_size = 2
         self.order_infos = []  # GrpcClientOrder-likes for GetOrderInfo2
         self.positions = []  # PositionUpdateResponse-likes for ReplayPositions
+        self.security_master = []  # make_security(...) entries for Lookup/BatchLookup
+        self.security_chunk_size = 0  # 0 = one stream message per BatchLookup
+        self.security_error = None  # raise this from Lookup/BatchLookup (network down)
+        self.lookup_calls = 0
+        self.batch_lookup_calls = 0
         self.last_create_request = None
         self.last_query_request = None
         self.last_replay_request = None
+        self.last_lookup_request = None
+        self.last_batch_lookup_request = None
         self.last_metadata = None
         self.channels_opened = []
 
@@ -179,6 +249,58 @@ class FakeFlexBackend:
         self.last_metadata = metadata
         for position in self.positions:
             yield position
+
+    # --- SecurityService ---------------------------------------------------
+    def _match_security(self, query: str):
+        """Live-verified semantics: query matches the canonical symbol or ANY identifier."""
+        text = str(query).strip().upper()
+        for security in self.security_master:
+            common = security.commonData
+            if str(common.symbol).upper() == text:
+                return security
+            for ident in common.identifierList.identifier:
+                if str(ident.identifier).upper() == text:
+                    return security
+        return None
+
+    def _lookup_response(self, query: str):
+        security = self._match_security(query)
+        if security is None:
+            return SimpleNamespace(
+                status=SimpleNamespace(
+                    success=False,
+                    description=f"Security not found for query (symbol = '{query}', flexSecurityId = 0)",
+                ),
+                security=_EMPTY_SECURITY,
+            )
+        return SimpleNamespace(
+            status=SimpleNamespace(
+                success=True, description=f"Security found for symbol = '{query}'."
+            ),
+            security=security,
+        )
+
+    def Lookup(self, request, timeout=None, metadata=None):  # noqa: N802
+        if self.security_error is not None:
+            raise self.security_error
+        self.lookup_calls += 1
+        self.last_lookup_request = request
+        self.last_metadata = metadata
+        yield self._lookup_response(request.symbol)
+
+    def BatchLookup(self, request, timeout=None, metadata=None):  # noqa: N802
+        if self.security_error is not None:
+            raise self.security_error
+        self.batch_lookup_calls += 1
+        self.last_batch_lookup_request = request
+        self.last_metadata = metadata
+        responses = [self._lookup_response(entry.symbol) for entry in request.security]
+        chunk = self.security_chunk_size or len(responses) or 1
+        for i in range(0, max(len(responses), 1), chunk):
+            yield SimpleNamespace(
+                status=SimpleNamespace(success=True, description=""),
+                response=responses[i : i + chunk],
+            )
 
 
 class _FakeChannel:
@@ -228,14 +350,32 @@ def install_fake_sdk(monkeypatch, backend: FakeFlexBackend) -> None:
     domain_pb2.ALL_ORDERS = 4
     domain_pb2.OrderQueryRequest = FakeOrderQueryRequest
 
+    securities_pb2 = types.ModuleType("API.Securities_pb2")
+    securities_pb2.LookupSecurityRequest = FakeLookupSecurityRequest
+    securities_pb2.BatchLookupSecurityRequest = FakeBatchLookupSecurityRequest
+
+    securities_grpc = types.ModuleType("API.Securities_pb2_grpc")
+
+    class SecurityServiceStub:
+        def __init__(self, channel) -> None:
+            self.channel = channel
+            self.Lookup = backend.Lookup
+            self.BatchLookup = backend.BatchLookup
+
+    securities_grpc.SecurityServiceStub = SecurityServiceStub
+
     api_pkg = types.ModuleType("API")
     api_pkg.__path__ = []  # mark as package
     api_pkg.Orders_pb2 = orders_pb2
     api_pkg.Orders_pb2_grpc = orders_grpc
     api_pkg.DomainCommons_pb2 = domain_pb2
+    api_pkg.Securities_pb2 = securities_pb2
+    api_pkg.Securities_pb2_grpc = securities_grpc
 
     monkeypatch.setitem(sys.modules, "grpc", grpc_mod)
     monkeypatch.setitem(sys.modules, "API", api_pkg)
     monkeypatch.setitem(sys.modules, "API.Orders_pb2", orders_pb2)
     monkeypatch.setitem(sys.modules, "API.Orders_pb2_grpc", orders_grpc)
     monkeypatch.setitem(sys.modules, "API.DomainCommons_pb2", domain_pb2)
+    monkeypatch.setitem(sys.modules, "API.Securities_pb2", securities_pb2)
+    monkeypatch.setitem(sys.modules, "API.Securities_pb2_grpc", securities_grpc)

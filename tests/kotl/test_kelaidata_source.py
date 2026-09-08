@@ -39,9 +39,28 @@ def _write_panel(h5, key: str, dates: list[str], infocodes: list[int], values, d
     grp.create_dataset("block0_values", data=np.asarray(values, dtype=dtype))
 
 
-def make_ds2_h5(path, *, tsla_close_nan: bool = False):
-    """Two dates × three infocodes (AAPL/MSFT/TSLA), pandas-fixed style layout."""
+def make_ds2_h5(path, *, tsla_close_nan: bool = False, tickers: tuple = ()):
+    """Two dates × three infocodes (AAPL/MSFT/TSLA), pandas-fixed style layout.
+
+    Pass *tickers* for an arbitrary vocabulary instead (constant close 100.0,
+    ADV 1e6 per name; *tsla_close_nan* ignored).
+    """
     dates = ["2026-08-04", "2026-08-05"]
+    if tickers:
+        ids = [101 + i for i in range(len(tickers))]
+        close = [[100.0] * len(tickers)] * 2
+        adv = [[1e6] * len(tickers)] * 2
+        codes = [list(range(len(tickers)))] * 2
+        with h5py.File(str(path), "w") as f:
+            _write_panel(f, "ds2_data/CLOSE", dates, ids, close, "float64")
+            _write_panel(f, "ds2_data/ADV20_ADJUSTED", dates, ids, adv, "float64")
+            _write_panel(f, "ds2_data/TICKER_INDEX", dates, ids, codes, "int32")
+            f.create_group("metadata").create_dataset(
+                "TICKERS",
+                data=np.asarray(list(tickers), dtype=object),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+        return path
     ids = [101, 102, 103]
     close = [[190.0, 500.0, 250.0], [191.5, 505.0, float("nan") if tsla_close_nan else 252.0]]
     adv = [[1e6, 2e6, 3e6], [1.1e6, 2.1e6, 3.1e6]]
