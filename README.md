@@ -265,14 +265,44 @@ no CSV exports). SOD comes from `--sod-source {flex,prior-target,csv,flat}`
 aborts on divergence (**exit 4**, thresholds `--recon-max-shares` /
 `--recon-max-names`, strict `0/0` defaults). Missing prices, duplicate
 tickers, and fractional shares abort the submit. Safety rails on every
-submit: `--dry-run` (build + print + trade file, no gRPC, no ledger write),
-idempotency (one ok live submit per trade date + env unless `--force`), and
-`--max-orders` / `--max-gross-notional` caps — refusals **exit 5**. Each
+submit: **target mode** (below — the never-trade-past-the-target invariant),
+`--dry-run` (build + print + trade file, no gRPC, no ledger write, no claim),
+and `--max-orders` / `--max-gross-notional` caps — refusals **exit 5**. Each
 submit prints and writes a **trade file** CSV (`--trade-file-out`, default
 `s3://kelaitrading/trades/<strategy-id>/<yyyymmdd>/trades_<submit_id>.csv`
 with `--strategy-id`, else `<data-dir>/trades/…`). Requires
 `pip install "ki-ops[kelaidata]"` (h5py, numpy, boto3); S3 downloads are
 ETag-cached under `data/kotl/cache/`.
+
+**Target mode** ([`kotl/target_mode.py`](src/ki_ops/kotl/target_mode.py)) —
+the portfolio file is a **target book**, and cumulative orders sent can never
+exceed it, no matter how many times the pipeline runs (Airflow retry,
+duplicate DAG run, manual CLI re-run). On every live submit the intended
+delta is reduced by what was **already sent today** for `(trade_date, env)`:
+
+- **everything sent** → clean no-op, **exit 0** (an accidental re-run is
+  green and harmless; the JSON reports `target_covered`);
+- **partial prior send** → only the residual top-up goes out;
+- **overshoot** (a regenerated *lower* target) → clips to **zero** with a
+  loud warning — KOTL never auto-generates a corrective/reverse order; the
+  audit CSV (`target_mode_<submit_id>.csv`, next to the trade file) lists the
+  exact excess per symbol for a manual unwind.
+
+Already-sent comes from the ledger (accepted orders only; with
+`--sod-source flex` each order's fills are subtracted since `ReplayPositions`
+already reflects them) and is **cross-checked both ways** against live
+`GetOrderInfo2` before any send — a ledger order missing from Flex, a
+quantity mismatch, or a KOTL-stamped Flex order the ledger doesn't know (the
+lost-ledger-write double-send scenario) refuses the submit (**exit 5**).
+Recovery: `--sent-source flex` recomputes already-sent from Flex itself
+(KOTL-stamped orders only) — the target cap still applies; no flag bypasses
+it. Submission is also **claimed atomically once per day**: a
+`kotl_submit_claims` row keyed `(trade_date, env)` is inserted immediately
+before `CreateOrders` (MySQL PK — concurrent duplicate runs lose the race;
+CSV store uses an `O_EXCL` claim file, single-host only). A second run with a
+residual remaining refuses (**exit 5**) unless `--force`, and `--force` now
+means "another **residual-capped** attempt" — it can never resend what
+already went out. Dry-runs never claim and skip the live cross-check.
 
 **Pre-submit security resolution** ([`kotl/flex_symbols.py`](src/ki_ops/kotl/flex_symbols.py)) —
 FlexTrade's recommended workflow: on live envs every payload symbol is checked
