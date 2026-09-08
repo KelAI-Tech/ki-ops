@@ -30,6 +30,9 @@ ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CACHE_DIR = ROOT / "data" / "kotl" / "cache"
 
 DEFAULT_SHARES_TEMPLATE = "s3://kelaitrading/portfolio/shares/Portfolio_{yyyymmdd}.csv"
+STRATEGY_SHARES_TEMPLATE = (
+    "s3://kelaitrading/portfolio/shares/{strategy_id}/Portfolio_{yyyymmdd}.csv"
+)
 DEFAULT_DS2_H5 = "s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5"
 
 DS2_NAMESPACE = "ds2_data"
@@ -37,8 +40,16 @@ TICKER_VOCABULARY = "metadata/TICKERS"
 _TICKER_MISSING_CODE = -1
 
 
-def default_shares_path(trade_date: date) -> str:
-    return DEFAULT_SHARES_TEMPLATE.format(yyyymmdd=trade_date.strftime("%Y%m%d"))
+def default_shares_path(trade_date: date, *, strategy_id: str | None = None) -> str:
+    """Shares trade file path; strategy subfolder when *strategy_id* is given.
+
+    The pipeline writes per-strategy subfolders (e.g. ``USATop2000_neutralized``);
+    the legacy flat path remains the default when *strategy_id* is omitted.
+    """
+    yyyymmdd = trade_date.strftime("%Y%m%d")
+    if strategy_id:
+        return STRATEGY_SHARES_TEMPLATE.format(strategy_id=strategy_id, yyyymmdd=yyyymmdd)
+    return DEFAULT_SHARES_TEMPLATE.format(yyyymmdd=yyyymmdd)
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
@@ -238,6 +249,43 @@ def load_ds2_snapshot(
         adv_by_ticker=adv,
         infocode_by_ticker=dict(ticker_to_infocode),
     )
+
+
+def normalize_tickers_to_ds2(
+    shares_by_ticker: dict[str, Decimal],
+    snapshot: Ds2Snapshot,
+    *,
+    label: str = "shares",
+) -> dict[str, Decimal]:
+    """Remap class-share tickers to the ds2 spelling (``BRK.B`` ↔ ``BRKB``).
+
+    The upstream pipeline has flipped between dotted and undotted class-share
+    symbology across dates; a book and its prior file must join on one
+    vocabulary or the delta double-trades the same security under two names.
+    A ticker is remapped only when it has no ds2 close itself and its dotted/
+    undotted alias does; quantities merge when both spellings appear.
+    """
+    dotted_by_undotted: dict[str, str] = {}
+    for t in snapshot.close_by_ticker:
+        if "." in t:
+            dotted_by_undotted.setdefault(t.replace(".", ""), t)
+
+    out: dict[str, Decimal] = {}
+    remapped: list[str] = []
+    for ticker, qty in shares_by_ticker.items():
+        if snapshot.price(ticker) is None:
+            alias = ticker.replace(".", "") if "." in ticker else dotted_by_undotted.get(ticker)
+            if alias is not None and snapshot.price(alias) is not None:
+                remapped.append(f"{ticker}→{alias}")
+                ticker = alias
+        out[ticker] = out.get(ticker, Decimal(0)) + qty
+    if remapped:
+        shown = ", ".join(sorted(remapped)[:20])
+        print(
+            f"{label}: remapped {len(remapped)} ticker(s) to the ds2 spelling: "
+            f"{shown}{' …' if len(remapped) > 20 else ''}"
+        )
+    return {t: q for t, q in out.items() if q != 0}
 
 
 def targets_from_shares(

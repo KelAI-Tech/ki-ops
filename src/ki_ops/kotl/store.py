@@ -4,19 +4,49 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Protocol, Sequence
+
+# A full-portfolio submit serializes ~2k orders into one payload_json cell,
+# far past the stdlib's 128 KiB default field cap (hit live 2026-09-08).
+csv.field_size_limit(sys.maxsize)
 
 from ki_ops.kotl.enums import OrderStatus
 from ki_ops.kotl.models import Submit, WorkingOrder
+
+
+class KotlStoreProtocol(Protocol):
+    """Minimal ledger surface used by submit/refresh/eod/report.
+
+    ``KotlStore`` (CSV, default) and ``MysqlKotlStore`` both satisfy it.
+    """
+
+    def append_submit(self, submit: Submit) -> None: ...
+
+    def load_submits(self) -> list[Submit]: ...
+
+    def load_working_orders(
+        self,
+        *,
+        trade_date: date | None = None,
+        submit_id: str | None = None,
+    ) -> list[WorkingOrder]: ...
+
+    def get_working_order(self, flex_order_id: str) -> WorkingOrder | None: ...
+
+    def upsert_working_orders(self, orders: Iterable[WorkingOrder]) -> None: ...
+
+    def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None: ...
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = ROOT / "data" / "kotl"
 
 SUBMITS_FILE = "submits.csv"
 WORKING_ORDERS_FILE = "working_orders.csv"
+CLAIMS_DIR = "claims"
 
 SUBMIT_FIELDS = (
     "submit_id",
@@ -123,6 +153,24 @@ class KotlStore:
         for order in orders:
             by_id[order.flex_order_id] = order
         self._write_working_orders(by_id.values())
+
+    def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None:
+        """Once-a-day submission claim: ``None`` when this call won the claim,
+        else the ``submit_id`` that already holds it.
+
+        ``O_CREAT|O_EXCL`` on a per-``(trade_date, env)`` file — atomic on a
+        local filesystem; the MySQL store is the concurrency-safe live backend
+        (this fallback is documented as single-host only).
+        """
+        claims = self.data_dir / CLAIMS_DIR
+        claims.mkdir(parents=True, exist_ok=True)
+        path = claims / f"{env.upper()}_{trade_date.strftime('%Y%m%d')}.claim"
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(submit_id)
+        except FileExistsError:
+            return path.read_text(encoding="utf-8").strip() or "unknown"
+        return None
 
     def _load_all_working_orders(self) -> list[WorkingOrder]:
         if not self.working_orders_path.exists():

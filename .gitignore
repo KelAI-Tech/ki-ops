@@ -23,6 +23,7 @@ Untitled.ipynb
 config/notify.env
 data/kotl/
 
-# FlexTrade vendor: track kelai samples only
+# FlexTrade vendor: track kelai samples only (Brooklyn SDK is local-only)
 vendor/flextrade/brooklyn-12.57.0/
+vendor/flextrade/brooklyn-*/
 vendor/flextrade/APIDocumentation.html
