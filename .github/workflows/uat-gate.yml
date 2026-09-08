@@ -1,0 +1,27 @@
+name: uat-gate
+
+# main is a protected release branch: feature work merges into `uat`, and
+# only `uat` itself may be merged into `main`. This check is listed as a
+# required status on main's branch protection, so a PR from any other head
+# branch can never be merged there.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  uat-gate:
+    name: uat-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only uat may merge into main
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "uat" ]; then
+            echo "::error::PRs into main are only allowed from 'uat'." \
+              "Re-target this PR to base 'uat' (feature -> uat -> main)." >&2
+            exit 1
+          fi
+          echo "head is uat; ok"

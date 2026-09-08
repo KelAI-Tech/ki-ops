@@ -16,6 +16,7 @@ from ki_ops.kotl.kelaidata_source import (
     fetch,
     load_ds2_snapshot,
     load_shares_trade_file,
+    normalize_tickers_to_ds2,
     parse_s3_url,
     targets_from_shares,
 )
@@ -38,9 +39,28 @@ def _write_panel(h5, key: str, dates: list[str], infocodes: list[int], values, d
     grp.create_dataset("block0_values", data=np.asarray(values, dtype=dtype))
 
 
-def make_ds2_h5(path, *, tsla_close_nan: bool = False):
-    """Two dates × three infocodes (AAPL/MSFT/TSLA), pandas-fixed style layout."""
+def make_ds2_h5(path, *, tsla_close_nan: bool = False, tickers: tuple = ()):
+    """Two dates × three infocodes (AAPL/MSFT/TSLA), pandas-fixed style layout.
+
+    Pass *tickers* for an arbitrary vocabulary instead (constant close 100.0,
+    ADV 1e6 per name; *tsla_close_nan* ignored).
+    """
     dates = ["2026-08-04", "2026-08-05"]
+    if tickers:
+        ids = [101 + i for i in range(len(tickers))]
+        close = [[100.0] * len(tickers)] * 2
+        adv = [[1e6] * len(tickers)] * 2
+        codes = [list(range(len(tickers)))] * 2
+        with h5py.File(str(path), "w") as f:
+            _write_panel(f, "ds2_data/CLOSE", dates, ids, close, "float64")
+            _write_panel(f, "ds2_data/ADV20_ADJUSTED", dates, ids, adv, "float64")
+            _write_panel(f, "ds2_data/TICKER_INDEX", dates, ids, codes, "int32")
+            f.create_group("metadata").create_dataset(
+                "TICKERS",
+                data=np.asarray(list(tickers), dtype=object),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+        return path
     ids = [101, 102, 103]
     close = [[190.0, 500.0, 250.0], [191.5, 505.0, float("nan") if tsla_close_nan else 252.0]]
     adv = [[1e6, 2e6, 3e6], [1.1e6, 2.1e6, 3.1e6]]
@@ -137,6 +157,44 @@ def test_snapshot_price_lookup_is_case_insensitive():
         infocode_by_ticker={"AAPL": "101"},
     )
     assert snap.price("aapl") == Decimal("191.5")
+
+
+def _snap(close: dict[str, str]) -> Ds2Snapshot:
+    return Ds2Snapshot(
+        px_as_of=date(2026, 8, 5),
+        close_by_ticker={t: Decimal(p) for t, p in close.items()},
+        adv_by_ticker={},
+        infocode_by_ticker={t: str(100 + i) for i, t in enumerate(close)},
+    )
+
+
+def test_normalize_tickers_to_ds2_dotted_to_undotted():
+    """Book uses ``BRK.B`` but ds2's vocabulary spells it ``BRKB``."""
+    snap = _snap({"BRKB": "480", "AAPL": "191.5"})
+    book = {"BRK.B": Decimal("5"), "AAPL": Decimal("2")}
+    assert normalize_tickers_to_ds2(book, snap) == {
+        "BRKB": Decimal("5"),
+        "AAPL": Decimal("2"),
+    }
+
+
+def test_normalize_tickers_to_ds2_undotted_to_dotted():
+    """Book uses ``BRKB`` but ds2's vocabulary spells it ``BRK.B``."""
+    snap = _snap({"BRK.B": "480"})
+    assert normalize_tickers_to_ds2({"BRKB": Decimal("-3")}, snap) == {"BRK.B": Decimal("-3")}
+
+
+def test_normalize_tickers_to_ds2_merges_both_spellings():
+    snap = _snap({"BRKB": "480"})
+    book = {"BRK.B": Decimal("5"), "BRKB": Decimal("-5")}
+    assert normalize_tickers_to_ds2(book, snap) == {}  # net zero drops the row
+
+
+def test_normalize_tickers_to_ds2_leaves_unpriced_tickers_alone():
+    """No alias with a close → keep the raw spelling for the strict-pricing error."""
+    snap = _snap({"AAPL": "191.5"})
+    book = {"BF.B": Decimal("7")}
+    assert normalize_tickers_to_ds2(book, snap) == {"BF.B": Decimal("7")}
 
 
 def test_submit_kelai_shares_end_to_end(tmp_path):

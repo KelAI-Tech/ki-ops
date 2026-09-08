@@ -1,0 +1,69 @@
+# strongSwan swanctl config for the FlexTrade IPsec tunnel (dedicated host).
+#
+# Copy to /etc/swanctl/swanctl.conf on the VPN host, fill the <PLACEHOLDERS>,
+# then: sudo chmod 600 /etc/swanctl/swanctl.conf && sudo swanctl --load-all
+#
+# NEVER commit a filled-in copy — it contains the PSK and XAuth password.
+# This template holds placeholders only.
+#
+# Values to obtain from the Mac's FortiClient tunnel "IIPServices"
+# (advanced / Phase 1 & 2) or from FlexTrade:
+#   - <PSK>                pre-shared key (masked in the GUI; inside the sconf)
+#   - <LOCAL_ID>           FortiClient "Local ID" / peer ID (often required for
+#                          FortiGate dialup in aggressive mode; may equal a group
+#                          name). If blank in FortiClient, omit local id below.
+#   - <P1_PROPOSAL>        Phase 1 enc-integ-dhgroup, e.g. aes256-sha256-modp1536
+#   - <P2_PROPOSAL>        Phase 2 enc-integ[-dhgroup], e.g. aes256-sha256-modp1536
+#   - <REMOTE_SUBNETS>     Flex nets to route in, e.g. 172.20.0.0/16,172.21.0.0/16
+#                          (or 0.0.0.0/0 if the gateway expects full tunnel)
+#
+# FortiGate dialup with XAuth is almost always IKEv1 aggressive mode.
+
+connections {
+    flextrade {
+        version = 1                      # IKEv1
+        aggressive = yes                 # FortiGate dialup default; flip to no if Phase 1 is main mode
+        proposals = <P1_PROPOSAL>        # e.g. aes256-sha256-modp1536
+
+        local_addrs  = %defaultroute
+        remote_addrs = 35.245.224.15
+
+        local-1 {
+            auth = psk
+            # id = <LOCAL_ID>            # uncomment if FortiClient sets a Local/Peer ID
+        }
+        local-2 {
+            auth = xauth                 # XAuth client leg (username/password)
+            xauth_id = KelAI
+        }
+        remote {
+            auth = psk
+            id = 35.245.224.15
+        }
+
+        children {
+            flextrade {
+                remote_ts = <REMOTE_SUBNETS>   # e.g. 172.20.0.0/16,172.21.0.0/16
+                # local_ts left default so mode-config VIP is used as source
+                esp_proposals = <P2_PROPOSAL>  # e.g. aes256-sha256-modp1536
+                start_action = trap            # or "start" to bring up on load
+                dpd_action = restart
+            }
+        }
+        # Pull a virtual IP from the gateway (FortiGate mode-config). Sourcing
+        # gRPC traffic from this VIP is what lets 172.20/172.21 be reachable.
+        vips = 0.0.0.0
+        rekey_time = 0
+        mobike = no
+    }
+}
+
+secrets {
+    ike-flextrade {
+        secret = "<PSK>"
+    }
+    xauth-flextrade {
+        id = KelAI
+        secret = "<XAUTH_PASSWORD>"      # the vendor-email password (e.g. Winter2026$)
+    }
+}

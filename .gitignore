@@ -9,6 +9,8 @@ __pycache__/
 htmlcov/
 dist/
 build/
+# Generated into the wheel at build time by setup.py; never committed.
+src/ki_ops/_build_info.py
 .DS_Store
 .idea/
 .ipynb_checkpoints/
@@ -23,6 +25,7 @@ Untitled.ipynb
 config/notify.env
 data/kotl/
 
-# FlexTrade vendor: track kelai samples only
+# FlexTrade vendor: track kelai samples only (Brooklyn SDK is local-only)
 vendor/flextrade/brooklyn-12.57.0/
+vendor/flextrade/brooklyn-*/
 vendor/flextrade/APIDocumentation.html
