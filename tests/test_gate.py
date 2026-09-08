@@ -274,7 +274,10 @@ def test_gate_adv_participation_warns(tmp_path, capsys):
     cfg.write_text(
         "risk_management:\n"
         "  max_net_exposure: 0.10\n"
-        "  max_turnover: 0.25\n"
+        # The AAPL trade below is ~400x the book's GMV; an effectively
+        # unbounded turnover limit keeps this test on the ADV check alone
+        # (turnover blocking has its own tests).
+        "  max_turnover: 100000\n"
         "  max_position_concentration: 0.5\n"
         "  max_adv_participation: 0.10\n"
     )
