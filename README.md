@@ -77,16 +77,10 @@ Each command runs the **full** pre-trade gate on the same POC SOD + trade CSVs (
 | `run-perturb-zero` | all trade qty → 0 | 0 | `"with warnings"` | Turnover 0; `MAX_POSITION_SIZE` warn on SOD **335446** |
 | `run-perturb-var-checks` | scale trades above `max_turnover` (~26% vs 25% cap) | 2 | `false` | **Block `MAX_TURNOVER`**; same two warnings as baseline |
 
-Stdout JSON includes:
+Stdout JSON has a top-level `perturb` (`"baseline"` / `"zero-turnover"` / `"var-checks"`), then `input` and `output` (blank line between them):
 
-- `perturb`: `"baseline"` / `"zero-turnover"` / `"var-checks"`
-- `as_of`, `sod_source`
-- Paths: `config`, `security_master` (annotated), `ticker_mapping_dt`, `adv`, `prices_csv`, `sod_csv`, `trade_intents_file` (input trades for baseline; `<trades>_zero.csv` or `<trades>_var_checks.csv` for the other two)
-- Hashes: `config_hash`, `input_hashes` (`security_master`, `ticker_mapping`, `sod`, `trades`, …)
-- Caps echoed: `max_turnover`, `max_net_exposure`, `max_adv_participation`, `max_order_size`
-- Book: SOD GMV / NMV / net exposure, `turnover`, `projected_portfolio_value`, `projected_net_exposure`
-- Gate: `passed` (`true` / `false` / `"with warnings"`)
-- Findings: `violation_codes` / `warning_codes` (unique index) plus full `violations` / `warnings`
+- `input`: `as_of`, `sod_source`, paths (`config`, `security_master`, `ticker_mapping_dt`, `adv`, `prices_csv`, `sod_csv`, `trade_intents_file`), hashes (`config_hash`, `input_hashes`), caps (`max_turnover`, `max_net_exposure`, `max_adv_participation`, `max_order_size`), `turnover_convention`
+- `output`: SOD GMV / NMV / net exposure, `turnover`, `projected_portfolio_value`, `projected_net_exposure`, `passed` (`true` / `false` / `"with warnings"`), `violation_codes` / `warning_codes` plus full `violations` / `warnings`
 
 Write the same JSON to disk with `--json-out FILE`.
 
@@ -187,7 +181,7 @@ Exit codes (Airflow contract):
 | `1` | infra error (missing input, S3 failure…) | `{"passed": false, "error": …, "error_type": "infra", "ki_ops_version": …}` |
 | `2` | a blocking risk check failed | full verdict JSON with `violation_codes` |
 
-The verdict JSON mirrors the perturb commands: `passed` (`true` / `false` / `"with warnings"`), `violation_codes` / `violations`, `warning_codes` / `warnings`, `input_hashes`, `config_hash`, plus `ki_ops_version`, `dollar` / `shares` metric blocks, and `corp_action_check: "not_implemented"` (Snowflake DS2Adj corp-action check is a schema-reserved follow-up). `--json-out` writes the same payload to a local file or an `s3://` URI.
+The verdict JSON has two sections. `input` is what was read: files, hashes, and the limits that were applied (`max_net_exposure`, `max_position_concentration`, `max_turnover`, `max_adv_participation`). `output` is the result: `passed` (`true` / `false` / `"with warnings"`), `2-way turnover` (dollar turnover vs the prior book; `null` if no prior), `dollar` / `shares` metrics, `violation_codes` / `violations`, `warning_codes` / `warnings`, and `corp_action_check: "not_implemented"` (Snowflake DS2Adj corp-action check is a schema-reserved follow-up). Top-level fields are only `command` and `ki_ops_version`. `--json-out` writes the same payload to a local file or an `s3://` URI.
 
 ## Email + Slack notifications
 
