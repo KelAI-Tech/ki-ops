@@ -122,7 +122,19 @@ def register_kotl_parser(sub) -> None:
     sk.add_argument(
         "--force",
         action="store_true",
-        help="allow a second live submit for the same (trade-date, env)",
+        help="allow a second live submission attempt for the same (trade-date, env) "
+        "past the once-a-day claim — target mode still caps the send to the "
+        "residual (target − already-sent), so a forced re-run can never resend "
+        "what already went out",
+    )
+    sk.add_argument(
+        "--sent-source",
+        choices=("ledger", "flex"),
+        default="ledger",
+        help="where 'already sent today' comes from for the target-mode residual: "
+        "the KOTL ledger (default, cross-checked against live Flex orders) or "
+        "flex (recovery when the ledger lost a write: recompute from live "
+        "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies)",
     )
     sk.add_argument(
         "--recon-max-shares",
@@ -313,6 +325,7 @@ def run_kotl(args) -> int:
                 trade_file_out=getattr(args, "trade_file_out", None),
                 unresolved=getattr(args, "unresolved", "block"),
                 sedol_source=getattr(args, "sedol_source", None),
+                sent_source=getattr(args, "sent_source", "ledger"),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")
@@ -331,6 +344,9 @@ def run_kotl(args) -> int:
                     "trade_date": args.trade_date.isoformat(),
                     "env": flex_env,
                     "dry_run": getattr(args, "dry_run", False),
+                    "target_covered": bool(
+                        (submit.flex_response or {}).get("target_covered")
+                    ),
                     "shares_file": args.shares or "s3 default",
                     "order_count": len(submit.payload),
                     "flex_order_ids": list(submit.flex_order_ids),

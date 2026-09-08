@@ -177,6 +177,7 @@ def make_order_info(
     trade_date: str = "",
     fund: str = "KELAI",
     position_group: str = "USATop2000_strategy_v1",
+    notes: str = "",
 ):
     return SimpleNamespace(
         id=1,
@@ -190,7 +191,7 @@ def make_order_info(
         weightedAvgPrice=weighted_avg_price,
         status=status,
         tradeDate=trade_date,
-        notes="",
+        notes=notes,
         clientBatchIdentifier="",
         attributes=[],
         accountTargets=[

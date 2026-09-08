@@ -12,14 +12,23 @@ SOD sources:
 - ``csv`` — explicit SOD CSV (legacy ``--sod``);
 - ``flat`` — no book (legacy ``--assume-flat-sod``).
 
-Safety rails on the live path: idempotency (one ok submit per
-``(trade_date, env)`` unless forced), ``--dry-run`` (no gRPC, no ledger
-write), order-count / gross-notional caps checked before ``CreateOrders``,
-and **pre-submit security resolution** via the Flex ``SecurityService``
-(:mod:`ki_ops.kotl.flex_symbols`): payload symbols are rewritten to the
-canonical master spelling and names absent from the master block the submit
-(``--unresolved block``, exit 6) or are skipped (``--unresolved skip``), with
-an ``unresolved_<submit_id>.csv`` report either way.
+Safety rails on the live path:
+
+- **target mode** (:mod:`ki_ops.kotl.target_mode`): cumulative sends can never
+  exceed the day's target book. Every live submit subtracts what was already
+  sent today (ledger, cross-checked against live ``GetOrderInfo2``) and sends
+  only the residual; a re-run with everything sent is a clean exit-0 no-op,
+  and overshoot (regenerated lower target) clips to zero with a warning —
+  never a corrective order. A ``kotl_submit_claims`` row is claimed atomically
+  before ``CreateOrders`` so only one run per ``(trade_date, env)`` can send
+  (``--force`` allows another attempt, still residual-capped);
+- ``--dry-run`` (no gRPC, no ledger write, no claim);
+- order-count / gross-notional caps checked before ``CreateOrders``;
+- **pre-submit security resolution** via the Flex ``SecurityService``
+  (:mod:`ki_ops.kotl.flex_symbols`): payload symbols are rewritten to the
+  canonical master spelling and names absent from the master block the submit
+  (``--unresolved block``, exit 6) or are skipped (``--unresolved skip``), with
+  an ``unresolved_<submit_id>.csv`` report either way.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ from ki_ops.kotl.flex_map import (
     orders_to_flex_dicts,
 )
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
+from ki_ops.kotl.qty import signed_qty
 from ki_ops.kotl.store import KotlStore
 
 SOD_SOURCES = ("flex", "prior-target", "csv", "flat")
@@ -306,7 +316,8 @@ def _resolve_sod_source(
     )
 
 
-def _unresolved_csv_dest(
+def _sidecar_csv_dest(
+    prefix: str,
     *,
     trade_date: date,
     submit_id: str,
@@ -315,7 +326,7 @@ def _unresolved_csv_dest(
     trade_file_out: str | None,
     dry_run: bool,
 ) -> str:
-    """Unresolved-securities CSV path: alongside the trade file."""
+    """``<prefix>_<submit_id>[_dryrun].csv`` alongside the trade file."""
     from ki_ops.kotl import trade_file as trade_file_mod
 
     base = trade_file_out or trade_file_mod.default_trade_file_dest(
@@ -325,7 +336,7 @@ def _unresolved_csv_dest(
         data_dir=data_dir,
         dry_run=dry_run,
     )
-    name = f"unresolved_{submit_id}{'_dryrun' if dry_run else ''}.csv"
+    name = f"{prefix}_{submit_id}{'_dryrun' if dry_run else ''}.csv"
     base = str(base)
     if "/" in base:
         return f"{base.rsplit('/', 1)[0]}/{name}"
@@ -452,7 +463,8 @@ def _resolve_payload_symbols(
 
     rows = build_unresolved_rows(unresolved_names, details, payloads, suffix=symbol_suffix)
     print(format_unresolved_table(rows))
-    dest = _unresolved_csv_dest(
+    dest = _sidecar_csv_dest(
+        "unresolved",
         trade_date=trade_date,
         submit_id=submit_id,
         strategy_id=strategy_id,
@@ -525,6 +537,7 @@ def submit_kelai_shares(
     write_trade_file: bool = True,
     unresolved: str = "block",
     sedol_source: str | None = None,
+    sent_source: str = "ledger",
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -556,9 +569,27 @@ def submit_kelai_shares(
     add the securities. On ``dry_run`` resolution is still attempted and
     reported, but a resolution outage (no network to Flex) only warns.
 
+    **Target mode** (live envs; :mod:`ki_ops.kotl.target_mode`): the payloads
+    are capped to the **residual** — intended delta minus what was already
+    sent today for ``(trade_date, env)``. Re-running is therefore always safe:
+    with everything sent the run is a clean no-op (empty-payload ``Submit``
+    with ``flex_response["target_covered"]``, CLI exit 0); a prior partial
+    send tops up; overshoot (a regenerated *lower* target) clips to zero with
+    a loud warning and **never** generates a corrective order. Already-sent
+    comes from the ledger (*sent_source* ``"ledger"``, default) and is
+    cross-checked **both ways** against live ``GetOrderInfo2`` before any
+    send — a mismatch refuses the submit (exit 5). ``sent_source="flex"`` is
+    the lost/corrupted-ledger recovery: already-sent is recomputed from Flex
+    (KOTL-stamped orders only) and the cross-check becomes informational; the
+    residual cap itself can never be bypassed. Before ``CreateOrders`` the run
+    atomically claims ``(trade_date, env)`` in the store — a second run is
+    refused (exit 5) unless *force*, and *force* still only sends the
+    residual.
+
     On ``dry_run`` the returned :class:`Submit` is **not** persisted and has no
-    flex order ids; everything else (recon table, trade file, caps report) is
-    still produced.
+    flex order ids; everything else (recon table, residual audit, trade file,
+    caps report) is still produced — but no claim is taken and the live
+    cross-check is skipped (no gRPC).
     """
     from ki_ops.intents import derive_trade_intents, load_sod_positions_csv
     from ki_ops.kotl.kelaidata_source import (
@@ -574,8 +605,17 @@ def submit_kelai_shares(
     from ki_ops.kotl import trade_file as trade_file_mod
     from ki_ops.models import Portfolio
 
+    from ki_ops.kotl import target_mode
+
     if unresolved not in ("block", "skip"):
         raise ValueError(f"unresolved must be 'block' or 'skip', got {unresolved!r}")
+    if sent_source not in target_mode.SENT_SOURCES:
+        raise ValueError(
+            f"sent_source must be one of {target_mode.SENT_SOURCES}, got {sent_source!r}"
+        )
+    live = env.upper() in ("UAT", "PROD")
+    if sent_source == "flex" and not live:
+        raise ValueError("sent_source='flex' requires a live env (UAT/PROD)")
     source = _resolve_sod_source(sod_source, sod_csv, assume_flat_sod)
     recon_max_shares = (
         DEFAULT_RECON_MAX_SHARES if recon_max_shares is None else Decimal(recon_max_shares)
@@ -725,6 +765,96 @@ def submit_kelai_shares(
             sedols=sedols,
         )
 
+    # --- target mode: cross-check + residual guard (see docstring) -----------
+    if live:
+        # A Flex-sourced SOD book already contains today's fills, so the filled
+        # part of every sent order is inside target − SOD — subtract it.
+        subtract_fills = source == "flex"
+        all_submits = store.load_submits()
+        env_submit_ids = {s.submit_id for s in all_submits if s.env == env}
+        today_working = store.load_working_orders(trade_date=trade_date)
+        env_working = [w for w in today_working if w.submit_id in env_submit_ids]
+
+        flex_rows = None
+        if not dry_run or sent_source == "flex":
+            from ki_ops.kotl.flex_live import (
+                aggregate_split_order_rows,
+                fetch_order_rows,
+                load_flex_config,
+            )
+
+            if flex_config is None:
+                flex_config = load_flex_config(flex_env=env.upper())
+            raw_rows = fetch_order_rows(flex_config, trade_date)
+            flex_rows = aggregate_split_order_rows(
+                raw_rows, [w.flex_order_id for w in env_working]
+            )
+            cross = target_mode.crosscheck_ledger_vs_flex(env_working, flex_rows)
+            if env_working or not cross.ok:
+                print(cross.format_table())
+            if not cross.ok and sent_source == "ledger":
+                message = (
+                    f"ledger vs Flex cross-check failed for {trade_date.isoformat()} "
+                    f"{env}: {len(cross.issues)} issue(s) — the ledger cannot be "
+                    "trusted as the already-sent source. Investigate; if the ledger "
+                    "lost a write, re-run with --sent-source flex (the target cap "
+                    "still applies)"
+                )
+                if dry_run:
+                    print(
+                        "DRY RUN: cross-check failed — a live submit would refuse "
+                        f"(exit 5): {message}"
+                    )
+                else:
+                    raise SubmitRefusedError(message)
+
+        if sent_source == "flex":
+            sent = target_mode.sent_from_flex_rows(flex_rows, subtract_fills=subtract_fills)
+            print(
+                f"already-sent source: flex GetOrderInfo2 "
+                f"({len(sent)} symbol(s) with KOTL-stamped sends today)"
+            )
+        else:
+            sent = target_mode.sent_from_ledger(
+                all_submits, today_working, env=env, subtract_fills=subtract_fills
+            )
+
+        deltas = {
+            str(p["symbol"]).upper(): signed_qty(p["side"], p["quantity"]) for p in payloads
+        }
+        try:
+            residual_report = target_mode.compute_residuals(deltas, sent)
+        except target_mode.TargetModeViolation as exc:
+            raise SubmitRefusedError(f"TARGET MODE: {exc}") from exc
+        print(residual_report.format_table())
+        if not residual_report.fresh:
+            audit_dest = _sidecar_csv_dest(
+                "target_mode",
+                trade_date=trade_date,
+                submit_id=pending.submit_id,
+                strategy_id=strategy_id,
+                data_dir=getattr(store, "data_dir", None),
+                trade_file_out=trade_file_out,
+                dry_run=dry_run,
+            )
+            written = target_mode.write_residual_csv(residual_report, audit_dest)
+            print(f"residual audit file: {written}")
+        payloads, orders = target_mode.apply_residuals(payloads, orders, residual_report)
+        if not payloads:
+            print(
+                f"TARGET COVERED: every {trade_date.isoformat()} {env} delta was "
+                "already sent — nothing to submit (clean no-op)"
+            )
+            return Submit(
+                submit_id=pending.submit_id,
+                submitted_at=pending.submitted_at,
+                env=env,
+                ok=True,
+                flex_order_ids=(),
+                payload=(),
+                flex_response={"target_covered": True, "dry_run": dry_run},
+            )
+
     # --- safety rails --------------------------------------------------------
     gross_notional = sum((abs(o.quantity) * o.limit_price for o in orders), Decimal("0"))
     cap_breaches = []
@@ -741,13 +871,20 @@ def submit_kelai_shares(
         else:
             raise SubmitRefusedError(f"refusing submit before CreateOrders: {message}")
 
-    if not dry_run and env.upper() != "FAKE":
-        existing = has_ok_submit(store, trade_date, env)
-        if existing is not None and not force:
-            raise SubmitRefusedError(
-                f"an ok submit for trade_date={trade_date.isoformat()} env={env} "
-                f"already exists (submit_id={existing.submit_id}) — pass --force to "
-                "submit again"
+    # --- once-a-day atomic claim (before CreateOrders; races lose here) -------
+    if not dry_run and live:
+        existing_claim = store.claim_submission(trade_date, env, pending.submit_id)
+        if existing_claim is not None:
+            if not force:
+                raise SubmitRefusedError(
+                    f"trade_date={trade_date.isoformat()} env={env} is already "
+                    f"claimed (submit_id={existing_claim}) and a residual remains — "
+                    "pass --force to send it (target mode caps the send; a re-run "
+                    "with everything sent is a clean no-op without --force)"
+                )
+            print(
+                f"--force: proceeding past the existing {trade_date.isoformat()} "
+                f"{env} claim ({existing_claim}) — this send is capped to the residual"
             )
 
     # --- dry run: print + trade file, no gRPC, no ledger write ---------------
