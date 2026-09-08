@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -100,6 +102,14 @@ def test_flex_config_env_endpoint_secret_token(monkeypatch):
 def test_sdk_missing_raises_clear_error(monkeypatch):
     for mod in ("API", "API.Orders_pb2", "API.Orders_pb2_grpc", "API.DomainCommons_pb2"):
         monkeypatch.delitem(sys.modules, mod, raising=False)
+    # If the developer shell exports KOTL_FLEX_SDK_PATH (the documented live
+    # setup), an earlier test calling _load_sdk has already inserted the real
+    # SDK onto sys.path permanently — strip it so the import genuinely fails.
+    sdk_path = os.environ.get("KOTL_FLEX_SDK_PATH")
+    if sdk_path:
+        base = str(Path(sdk_path))
+        stripped = [p for p in sys.path if p not in (base, str(Path(base) / "API"))]
+        monkeypatch.setattr(sys, "path", stripped)
     monkeypatch.delenv("KOTL_FLEX_SDK_PATH", raising=False)
     with pytest.raises(FlexSdkMissingError, match="KOTL_FLEX_SDK_PATH"):
         flex_live._load_sdk(None)
