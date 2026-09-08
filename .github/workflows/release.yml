@@ -107,7 +107,12 @@ jobs:
       - name: Build wheel and sdist
         # Built after tagging so setuptools-scm resolves the exact-tag
         # version and the wheel is ki_ops-<version>-py3-none-any.whl.
-        run: python -m build
+        #
+        # --sdist --wheel builds BOTH directly from the source tree. The
+        # default (no flags) builds the wheel from the unpacked sdist in a
+        # temp dir with no .git metadata, so setup.py's git-SHA embedding
+        # would write "unknown" and the verify step below would fail.
+        run: python -m build --sdist --wheel
 
       - name: Verify pure-python wheel
         env:
