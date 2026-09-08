@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import ki_ops
 from ki_ops.config import load_risk_settings
 from ki_ops.engine import PreTradeEngine
 from ki_ops.intents import (
@@ -58,6 +59,12 @@ def _poc_default_label(key: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ki-ops")
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"ki-ops {ki_ops.__version__} (git {ki_ops.__git_sha__})",
+        help="print version and the git sha the wheel was built from",
+    )
     p.add_argument("--config", default=str(DEFAULT_CONFIG))
     sub = p.add_subparsers(dest="command")
 
