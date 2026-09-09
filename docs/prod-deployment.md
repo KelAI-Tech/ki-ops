@@ -25,7 +25,11 @@ feature branch
 GitHub release vX.Y.Z         ← tag derived automatically; wheel + sdist + SHA256SUMS
    │  kelaidata: scripts/fetch_ki_ops_wheel.sh vX.Y.Z  +  ki-ops==X.Y.Z pin
    ▼
-kelaidata plugins/ wheelhouse
+kelaidata plugins/ wheelhouse   ← lands on kelaidata uat
+   │  kelaidata uat -> main documented PR (prod builds are main-only,
+   │  enforced by kelaidata's scripts/mwaa_release.py)
+   ▼
+kelaidata main commit
    │  scripts/mwaa_release.py build   (verifies wheel bytes against the release)
    ▼
 s3://kelai-mwaa-dags/releases/<git-sha>/canary/   (immutable)
@@ -213,13 +217,30 @@ minutes, no cutover, run history preserved. In the kelaidata repo:
 exact release SHA. Full mechanics (first-ever promotion, capacity, IAM,
 verification) are in kelaidata's `MWAA_DEPLOYMENT.md`.
 
+kelaidata prod releases are built **from kelaidata `main` only**: changes
+land and canary-validate on kelaidata `uat`, `uat` is promoted to `main`
+via a documented PR, and the release is built from that `main` commit.
+kelaidata's `scripts/mwaa_release.py build --target prod` enforces this —
+it refuses any HEAD that is not an ancestor of `origin/main`.
+
+### Production Flex endpoint: UAT until the deliberate go-live
+
+The production environment does **not** talk to the Flex production
+endpoint yet. `KOTL_FLEX_ENV` is pinned to `UAT` in the operator-managed
+SSM document `/kelaidata/mwaa/prod/runtime`; flipping it to `PROD` is the
+deliberate go-live step, taken on its own — never bundled into a routine
+release. Until after the prod soak, prod KOTL submission stays disarmed:
+`KOTL_SUBMIT_ENABLED` is left unset, so the `submit_flex_trades` task
+cannot transmit anything even against the UAT endpoint.
+
 ### Rollback
 
 Two levels, cheapest first:
 
 1. **Repin ki-ops only** (bad ki-ops release, kelaidata otherwise fine):
    in kelaidata, set `ki-ops==<previous>` in `requirements_airflow.txt`,
-   re-vendor (`./scripts/fetch_ki_ops_wheel.sh v<previous>`), rebuild
+   re-vendor (`./scripts/fetch_ki_ops_wheel.sh v<previous>`), land on
+   `uat`, promote `uat -> main`, rebuild from `main`
    (`mwaa_release.py build`), canary-validate, promote. Released wheels
    are immutable GitHub assets, so any prior version is always
    re-fetchable.
@@ -262,24 +283,31 @@ In ki-ops:
    (Major/minor bump instead:
    `gh workflow run release.yml -R KelAI-Tech/ki-ops -f version=X.Y.0`.)
 
-In kelaidata (clean, reviewed `uat` commit; `git status --short` empty):
+In kelaidata:
 
-4. Vendor the wheel and align the pin:
+4. Vendor the wheel, align the pin, and land it on kelaidata `uat`:
 
    ```bash
    ./scripts/fetch_ki_ops_wheel.sh vX.Y.Z
    # set ki-ops==X.Y.Z in requirements_airflow.txt (PR into kelaidata uat)
    ```
 
-5. Build the immutable releases (runs tests; verifies wheel provenance):
+5. Promote kelaidata `uat` to `main` via a **documented PR** (the body
+   enumerates what is being promoted; merge with a merge commit). Prod
+   releases are cut from `main` only — `mwaa_release.py build --target
+   prod` refuses any HEAD that is not an ancestor of `origin/main`.
+
+6. Build the immutable releases from the clean, reviewed `main` commit
+   (`git status --short` empty; runs tests; verifies wheel provenance):
 
    ```bash
+   git checkout main && git pull origin main
    export RELEASE_SHA="$(git rev-parse HEAD)"
    ./scripts/mwaa_release.py build --target canary --bucket kelai-mwaa-dags --region us-east-1
    ./scripts/mwaa_release.py build --target prod   --bucket kelai-mwaa-dags --region us-east-1
    ```
 
-6. Point the canary at the release and validate:
+7. Point the canary at the release and validate:
 
    ```bash
    # copy the new ReleaseSha + VersionIds from the release manifest into
@@ -290,14 +318,14 @@ In kelaidata (clean, reviewed `uat` commit; `git status --short` empty):
    Green required: `ki_ops_gate` verdict, nightly KOTL dry-run Batch job,
    all canary DAGs in their namespaces.
 
-7. Record canary evidence:
+8. Record canary evidence:
 
    ```bash
    ./scripts/mwaa_release.py record-canary --release-sha "$RELEASE_SHA" \
      --evidence infra/mwaa/canary-evidence.json --bucket kelai-mwaa-dags --region us-east-1
    ```
 
-8. Render and apply the prod update (save the rollback parameter file):
+9. Render and apply the prod update (save the rollback parameter file):
 
    ```bash
    ./scripts/mwaa_release.py render-prod --environment "$PROD_MWAA_ENVIRONMENT" \
@@ -305,15 +333,16 @@ In kelaidata (clean, reviewed `uat` commit; `git status --short` empty):
    ./scripts/mwaa_prod.sh update --parameters infra/mwaa/prod-parameters.json
    ```
 
-9. Verify on prod: environment `AVAILABLE`, no DAG import errors, next
-   `ki_ops_gate` run green, and the deployed version matches:
+10. Verify on prod: environment `AVAILABLE`, no DAG import errors, next
+    `ki_ops_gate` run green, and the deployed version matches:
 
-   ```bash
-   # in the gate task logs, the verdict JSON carries ki_ops_version;
-   # or from any environment with the wheel installed:
-   ki-ops --version    # ki-ops X.Y.Z (git <released sha>)
-   ```
+    ```bash
+    # in the gate task logs, the verdict JSON carries ki_ops_version;
+    # or from any environment with the wheel installed:
+    ki-ops --version    # ki-ops X.Y.Z (git <released sha>)
+    ```
 
-10. Roll back if needed: repin the previous ki-ops version + rebuild
-    (step 4-5), or rerun step 8's update with the saved rollback
+11. Roll back if needed: repin the previous ki-ops version + rebuild
+    (steps 4-6: land the repin on `uat`, promote `uat -> main`, build
+    from `main`), or rerun step 9's update with the saved rollback
     parameter file.
