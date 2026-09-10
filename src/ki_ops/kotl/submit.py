@@ -205,6 +205,10 @@ def submit_flex_orders(
     results = adapter.create_orders(payloads)
     flex_ids = tuple(r["orderId"] for r in results)
     ok = all(r.get("success", True) for r in results)
+    flex_response: dict = {"results": results}
+    batch_ids = sorted({str(r.get("batchId") or "") for r in results} - {""})
+    if batch_ids:
+        flex_response["batchId"] = batch_ids[0] if len(batch_ids) == 1 else batch_ids
     submit = Submit(
         submit_id=submit_id,
         submitted_at=submitted_at,
@@ -212,7 +216,7 @@ def submit_flex_orders(
         ok=ok,
         flex_order_ids=flex_ids,
         payload=tuple(payloads),
-        flex_response={"results": results},
+        flex_response=flex_response,
     )
 
     td = trade_date or submit.submitted_at.date()
@@ -967,6 +971,7 @@ def _working_order_from_submit(
         leaves_qty=row.leaves_qty,
         status=row.status,
         last_seen_at=row.last_seen_at,
+        flex_batch_id=str(result.get("batchId") or "") or None,
         broker=payload.get("broker") or None,
         algo=payload.get("algo") or None,
         order_type=payload.get("orderType") or None,

@@ -40,6 +40,7 @@ def refresh_working_orders(
                 flex_status=snap.get("status"),
                 avg_fill_px=snap.get("weightedAvgPrice"),
                 last_seen_at=seen_at,
+                flex_batch_id=snap.get("batchId"),
             )
         )
 

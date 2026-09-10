@@ -356,7 +356,11 @@ class LiveFlexAdapter:
                 metadata=self.config.metadata,
             )
             raw_results = []
+            batch_ids: list[str] = []
             for response in stream:  # collect while iterating — it is a stream
+                bid = str(getattr(response, "batchId", "") or "")
+                if bid and bid not in batch_ids:
+                    batch_ids.append(bid)
                 raw_results.extend(response.results)
         finally:
             close = getattr(channel, "close", None)
@@ -489,6 +493,18 @@ class LiveFlexAdapter:
                 quantity=payload.get("quantity"),
             )
             out.append(row)
+
+        # CreateOrdersResponse carries the Flex-side batchId (one batch per
+        # call). Stamp it on every result row so the submit path can persist
+        # working_orders.flex_batch_id and kotl_submits can record it.
+        if len(batch_ids) > 1:
+            print(
+                f"CreateOrders: {len(batch_ids)} distinct batchIds in one "
+                f"response stream ({', '.join(batch_ids)}) — stamping the first"
+            )
+        batch_id = batch_ids[0] if batch_ids else ""
+        for row in out:
+            row["batchId"] = batch_id
         return out
 
 

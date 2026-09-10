@@ -160,8 +160,14 @@ class WorkingOrder:
         flex_status: str | None = None,
         avg_fill_px=None,
         last_seen_at: datetime | None = None,
+        flex_batch_id: str | None = None,
     ) -> WorkingOrder:
-        """Return a copy with refreshed fill state (refresh path)."""
+        """Return a copy with refreshed fill state (refresh path).
+
+        *flex_batch_id* backfills the Flex-side batch when the snapshot carries
+        one (``GetOrderInfo2.batchId``); an absent/empty value keeps the stored
+        id — a refresh can never erase it.
+        """
         filled = signed_qty(self.side, unsigned_filled_qty)
         status = derive_status(self.sent_qty, filled, flex_status=flex_status)
         leaves = leaves_qty(self.sent_qty, filled, status)
@@ -179,7 +185,7 @@ class WorkingOrder:
             status=status,
             last_seen_at=_utc(last_seen_at),
             avg_fill_px=D(avg_fill_px) if avg_fill_px is not None else self.avg_fill_px,
-            flex_batch_id=self.flex_batch_id,
+            flex_batch_id=(str(flex_batch_id) if flex_batch_id else None) or self.flex_batch_id,
             broker=self.broker,
             algo=self.algo,
             order_type=self.order_type,

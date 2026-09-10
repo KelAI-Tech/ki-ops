@@ -87,6 +87,7 @@ def kelai_row_to_snapshot(row: dict[str, Any], *, order_id: str, trade_date: str
 
     return {
         "orderId": order_id,
+        "batchId": str(row.get("batchId") or "") or None,
         "symbol": str(row.get("symbol") or "").upper(),
         "side": flex_side_label(row.get("side")) or row.get("side"),
         "quantity": float(row.get("quantity") or 0),

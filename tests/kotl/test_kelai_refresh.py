@@ -49,6 +49,7 @@ def test_kelai_row_to_snapshot_uses_account_target_fills():
     snap = kelai_row_to_snapshot(
         {
             "symbol": "AAPL.US",
+            "batchId": "B9",
             "side": 1,
             "quantity": 18,
             "filledQuantity_acc_tgt": 10,
@@ -61,6 +62,7 @@ def test_kelai_row_to_snapshot_uses_account_target_fills():
         trade_date="2026-08-06",
     )
     assert snap["orderId"] == "OID-1"
+    assert snap["batchId"] == "B9"
     assert snap["side"] == "SELL"
     assert snap["filledQuantity"] == 10.0
     assert snap["status"] == "PARTIALLY_FILLED"
@@ -91,6 +93,12 @@ def test_kelai_refresh_by_symbol(tmp_path):
     assert after["AAPL.US"].status.value == "partial"
     assert after["AMD.US"].status.value == "done"
     assert after["AVGO.US"].status.value == "open"
+
+    # batchId from the snapshot backfills/overrides flex_batch_id; rows whose
+    # snapshot has no batchId keep the id stamped at submit time.
+    assert after["AAPL.US"].flex_batch_id == "FLEX-BATCH-42"
+    assert after["AMD.US"].flex_batch_id is not None
+    assert after["AMD.US"].flex_batch_id.startswith("FAKE-BATCH-")
 
 
 def test_load_refresh_source_auto_detect():

@@ -3,6 +3,7 @@
   "orders": [
     {
       "orderId": "EXAMPLE-AAPL-US-1",
+      "batchId": "FLEX-BATCH-42",
       "symbol": "AAPL.US",
       "side": 1,
       "quantity": 18,
