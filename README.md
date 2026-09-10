@@ -213,7 +213,7 @@ ki-ops extras notify-perturbs                  # email + Slack
 
 Slack shows the subject plus JSON in a code block (truncated if very long; email has the full body).
 
-[`dags/ki_ops_poc_perturbs.py`](dags/ki_ops_poc_perturbs.py) is an optional Airflow example (Airflow is not a package dependency). Cron is the same CLI entrypoint.
+Scheduling lives in the kelaidata repo (its MWAA deployment owns all DAGs — ki-ops ships no DAG files and Airflow is not a package dependency). Cron is the same CLI entrypoint.
 
 ## KOTL (KelAI Order Tracking Ledger)
 
@@ -252,10 +252,12 @@ every create result: it lands in `kotl_submits.flex_response_json` (top-level
 `batchId`) and on each working order as `flex_batch_id`; refresh also
 backfills `flex_batch_id` from `GetOrderInfo2.batchId` for rows submitted
 before capture existed (a refresh never erases a stored id).
-**Intraday fills:** fills only reach the ledger when a refresh runs —
-schedule [`dags/ki_ops_kotl_refresh_fills.py`](dags/ki_ops_kotl_refresh_fills.py)
-(every 15 min during the ET session, live `GetOrderInfo2` → MySQL, clean
-no-op when nothing was submitted) or cron the same CLI:
+**Intraday fills:** fills only reach the ledger when a refresh runs — the
+scheduled poller is the kelaidata `kotl_refresh_fills` DAG
+(`dags/kotl_refresh_fills_dag.py` in the kelaidata repo: every 15 min during
+the ET session, `ki-ops kotl refresh --source live --store mysql` inside the
+kotl-submit Batch container, gated by `KOTL_REFRESH_ENABLED`; clean no-op
+when nothing was submitted). The same refresh runs manually:
 `ki-ops kotl refresh --trade-date <today> --source live --flex-env UAT --store mysql`.
 
 **kelaidata S3 inputs:** `kotl submit-kelai` pulls the trade-dated shares file
@@ -447,7 +449,6 @@ examples/
   lseg_base_data_us_dt_*.csv, lseg_datastream2_px_*.csv
   sod_positions.csv, target_intents.csv
   extras/                      # EMS Portfolio CSV, small security master
-dags/                          # example Airflow DAG (copy into AIRFLOW_HOME/dags)
 tests/
 ```
 
