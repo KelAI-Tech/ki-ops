@@ -269,7 +269,13 @@ no CSV exports). SOD comes from `--sod-source {flex,prior-target,csv,flat}`
 (legacy `--sod` CSV / `--assume-flat-sod` still map to csv/flat); with
 `flex` the book is reconciled against yesterday's target file and the submit
 aborts on divergence (**exit 4**, thresholds `--recon-max-shares` /
-`--recon-max-names`, strict `0/0` defaults). Missing prices, duplicate
+`--recon-max-names`, strict `0/0` defaults). The recon runs **explained**:
+yesterday's ledger-recorded unexecuted orders (partial fills, rejections —
+re-send-deduplicated) are the *expected* divergence and don't count toward
+the thresholds, so routine non-100%-fill days pass at `0/0` with no operator
+approval while **unexplained** drift (manual Flex trades, dropped positions,
+a corrupted book) still blocks; `--no-recon-explained` restores the raw
+strict compare, and any ledger-lookup failure falls back to it (fail-strict). Missing prices, duplicate
 tickers, and fractional shares abort the submit. Safety rails on every
 submit: **target mode** (below — the never-trade-past-the-target invariant),
 `--dry-run` (build + print + trade file, no gRPC, no ledger write, no claim),

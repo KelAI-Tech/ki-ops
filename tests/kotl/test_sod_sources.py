@@ -183,6 +183,130 @@ def test_recon_report_math():
 
 
 # ---------------------------------------------------------------------------
+# explained recon: prior-day unexecuted orders don't count toward thresholds
+# ---------------------------------------------------------------------------
+
+
+def test_recon_fully_explained_divergence_passes_strict_thresholds():
+    """A partial-fill day (book short of target by the unexecuted remainder)
+    passes 0/0 with no operator approval."""
+    report = reconcile_flex_vs_prior(
+        {"AAPL": Decimal("60")},  # bought 60 of the intended 100
+        {"AAPL": Decimal("100")},
+        prior_file="Portfolio_20260805.csv",
+        max_shares=Decimal("0"),
+        max_names=0,
+        explained_unexecuted={"AAPL": Decimal("40")},  # ledger: 40 never filled
+    )
+    assert report.total_abs_diff == Decimal("40")  # raw divergence still reported
+    assert report.names_diverged == 1
+    assert report.total_abs_unexplained == Decimal("0")
+    assert report.names_unexplained == 0
+    assert not report.breached
+    out = report.format_table()
+    assert "expected_diff" in out and "unexplained" in out and "breached=False" in out
+
+
+def test_recon_unexplained_residual_still_blocks():
+    """Only 40 of the 70-share gap is explained — the 30 residual breaches."""
+    report = reconcile_flex_vs_prior(
+        {"AAPL": Decimal("30")},
+        {"AAPL": Decimal("100")},
+        prior_file="Portfolio_20260805.csv",
+        max_shares=Decimal("0"),
+        max_names=0,
+        explained_unexecuted={"AAPL": Decimal("40")},
+    )
+    assert report.total_abs_unexplained == Decimal("30")
+    assert report.names_unexplained == 1
+    assert report.breached
+
+
+def test_recon_explained_flags_zero_raw_diff_anomalies():
+    """The book matches the target although the ledger says 40 never executed
+    (e.g. a manual Flex top-up) — raw diff 0, but the anomaly must flag."""
+    report = reconcile_flex_vs_prior(
+        {"AAPL": Decimal("100")},
+        {"AAPL": Decimal("100")},
+        prior_file="Portfolio_20260805.csv",
+        max_shares=Decimal("0"),
+        max_names=0,
+        explained_unexecuted={"AAPL": Decimal("40")},
+    )
+    assert report.total_abs_diff == Decimal("0")
+    assert report.names_diverged == 0
+    assert report.total_abs_unexplained == Decimal("40")
+    assert report.names_unexplained == 1
+    assert report.breached
+    assert any(row[0] == "AAPL" for row in report.detail)
+
+
+def _seed_prior_day_ledger(tmp_path, shares_dir):
+    """Run yesterday's submit (accepted, zero fills) into the shared store —
+    the ledger then explains today's book-vs-prior-target shortfall in full."""
+    store = KotlStore(tmp_path / "kotl")
+    submit_kelai_shares(
+        store,
+        trade_date=date(2026, 8, 5),
+        shares_file=shares_dir / "Portfolio_20260805.csv",
+        ds2_h5=make_ds2_h5(tmp_path / "ds2.h5"),
+        adapter=FakeFlexAdapter(),
+        submitted_at=datetime(2026, 8, 5, 14, 0, tzinfo=timezone.utc),
+        cache_dir=tmp_path / "cache",
+        sod_source="flat",
+    )
+    return store
+
+
+def test_flex_sod_explained_recon_passes_after_unfilled_day(tmp_path, shares_dir, capsys):
+    """Yesterday sent BUY AAPL 20 (accepted, never filled); today's Flex book
+    is still flat. Raw recon would block at 0/0 — the ledger explains it."""
+    _seed_prior_day_ledger(tmp_path, shares_dir)
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        sod_source="flex",
+        flex_positions={},  # nothing filled → empty book
+    )
+    assert submit.ok
+    out = capsys.readouterr().out
+    assert "explained-recon: 1 symbol(s) with unexecuted 2026-08-05" in out
+    assert "breached=False" in out
+    # From a flat book the full 2026-08-06 target goes out.
+    assert _sides(store, submit) == {
+        "AAPL.US": Decimal("50"),
+        "MSFT.US": Decimal("-30"),
+    }
+
+
+def test_flex_sod_explained_recon_flags_manual_topup(tmp_path, shares_dir):
+    """Book matches yesterday's target although the ledger says the order never
+    executed — someone traded outside KOTL. Zero raw diff, still blocks."""
+    _seed_prior_day_ledger(tmp_path, shares_dir)
+    with pytest.raises(ReconDivergenceError) as err:
+        _submit(
+            tmp_path,
+            shares_dir,
+            sod_source="flex",
+            flex_positions={"AAPL.US": Decimal("20")},  # matches prior target
+        )
+    assert "unexplained_abs_diff=20" in str(err.value)
+    assert err.value.report.total_abs_diff == Decimal("0")  # raw diff was clean!
+
+
+def test_flex_sod_no_recon_explained_restores_strict_compare(tmp_path, shares_dir):
+    _seed_prior_day_ledger(tmp_path, shares_dir)
+    with pytest.raises(ReconDivergenceError):
+        _submit(
+            tmp_path,
+            shares_dir,
+            sod_source="flex",
+            flex_positions={},
+            recon_explained=False,
+        )
+
+
+# ---------------------------------------------------------------------------
 # prior-target SOD
 # ---------------------------------------------------------------------------
 

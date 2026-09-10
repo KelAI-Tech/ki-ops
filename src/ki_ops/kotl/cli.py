@@ -137,6 +137,15 @@ def register_kotl_parser(sub) -> None:
         "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies)",
     )
     sk.add_argument(
+        "--recon-explained",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="net the prior day's ledger-recorded unexecuted orders (partial "
+        "fills, rejections) out of the flex SOD recon before the thresholds, "
+        "so routine non-100%%-fill days pass while unexplained book drift "
+        "still blocks; --no-recon-explained restores the raw strict compare",
+    )
+    sk.add_argument(
         "--recon-max-shares",
         type=Decimal,
         default=None,
@@ -326,6 +335,7 @@ def run_kotl(args) -> int:
                 unresolved=getattr(args, "unresolved", "block"),
                 sedol_source=getattr(args, "sedol_source", None),
                 sent_source=getattr(args, "sent_source", "ledger"),
+                recon_explained=getattr(args, "recon_explained", True),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")

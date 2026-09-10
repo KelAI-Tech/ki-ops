@@ -230,6 +230,87 @@ def sent_from_ledger(
     return {symbol: qty for symbol, qty in sent.items() if qty != 0}
 
 
+def _bare_symbol(symbol: str, *, suffix: str = ".US") -> str:
+    sym = str(symbol).strip().upper()
+    return sym[: -len(suffix)] if suffix and sym.endswith(suffix) else sym
+
+
+def unexecuted_from_ledger(
+    submits: Sequence[Submit],
+    working_orders: Sequence[WorkingOrder],
+    *,
+    env: str,
+    suffix: str = ".US",
+) -> dict[str, Decimal]:
+    """Per-symbol signed **unexecuted** remainder of a prior day's KOTL orders.
+
+    The explained-recon input (:func:`ki_ops.kotl.submit.reconcile_flex_vs_prior`):
+    the portion of the day's intended trading that never reached the book, so
+    the next morning's Flex-book-vs-prior-target divergence it causes can be
+    recognized as *explained* rather than anomalous.
+
+    Semantics differ deliberately from :func:`sent_from_ledger` (which answers
+    "what must today's residual subtract"): here the question is "how much of
+    yesterday's book move never happened", so
+
+    - **accepted** orders contribute ``sent − filled`` (partial fills and
+      accepted-then-cancelled remainders — the market never saw the rest);
+    - **rejected** orders (per-order ``success=false``) contribute their full
+      quantity — Flex never worked them at all — but only from the **latest
+      submit that touched the symbol**: target mode re-sends a rejected
+      residual on forced re-runs, so earlier rejected attempts for the same
+      symbol are superseded (counting both would double the shortfall). A
+      later accepted order for the symbol supersedes prior rejections the
+      same way (its own ``sent − filled`` already carries the remainder).
+
+    Keys are **bare tickers** in the original payload vocabulary
+    (``sourceSymbol`` when pre-submit resolution renamed the outgoing symbol,
+    the payload symbol otherwise, *suffix*-stripped) so they join the
+    ds2-vocabulary books that SOD reconciliation compares.
+
+    *working_orders* must already be filtered to the prior trade date;
+    submits join through their working orders' ``submit_id``.
+    """
+    submit_ids = {w.submit_id for w in working_orders}
+    filled_by_id = {w.flex_order_id: w.filled_qty for w in working_orders}
+    env_submits = sorted(
+        (s for s in submits if s.env == env and s.submit_id in submit_ids),
+        key=lambda s: s.submitted_at,
+    )
+
+    accepted: dict[str, Decimal] = {}
+    rejected: dict[str, dict[str, Decimal]] = {}  # symbol → submit_id → qty
+    latest_touch: dict[str, str] = {}
+    for submit in env_submits:
+        results = (submit.flex_response or {}).get("results") or []
+        for i, payload in enumerate(submit.payload):
+            result = results[i] if i < len(results) else {}
+            order_id = str(result.get("orderId") or "")
+            if order_id not in filled_by_id:
+                continue
+            symbol = _bare_symbol(
+                str(payload.get("sourceSymbol") or payload.get("symbol") or ""),
+                suffix=suffix,
+            )
+            qty = signed_qty(payload.get("side") or "", payload.get("quantity") or 0)
+            latest_touch[symbol] = submit.submit_id
+            if result.get("success", True):
+                remainder = qty - filled_by_id[order_id]
+                accepted[symbol] = accepted.get(symbol, Decimal("0")) + remainder
+            else:
+                per_submit = rejected.setdefault(symbol, {})
+                per_submit[submit.submit_id] = (
+                    per_submit.get(submit.submit_id, Decimal("0")) + qty
+                )
+
+    unexecuted = dict(accepted)
+    for symbol, per_submit in rejected.items():
+        qty = per_submit.get(latest_touch[symbol])
+        if qty:
+            unexecuted[symbol] = unexecuted.get(symbol, Decimal("0")) + qty
+    return {symbol: qty for symbol, qty in unexecuted.items() if qty != 0}
+
+
 def is_kotl_row(row: Mapping[str, Any]) -> bool:
     """True for GetOrderInfo2 rows created by KOTL (submit_id stamped in notes)."""
     return "submit_id=" in str(row.get("notes") or "")
