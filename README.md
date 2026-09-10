@@ -247,6 +247,16 @@ book (`ReplayPositions`). Endpoint/token from `KOTL_FLEX_ENDPOINT` /
 SDK stays local-only via `KOTL_FLEX_SDK_PATH` (see
 `docs/flextrade-connectivity-guide.md`). Flex samples under
 [`vendor/flextrade/kelai_flex_sample_codes/`](vendor/flextrade/kelai_flex_sample_codes/).
+The Flex-side **batch id** from `CreateOrdersResponse.batchId` is stamped on
+every create result: it lands in `kotl_submits.flex_response_json` (top-level
+`batchId`) and on each working order as `flex_batch_id`; refresh also
+backfills `flex_batch_id` from `GetOrderInfo2.batchId` for rows submitted
+before capture existed (a refresh never erases a stored id).
+**Intraday fills:** fills only reach the ledger when a refresh runs —
+schedule [`dags/ki_ops_kotl_refresh_fills.py`](dags/ki_ops_kotl_refresh_fills.py)
+(every 15 min during the ET session, live `GetOrderInfo2` → MySQL, clean
+no-op when nothing was submitted) or cron the same CLI:
+`ki-ops kotl refresh --trade-date <today> --source live --flex-env UAT --store mysql`.
 
 **kelaidata S3 inputs:** `kotl submit-kelai` pulls the trade-dated shares file
 (`s3://kelaitrading/portfolio/shares/[<strategy-id>/]Portfolio_<YYYYMMDD>.csv`
@@ -297,6 +307,12 @@ CSV store uses an `O_EXCL` claim file, single-host only). A second run with a
 residual remaining refuses (**exit 5**) unless `--force`, and `--force` now
 means "another **residual-capped** attempt" — it can never resend what
 already went out. Dry-runs never claim and skip the live cross-check.
+Note the intended asymmetry between the two tables: `kotl_submits` is the
+**append-only audit** — every send attempt adds a row (the first send, each
+`--force` residual top-up, FAKE/offline runs) — while `kotl_submit_claims`
+is the **mutex, not an audit**: exactly one row per `(trade_date, env)`,
+inserted by the first live claimer and never duplicated by later forced
+attempts. Several `kotl_submits` rows against a single claim row is normal.
 
 **Pre-submit security resolution** ([`kotl/flex_symbols.py`](src/ki_ops/kotl/flex_symbols.py)) —
 FlexTrade's recommended workflow: on live envs every payload symbol is checked
