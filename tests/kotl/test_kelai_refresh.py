@@ -94,6 +94,12 @@ def test_kelai_refresh_by_symbol(tmp_path):
     assert after["AMD.US"].status.value == "done"
     assert after["AVGO.US"].status.value == "open"
 
+    # weightedAvgPrice lands in avg_fill_px; an unfilled order (no price in
+    # the snapshot) keeps NULL instead of storing a bogus 0.
+    assert after["AAPL.US"].avg_fill_px == Decimal("191.2")
+    assert after["AMD.US"].avg_fill_px == Decimal("162.5")
+    assert after["AVGO.US"].avg_fill_px is None
+
     # batchId from the snapshot backfills/overrides flex_batch_id; rows whose
     # snapshot has no batchId keep the id stamped at submit time.
     assert after["AAPL.US"].flex_batch_id == "FLEX-BATCH-42"
@@ -148,9 +154,11 @@ def test_same_day_same_symbol_orders_update_independently(tmp_path):
     after = {o.flex_order_id: o for o in updated}
     assert after["SUB-A-1"].filled_qty == Decimal("50")
     assert after["SUB-A-1"].status.value == "done"
+    assert after["SUB-A-1"].avg_fill_px == Decimal("191.0")
     assert after["SUB-B-1"].filled_qty == Decimal("10")
     assert after["SUB-B-1"].status.value == "partial"
     assert after["SUB-B-1"].leaves_qty == Decimal("20")
+    assert after["SUB-B-1"].avg_fill_px == Decimal("192.5")  # per-order, not shared
 
     # Snapshot covering only ONE of the two orders: the other stays untouched
     # (no cross-order symbol match).
