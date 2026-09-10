@@ -124,13 +124,27 @@ class KelaiRefreshSource:
             for row in self.rows
             if row.get("orderId")
         }
-        by_symbol = {str(row.get("symbol") or "").upper(): row for row in self.rows}
+        rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for row in self.rows:
+            rows_by_symbol.setdefault(str(row.get("symbol") or "").upper(), []).append(row)
+        stored_symbol_counts: dict[str, int] = {}
+        for order in stored:
+            key = order.symbol.upper()
+            stored_symbol_counts[key] = stored_symbol_counts.get(key, 0) + 1
 
         snapshots: list[dict] = []
         for order in stored:
-            row = by_order_id.get(order.flex_order_id.upper()) or by_symbol.get(order.symbol.upper())
+            row = by_order_id.get(order.flex_order_id.upper())
             if row is None:
-                continue
+                # Symbol fallback (fixtures whose orderIds don't match the
+                # ledger) — only when UNAMBIGUOUS on both sides: with two
+                # same-day orders in the same name, matching by symbol would
+                # copy one order's fills onto the other, so skip instead.
+                symbol = order.symbol.upper()
+                candidates = rows_by_symbol.get(symbol, [])
+                if len(candidates) != 1 or stored_symbol_counts[symbol] != 1:
+                    continue
+                row = candidates[0]
             snapshots.append(
                 kelai_row_to_snapshot(row, order_id=order.flex_order_id, trade_date=trade_date)
             )
