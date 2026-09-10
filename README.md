@@ -312,7 +312,13 @@ Note the intended asymmetry between the two tables: `kotl_submits` is the
 `--force` residual top-up, FAKE/offline runs) — while `kotl_submit_claims`
 is the **mutex, not an audit**: exactly one row per `(trade_date, env)`,
 inserted by the first live claimer and never duplicated by later forced
-attempts. Several `kotl_submits` rows against a single claim row is normal.
+attempts. Several `kotl_submits` rows against a single claim row is normal,
+and each submit row links back to the claim it ran under: `kotl_submits`
+carries `trade_date` and `claim_submit_id` (the claim winner points at
+itself, a forced top-up points at the winner, offline/FAKE sends are NULL —
+no claim taken). Tables created before these columns existed are migrated in
+place on first use (`ensure_schema` adds them; the CSV store rewrites its
+header the same way).
 
 **Pre-submit security resolution** ([`kotl/flex_symbols.py`](src/ki_ops/kotl/flex_symbols.py)) —
 FlexTrade's recommended workflow: on live envs every payload symbol is checked

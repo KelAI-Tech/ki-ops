@@ -207,6 +207,8 @@ def _sample_submit() -> Submit:
             {"symbol": "MSFT.US", "quantity": 30.0, "side": "BUY"},
         ),
         flex_response={"results": [{"orderId": "FLEX-1", "success": True}]},
+        trade_date=TD,
+        claim_submit_id="sub-1",
     )
 
 
@@ -297,6 +299,47 @@ def test_mysql_ensure_schema_idempotent(mysql_store):
     mysql_store.ensure_schema()
     mysql_store.ensure_schema()
     assert mysql_store.load_submits() == []
+
+
+def test_mysql_schema_migration_adds_submit_columns(mysql_store, mysql_store_params):
+    """A kotl_submits table created before trade_date/claim_submit_id existed
+    is migrated in place by ensure_schema (ALTER TABLE, idempotent)."""
+    conn = mysql_store.connection()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE kotl_submits")
+    cur.execute(
+        """
+        CREATE TABLE kotl_submits (
+            submit_id VARCHAR(64) NOT NULL PRIMARY KEY,
+            submitted_at DATETIME(6) NOT NULL,
+            env VARCHAR(16) NOT NULL,
+            ok TINYINT(1) NOT NULL,
+            flex_order_ids JSON NOT NULL,
+            payload_json JSON NOT NULL,
+            flex_response_json JSON NULL
+        )
+        """
+    )
+    cur.execute(
+        "INSERT INTO kotl_submits (submit_id, submitted_at, env, ok, "
+        "flex_order_ids, payload_json) VALUES ('legacy-1', %s, 'UAT', 1, '[]', '[]')",
+        (TS.replace(tzinfo=None),),
+    )
+    conn.commit()
+    cur.close()
+
+    fresh = MysqlKotlStore(**mysql_store_params)
+    try:
+        fresh.ensure_schema()  # migrates the legacy table
+        fresh.append_submit(_sample_submit())
+        loaded = {s.submit_id: s for s in fresh.load_submits()}
+    finally:
+        fresh.close()
+
+    assert loaded["legacy-1"].trade_date is None
+    assert loaded["legacy-1"].claim_submit_id is None
+    assert loaded["sub-1"].trade_date == TD
+    assert loaded["sub-1"].claim_submit_id == "sub-1"
 
 
 def test_mysql_claim_is_atomic_once_a_day(mysql_store):

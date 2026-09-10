@@ -126,13 +126,22 @@ def test_claim_refuses_second_send_without_force(env_setup):
     assert len(forced.payload) == 1
     assert forced.payload[0]["symbol"] == "AAPL.US"
     assert forced.payload[0]["quantity"] == 30.0
-    assert len(env_setup["store"].load_submits()) == 2
+
+    # Both submit rows link back to the day's claim: the winner points at
+    # itself, the forced top-up at the winner.
+    submits = env_setup["store"].load_submits()
+    assert len(submits) == 2
+    winner = next(s for s in submits if s.submit_id != forced.submit_id)
+    assert winner.claim_submit_id == winner.submit_id
+    assert forced.claim_submit_id == winner.submit_id
+    assert {s.trade_date for s in submits} == {TD}
 
 
 def test_fake_env_resubmit_allowed(env_setup):
     _submit(env_setup, env="FAKE")
     again = _submit(env_setup, env="FAKE")  # offline dev loop stays frictionless
     assert again.ok
+    assert again.claim_submit_id is None  # no claim taken outside live envs
 
 
 def test_other_env_or_date_not_blocked(env_setup):

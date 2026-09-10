@@ -21,7 +21,14 @@ def _utc(ts: datetime | None = None) -> datetime:
 
 @dataclass(frozen=True)
 class Submit:
-    """One send attempt (KOTL-generated submit_id)."""
+    """One send attempt (KOTL-generated submit_id).
+
+    ``trade_date`` is the book date the attempt executed for, and
+    ``claim_submit_id`` links the attempt to the day's ``kotl_submit_claims``
+    row: the claim winner points at itself, a ``--force`` residual top-up
+    points at the winner, offline/FAKE sends carry ``None`` (no claim taken).
+    Rows persisted before these fields existed load as ``None``.
+    """
 
     submit_id: str
     submitted_at: datetime
@@ -30,6 +37,8 @@ class Submit:
     flex_order_ids: tuple[str, ...] = ()
     payload: tuple[dict, ...] = ()
     flex_response: dict | None = None
+    trade_date: date | None = None
+    claim_submit_id: str | None = None
 
     @classmethod
     def new(
@@ -41,6 +50,8 @@ class Submit:
         payload: Iterable[dict] = (),
         flex_response: dict | None = None,
         submitted_at: datetime | None = None,
+        trade_date: date | None = None,
+        claim_submit_id: str | None = None,
     ) -> Submit:
         return cls(
             submit_id=str(uuid4()),
@@ -50,6 +61,8 @@ class Submit:
             flex_order_ids=tuple(flex_order_ids),
             payload=tuple(payload),
             flex_response=flex_response,
+            trade_date=trade_date,
+            claim_submit_id=claim_submit_id,
         )
 
 
