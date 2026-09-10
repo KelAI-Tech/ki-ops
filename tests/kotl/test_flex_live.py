@@ -164,6 +164,9 @@ def test_create_orders_maps_fields_and_collects_stream(backend):
     assert [r["success"] for r in results] == [True, True, False]
     assert [r["symbol"] for r in results] == ["AAPL.US", "MSFT.US", "ZZZ.US"]
     assert results[2]["description"] == "bad symbol"
+    # CreateOrdersResponse.batchId is stamped on every result row (the ledger
+    # persists it as working_orders.flex_batch_id).
+    assert [r["batchId"] for r in results] == ["B1", "B1", "B1"]
 
     req = backend.last_create_request
     assert req.user == "KELAI-BATCH"  # configurable, not hardcoded "MGO"

@@ -45,6 +45,8 @@ def test_append_and_load_submit(tmp_path):
         payload=[{"symbol": "DASH.US", "quantity": 123}],
         flex_response={"status": "ok"},
         submitted_at=datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc),
+        trade_date=date(2026, 8, 6),
+        claim_submit_id="claim-owner-1",
     )
     store.append_submit(submit)
 
@@ -54,6 +56,39 @@ def test_append_and_load_submit(tmp_path):
     assert loaded[0].flex_order_ids == ("ORD-1", "ORD-2")
     assert loaded[0].payload == ({"symbol": "DASH.US", "quantity": 123},)
     assert loaded[0].flex_response == {"status": "ok"}
+    assert loaded[0].trade_date == date(2026, 8, 6)
+    assert loaded[0].claim_submit_id == "claim-owner-1"
+
+
+def test_append_submit_migrates_legacy_header(tmp_path):
+    # A submits.csv written before trade_date/claim_submit_id existed must
+    # keep loading, and the next append rewrites it under the new header.
+    legacy = (
+        "submit_id,submitted_at,env,ok,flex_order_ids,payload_json,flex_response_json\n"
+        'old-1,2026-08-05T14:00:00+00:00,UAT,true,ORD-0,"[]",\n'
+    )
+    (tmp_path / "submits.csv").write_text(legacy, encoding="utf-8")
+    store = KotlStore(tmp_path)
+
+    old = store.load_submits()
+    assert len(old) == 1
+    assert old[0].trade_date is None
+    assert old[0].claim_submit_id is None
+
+    store.append_submit(
+        Submit.new(
+            env="UAT",
+            ok=True,
+            submitted_at=datetime(2026, 8, 6, 14, 0, tzinfo=timezone.utc),
+            trade_date=date(2026, 8, 6),
+            claim_submit_id="claim-owner-1",
+        )
+    )
+    reloaded = store.load_submits()
+    assert [s.submit_id for s in reloaded][0] == "old-1"
+    assert reloaded[0].trade_date is None  # legacy row keeps its Nones
+    assert reloaded[1].trade_date == date(2026, 8, 6)
+    assert reloaded[1].claim_submit_id == "claim-owner-1"
 
 
 def test_upsert_working_orders_idempotent(tmp_path):

@@ -4,7 +4,10 @@ Tables (idempotent DDL, created lazily on first use):
 
 - ``kotl_submits`` — one row per send attempt, keyed by ``submit_id``;
   ``payload_json`` / ``flex_response_json`` are JSON columns with the same
-  content the CSV store serializes.
+  content the CSV store serializes. ``trade_date`` + ``claim_submit_id`` link
+  each attempt to the day's ``kotl_submit_claims`` row (winner points at
+  itself, forced top-ups at the winner; NULL for offline sends and rows
+  written before the columns existed — added in place by ``ensure_schema``).
 - ``kotl_working_orders`` — one row per Flex parent order, keyed by
   ``flex_order_id`` (upsert semantics identical to the CSV store).
 - ``kotl_eod_snapshots`` — one row per ``kotl eod`` run (summary JSON), in
@@ -43,7 +46,9 @@ _DDL = (
         ok TINYINT(1) NOT NULL,
         flex_order_ids JSON NOT NULL,
         payload_json JSON NOT NULL,
-        flex_response_json JSON NULL
+        flex_response_json JSON NULL,
+        trade_date DATE NULL,
+        claim_submit_id VARCHAR(64) NULL
     )
     """,
     """
@@ -88,6 +93,13 @@ _DDL = (
         PRIMARY KEY (trade_date, env)
     )
     """,
+)
+
+# Idempotent column additions for tables created before the column existed
+# (CREATE TABLE IF NOT EXISTS never alters an existing table).
+_COLUMN_MIGRATIONS = (
+    ("kotl_submits", "trade_date", "ADD COLUMN trade_date DATE NULL"),
+    ("kotl_submits", "claim_submit_id", "ADD COLUMN claim_submit_id VARCHAR(64) NULL"),
 )
 
 
@@ -236,6 +248,14 @@ class MysqlKotlStore:
             cur.execute(f"USE `{self.schema}`")
             for ddl in _DDL:
                 cur.execute(ddl)
+            for table, column, clause in _COLUMN_MIGRATIONS:
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                    (self.schema, table, column),
+                )
+                if cur.fetchone()[0] == 0:
+                    cur.execute(f"ALTER TABLE `{table}` {clause}")
             self._conn.commit()
         finally:
             cur.close()
@@ -259,8 +279,8 @@ class MysqlKotlStore:
                 """
                 INSERT INTO kotl_submits
                     (submit_id, submitted_at, env, ok, flex_order_ids,
-                     payload_json, flex_response_json)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                     payload_json, flex_response_json, trade_date, claim_submit_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     submit.submit_id,
@@ -272,6 +292,8 @@ class MysqlKotlStore:
                     json.dumps(submit.flex_response, sort_keys=True)
                     if submit.flex_response is not None
                     else None,
+                    submit.trade_date,
+                    submit.claim_submit_id,
                 ),
             )
             conn.commit()
@@ -285,7 +307,7 @@ class MysqlKotlStore:
             cur.execute(
                 """
                 SELECT submit_id, submitted_at, env, ok, flex_order_ids,
-                       payload_json, flex_response_json
+                       payload_json, flex_response_json, trade_date, claim_submit_id
                 FROM kotl_submits ORDER BY submitted_at, submit_id
                 """
             )
@@ -294,7 +316,17 @@ class MysqlKotlStore:
             cur.close()
         out = []
         for row in rows:
-            (submit_id, submitted_at, env, ok, ids_raw, payload_raw, response_raw) = row
+            (
+                submit_id,
+                submitted_at,
+                env,
+                ok,
+                ids_raw,
+                payload_raw,
+                response_raw,
+                trade_date,
+                claim_submit_id,
+            ) = row
             out.append(
                 Submit(
                     submit_id=submit_id,
@@ -304,6 +336,8 @@ class MysqlKotlStore:
                     flex_order_ids=tuple(_json_or_none(ids_raw) or ()),
                     payload=tuple(_json_or_none(payload_raw) or ()),
                     flex_response=_json_or_none(response_raw),
+                    trade_date=trade_date,
+                    claim_submit_id=claim_submit_id or None,
                 )
             )
         return out

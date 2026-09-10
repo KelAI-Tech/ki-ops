@@ -21,7 +21,14 @@ def _utc(ts: datetime | None = None) -> datetime:
 
 @dataclass(frozen=True)
 class Submit:
-    """One send attempt (KOTL-generated submit_id)."""
+    """One send attempt (KOTL-generated submit_id).
+
+    ``trade_date`` is the book date the attempt executed for, and
+    ``claim_submit_id`` links the attempt to the day's ``kotl_submit_claims``
+    row: the claim winner points at itself, a ``--force`` residual top-up
+    points at the winner, offline/FAKE sends carry ``None`` (no claim taken).
+    Rows persisted before these fields existed load as ``None``.
+    """
 
     submit_id: str
     submitted_at: datetime
@@ -30,6 +37,8 @@ class Submit:
     flex_order_ids: tuple[str, ...] = ()
     payload: tuple[dict, ...] = ()
     flex_response: dict | None = None
+    trade_date: date | None = None
+    claim_submit_id: str | None = None
 
     @classmethod
     def new(
@@ -41,6 +50,8 @@ class Submit:
         payload: Iterable[dict] = (),
         flex_response: dict | None = None,
         submitted_at: datetime | None = None,
+        trade_date: date | None = None,
+        claim_submit_id: str | None = None,
     ) -> Submit:
         return cls(
             submit_id=str(uuid4()),
@@ -50,6 +61,8 @@ class Submit:
             flex_order_ids=tuple(flex_order_ids),
             payload=tuple(payload),
             flex_response=flex_response,
+            trade_date=trade_date,
+            claim_submit_id=claim_submit_id,
         )
 
 
@@ -160,8 +173,14 @@ class WorkingOrder:
         flex_status: str | None = None,
         avg_fill_px=None,
         last_seen_at: datetime | None = None,
+        flex_batch_id: str | None = None,
     ) -> WorkingOrder:
-        """Return a copy with refreshed fill state (refresh path)."""
+        """Return a copy with refreshed fill state (refresh path).
+
+        *flex_batch_id* backfills the Flex-side batch when the snapshot carries
+        one (``GetOrderInfo2.batchId``); an absent/empty value keeps the stored
+        id — a refresh can never erase it.
+        """
         filled = signed_qty(self.side, unsigned_filled_qty)
         status = derive_status(self.sent_qty, filled, flex_status=flex_status)
         leaves = leaves_qty(self.sent_qty, filled, status)
@@ -179,7 +198,7 @@ class WorkingOrder:
             status=status,
             last_seen_at=_utc(last_seen_at),
             avg_fill_px=D(avg_fill_px) if avg_fill_px is not None else self.avg_fill_px,
-            flex_batch_id=self.flex_batch_id,
+            flex_batch_id=(str(flex_batch_id) if flex_batch_id else None) or self.flex_batch_id,
             broker=self.broker,
             algo=self.algo,
             order_type=self.order_type,

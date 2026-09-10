@@ -57,6 +57,29 @@ def test_working_order_refresh_partial_then_done():
     assert done.leaves_qty == Decimal("0")
 
 
+def test_with_flex_update_backfills_batch_id_and_never_erases_it():
+    base = WorkingOrder.from_submit_line(
+        submit_id="sub-1",
+        flex_order_id="ORD-1",
+        trade_date=date(2026, 8, 6),
+        symbol="DASH.US",
+        side="BUY",
+        fund="KELAI",
+        position_group="USATop2000_strategy_v1",
+        unsigned_sent_qty=10,
+    )
+    assert base.flex_batch_id is None
+
+    stamped = base.with_flex_update(unsigned_filled_qty=5, flex_batch_id="B77")
+    assert stamped.flex_batch_id == "B77"
+
+    # A later snapshot without a batch id keeps the stored one.
+    kept = stamped.with_flex_update(unsigned_filled_qty=10, flex_batch_id=None)
+    assert kept.flex_batch_id == "B77"
+    kept_empty = stamped.with_flex_update(unsigned_filled_qty=10, flex_batch_id="")
+    assert kept_empty.flex_batch_id == "B77"
+
+
 def test_working_order_from_flex_snapshot_sell():
     row = WorkingOrder.from_flex_snapshot(
         submit_id="sub-2",
