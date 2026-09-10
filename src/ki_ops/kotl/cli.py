@@ -18,6 +18,7 @@ from ki_ops.kotl.submit import submit_rebalance_csv
 EXIT_RECON_DIVERGENCE = 4
 EXIT_SUBMIT_REFUSED = 5
 EXIT_UNRESOLVED_SECURITIES = 6
+EXIT_MARKET_CLOSED = 7
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
@@ -126,6 +127,13 @@ def register_kotl_parser(sub) -> None:
         "past the once-a-day claim — target mode still caps the send to the "
         "residual (target − already-sent), so a forced re-run can never resend "
         "what already went out",
+    )
+    sk.add_argument(
+        "--allow-outside-market-hours",
+        action="store_true",
+        help="override the NYSE market-hours gate (live submits are otherwise "
+        "refused outside trading days 07:00 ET to the close, exit 7) — "
+        "deliberate testing only",
     )
     sk.add_argument(
         "--sent-source",
@@ -290,6 +298,7 @@ def run_kotl(args) -> int:
 
     if cmd == "submit-kelai":
         from ki_ops.kotl.submit import (
+            MarketClosedError,
             ReconDivergenceError,
             SubmitRefusedError,
             UnresolvedSecuritiesError,
@@ -326,10 +335,16 @@ def run_kotl(args) -> int:
                 unresolved=getattr(args, "unresolved", "block"),
                 sedol_source=getattr(args, "sedol_source", None),
                 sent_source=getattr(args, "sent_source", "ledger"),
+                allow_outside_market_hours=getattr(
+                    args, "allow_outside_market_hours", False
+                ),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")
             return EXIT_RECON_DIVERGENCE
+        except MarketClosedError as exc:
+            print(f"SUBMIT BLOCKED: {exc}")
+            return EXIT_MARKET_CLOSED
         except UnresolvedSecuritiesError as exc:
             print(f"SUBMIT BLOCKED: {exc}")
             return EXIT_UNRESOLVED_SECURITIES

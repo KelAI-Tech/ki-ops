@@ -14,6 +14,9 @@ SOD sources:
 
 Safety rails on the live path:
 
+- **market-hours gate** (:mod:`ki_ops.kotl.market_hours`): live submits are
+  refused outside NYSE trading days 07:00 ET–close (exit 7) unless
+  ``--allow-outside-market-hours`` is passed deliberately;
 - **target mode** (:mod:`ki_ops.kotl.target_mode`): cumulative sends can never
   exceed the day's target book. Every live submit subtracts what was already
   sent today (ledger, cross-checked against live ``GetOrderInfo2``) and sends
@@ -73,6 +76,17 @@ class ReconDivergenceError(RuntimeError):
 
 class SubmitRefusedError(RuntimeError):
     """Safety rail refusal — idempotency or caps (CLI exit 5)."""
+
+
+class MarketClosedError(SubmitRefusedError):
+    """Live submit attempted outside NYSE market hours (CLI exit 7).
+
+    Raised before any network or S3 work when the wall clock is outside the
+    submit window (NYSE trading days, 07:00 ET to the close — 16:00, or 13:00
+    on early-close days; :mod:`ki_ops.kotl.market_hours`). Override with
+    ``allow_outside_market_hours`` / ``--allow-outside-market-hours`` only for
+    deliberate testing.
+    """
 
 
 class UnresolvedSecuritiesError(SubmitRefusedError):
@@ -550,6 +564,7 @@ def submit_kelai_shares(
     unresolved: str = "block",
     sedol_source: str | None = None,
     sent_source: str = "ledger",
+    allow_outside_market_hours: bool = False,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -628,6 +643,28 @@ def submit_kelai_shares(
     live = env.upper() in ("UAT", "PROD")
     if sent_source == "flex" and not live:
         raise ValueError("sent_source='flex' requires a live env (UAT/PROD)")
+
+    # --- market-hours gate (live envs; fail fast, before any S3/gRPC work) ---
+    if live:
+        from ki_ops.kotl.market_hours import market_hours_verdict
+
+        market_open, reason = market_hours_verdict()
+        if market_open:
+            print(f"market hours OK: {reason}")
+        elif allow_outside_market_hours:
+            print(
+                f"MARKET CLOSED — proceeding anyway "
+                f"(--allow-outside-market-hours): {reason}"
+            )
+        elif dry_run:
+            print(f"DRY RUN: MARKET CLOSED — a live submit would block (exit 7): {reason}")
+        else:
+            raise MarketClosedError(
+                f"MARKET CLOSED: {reason} — live orders only go out on NYSE "
+                "trading days between 07:00 ET and the close; pass "
+                "--allow-outside-market-hours to override deliberately"
+            )
+
     source = _resolve_sod_source(sod_source, sod_csv, assume_flat_sod)
     recon_max_shares = (
         DEFAULT_RECON_MAX_SHARES if recon_max_shares is None else Decimal(recon_max_shares)
