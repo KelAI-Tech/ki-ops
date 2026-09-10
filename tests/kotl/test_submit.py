@@ -50,6 +50,12 @@ def test_submit_flex_orders_writes_store(tmp_path):
     assert rows[0].leaves_qty == Decimal("-18")
     assert rows[0].submit_id == submit.submit_id
 
+    # The Flex batch id from the create results is persisted on the working
+    # order and surfaced top-level in flex_response (→ kotl_submits JSON).
+    assert rows[0].flex_batch_id
+    assert rows[0].flex_batch_id.startswith("TEST-BATCH-1-")
+    assert submit.flex_response["batchId"] == rows[0].flex_batch_id
+
     submits = store.load_submits()
     assert len(submits) == 1
     assert len(adapter.sent_batches) == 1

@@ -213,7 +213,7 @@ ki-ops extras notify-perturbs                  # email + Slack
 
 Slack shows the subject plus JSON in a code block (truncated if very long; email has the full body).
 
-[`dags/ki_ops_poc_perturbs.py`](dags/ki_ops_poc_perturbs.py) is an optional Airflow example (Airflow is not a package dependency). Cron is the same CLI entrypoint.
+Scheduling lives in the kelaidata repo (its MWAA deployment owns all DAGs — ki-ops ships no DAG files and Airflow is not a package dependency). Cron is the same CLI entrypoint.
 
 ## KOTL (KelAI Order Tracking Ledger)
 
@@ -247,6 +247,18 @@ book (`ReplayPositions`). Endpoint/token from `KOTL_FLEX_ENDPOINT` /
 SDK stays local-only via `KOTL_FLEX_SDK_PATH` (see
 `docs/flextrade-connectivity-guide.md`). Flex samples under
 [`vendor/flextrade/kelai_flex_sample_codes/`](vendor/flextrade/kelai_flex_sample_codes/).
+The Flex-side **batch id** from `CreateOrdersResponse.batchId` is stamped on
+every create result: it lands in `kotl_submits.flex_response_json` (top-level
+`batchId`) and on each working order as `flex_batch_id`; refresh also
+backfills `flex_batch_id` from `GetOrderInfo2.batchId` for rows submitted
+before capture existed (a refresh never erases a stored id).
+**Intraday fills:** fills only reach the ledger when a refresh runs — the
+scheduled poller is the kelaidata `kotl_refresh_fills` DAG
+(`dags/kotl_refresh_fills_dag.py` in the kelaidata repo: every 15 min during
+the ET session, `ki-ops kotl refresh --source live --store mysql` inside the
+kotl-submit Batch container, gated by `KOTL_REFRESH_ENABLED`; clean no-op
+when nothing was submitted). The same refresh runs manually:
+`ki-ops kotl refresh --trade-date <today> --source live --flex-env UAT --store mysql`.
 
 **kelaidata S3 inputs:** `kotl submit-kelai` pulls the trade-dated shares file
 (`s3://kelaitrading/portfolio/shares/[<strategy-id>/]Portfolio_<YYYYMMDD>.csv`
@@ -297,6 +309,18 @@ CSV store uses an `O_EXCL` claim file, single-host only). A second run with a
 residual remaining refuses (**exit 5**) unless `--force`, and `--force` now
 means "another **residual-capped** attempt" — it can never resend what
 already went out. Dry-runs never claim and skip the live cross-check.
+Note the intended asymmetry between the two tables: `kotl_submits` is the
+**append-only audit** — every send attempt adds a row (the first send, each
+`--force` residual top-up, FAKE/offline runs) — while `kotl_submit_claims`
+is the **mutex, not an audit**: exactly one row per `(trade_date, env)`,
+inserted by the first live claimer and never duplicated by later forced
+attempts. Several `kotl_submits` rows against a single claim row is normal,
+and each submit row links back to the claim it ran under: `kotl_submits`
+carries `trade_date` and `claim_submit_id` (the claim winner points at
+itself, a forced top-up points at the winner, offline/FAKE sends are NULL —
+no claim taken). Tables created before these columns existed are migrated in
+place on first use (`ensure_schema` adds them; the CSV store rewrites its
+header the same way).
 
 **Pre-submit security resolution** ([`kotl/flex_symbols.py`](src/ki_ops/kotl/flex_symbols.py)) —
 FlexTrade's recommended workflow: on live envs every payload symbol is checked
@@ -425,7 +449,6 @@ examples/
   lseg_base_data_us_dt_*.csv, lseg_datastream2_px_*.csv
   sod_positions.csv, target_intents.csv
   extras/                      # EMS Portfolio CSV, small security master
-dags/                          # example Airflow DAG (copy into AIRFLOW_HOME/dags)
 tests/
 ```
 

@@ -17,8 +17,9 @@ class FakeFlexAdapter:
         return tuple(tuple(batch) for batch in self._sent)
 
     def create_orders(self, order_list: list[dict]) -> list[dict]:
-        """Return one create result per input order."""
+        """Return one create result per input order (same fake batchId per call)."""
         self._sent.append(list(order_list))
+        batch_id = f"{self.id_prefix}-BATCH-{len(self._sent)}-{uuid4().hex[:6].upper()}"
         results = []
         for i, order in enumerate(order_list, start=1):
             symbol = str(order.get("symbol", "UNKNOWN")).replace(".", "-")
@@ -27,6 +28,7 @@ class FakeFlexAdapter:
                 {
                     "success": True,
                     "orderId": order_id,
+                    "batchId": batch_id,
                     "symbol": order.get("symbol"),
                     "side": order.get("side"),
                     "quantity": order.get("quantity"),

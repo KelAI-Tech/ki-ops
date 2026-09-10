@@ -56,6 +56,8 @@ SUBMIT_FIELDS = (
     "flex_order_ids",
     "payload_json",
     "flex_response_json",
+    "trade_date",
+    "claim_submit_id",
 )
 
 WORKING_ORDER_FIELDS = (
@@ -114,12 +116,26 @@ class KotlStore:
 
     def append_submit(self, submit: Submit) -> None:
         self._ensure_dir()
+        if self.submits_path.exists() and self._submits_header() != list(SUBMIT_FIELDS):
+            # Legacy header (pre trade_date/claim_submit_id): rewrite the file
+            # under the current header before appending; old rows load their
+            # missing fields as None either way.
+            rows = self.load_submits()
+            with self.submits_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=SUBMIT_FIELDS)
+                writer.writeheader()
+                for old in rows:
+                    writer.writerow(_submit_to_row(old))
         write_header = not self.submits_path.exists()
         with self.submits_path.open("a", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=SUBMIT_FIELDS)
             if write_header:
                 writer.writeheader()
             writer.writerow(_submit_to_row(submit))
+
+    def _submits_header(self) -> list[str]:
+        with self.submits_path.open(encoding="utf-8", newline="") as fh:
+            return next(csv.reader(fh), [])
 
     def load_submits(self) -> list[Submit]:
         if not self.submits_path.exists():
@@ -202,6 +218,8 @@ def _submit_to_row(submit: Submit) -> dict[str, str]:
         "flex_response_json": json.dumps(submit.flex_response, sort_keys=True)
         if submit.flex_response is not None
         else "",
+        "trade_date": submit.trade_date.isoformat() if submit.trade_date is not None else "",
+        "claim_submit_id": submit.claim_submit_id or "",
     }
 
 
@@ -217,6 +235,8 @@ def _submit_from_row(row: dict[str, str]) -> Submit:
         flex_order_ids=tuple(flex_ids),
         payload=tuple(json.loads(payload_raw)),
         flex_response=json.loads(response_raw) if response_raw else None,
+        trade_date=_parse_date(row["trade_date"]) if row.get("trade_date") else None,
+        claim_submit_id=row.get("claim_submit_id") or None,
     )
 
 

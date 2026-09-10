@@ -38,8 +38,12 @@ def refresh_working_orders(
             row.with_flex_update(
                 unsigned_filled_qty=snap.get("filledQuantity", 0),
                 flex_status=snap.get("status"),
-                avg_fill_px=snap.get("weightedAvgPrice"),
+                # Flex reports weightedAvgPrice=0 for an unfilled order —
+                # treat it as "no average yet" so it never overwrites a real
+                # px (with_flex_update keeps the stored value on None).
+                avg_fill_px=snap.get("weightedAvgPrice") or None,
                 last_seen_at=seen_at,
+                flex_batch_id=snap.get("batchId"),
             )
         )
 

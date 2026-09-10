@@ -180,8 +180,14 @@ def submit_flex_orders(
     adapter: FlexSubmitAdapter | None = None,
     submitted_at: datetime | None = None,
     submit_id: str | None = None,
+    claim_submit_id: str | None = None,
 ) -> Submit:
-    """Send *order_list* via *adapter*, persist submit + working orders."""
+    """Send *order_list* via *adapter*, persist submit + working orders.
+
+    *claim_submit_id* is the ``kotl_submit_claims`` owner this attempt ran
+    under (live claimed sends only) — persisted on the submit row so every
+    attempt links back to the day's claim.
+    """
     if not order_list:
         raise ValueError("order_list is empty")
 
@@ -194,6 +200,7 @@ def submit_flex_orders(
         submitted_at = bootstrap.submitted_at
     else:
         submitted_at = _utc(submitted_at)
+    td = trade_date or submitted_at.date()
 
     # Re-stamp notes now that submit_id is known (if caller omitted it).
     for payload in payloads:
@@ -205,6 +212,10 @@ def submit_flex_orders(
     results = adapter.create_orders(payloads)
     flex_ids = tuple(r["orderId"] for r in results)
     ok = all(r.get("success", True) for r in results)
+    flex_response: dict = {"results": results}
+    batch_ids = sorted({str(r.get("batchId") or "") for r in results} - {""})
+    if batch_ids:
+        flex_response["batchId"] = batch_ids[0] if len(batch_ids) == 1 else batch_ids
     submit = Submit(
         submit_id=submit_id,
         submitted_at=submitted_at,
@@ -212,10 +223,11 @@ def submit_flex_orders(
         ok=ok,
         flex_order_ids=flex_ids,
         payload=tuple(payloads),
-        flex_response={"results": results},
+        flex_response=flex_response,
+        trade_date=td,
+        claim_submit_id=claim_submit_id,
     )
 
-    td = trade_date or submit.submitted_at.date()
     working = [
         _working_order_from_submit(submit=submit, payload=payload, result=result, trade_date=td)
         for payload, result in zip(payloads, results)
@@ -853,6 +865,7 @@ def submit_kelai_shares(
                 flex_order_ids=(),
                 payload=(),
                 flex_response={"target_covered": True, "dry_run": dry_run},
+                trade_date=trade_date,
             )
 
     # --- safety rails --------------------------------------------------------
@@ -872,8 +885,13 @@ def submit_kelai_shares(
             raise SubmitRefusedError(f"refusing submit before CreateOrders: {message}")
 
     # --- once-a-day atomic claim (before CreateOrders; races lose here) -------
+    # Every persisted live submit links back to the day's claim row via
+    # claim_submit_id: the winner points at itself, forced follow-ups at the
+    # winner.
+    claim_submit_id = None
     if not dry_run and live:
         existing_claim = store.claim_submission(trade_date, env, pending.submit_id)
+        claim_submit_id = pending.submit_id if existing_claim is None else existing_claim
         if existing_claim is not None:
             if not force:
                 raise SubmitRefusedError(
@@ -918,6 +936,7 @@ def submit_kelai_shares(
             flex_order_ids=(),
             payload=tuple(payloads),
             flex_response={"dry_run": True},
+            trade_date=trade_date,
         )
         _emit_trade_file(dry, None, is_dry=True)
         return dry
@@ -930,6 +949,7 @@ def submit_kelai_shares(
         adapter=adapter,
         submitted_at=pending.submitted_at,
         submit_id=pending.submit_id,
+        claim_submit_id=claim_submit_id,
     )
     results = (submit.flex_response or {}).get("results")
     _emit_trade_file(submit, results, is_dry=False)
@@ -967,6 +987,7 @@ def _working_order_from_submit(
         leaves_qty=row.leaves_qty,
         status=row.status,
         last_seen_at=row.last_seen_at,
+        flex_batch_id=str(result.get("batchId") or "") or None,
         broker=payload.get("broker") or None,
         algo=payload.get("algo") or None,
         order_type=payload.get("orderType") or None,
