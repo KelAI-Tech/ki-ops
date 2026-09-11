@@ -15,7 +15,7 @@ from ki_ops.kotl.store import KotlStore
 from ki_ops.kotl.submit import (
     ReconDivergenceError,
     _resolve_sod_source,
-    reconcile_flex_vs_prior,
+    reconcile_books,
     submit_kelai_shares,
 )
 from tests.kotl.test_kelaidata_source import make_ds2_h5
@@ -34,8 +34,8 @@ def shares_dir(tmp_path):
     return d
 
 
-def _submit(tmp_path, shares_dir, **kwargs):
-    store = KotlStore(tmp_path / "kotl")
+def _submit(tmp_path, shares_dir, *, store=None, **kwargs):
+    store = store or KotlStore(tmp_path / "kotl")
     submit = submit_kelai_shares(
         store,
         trade_date=TD,
@@ -163,15 +163,15 @@ def test_flex_sod_no_prior_file_warns_and_proceeds(tmp_path, capsys):
         sod_source="flex",
         flex_positions={"AAPL.US": Decimal("20")},
     )
-    assert "skipping Flex-vs-prior-target reconciliation" in capsys.readouterr().out
+    assert "skipping SOD reconciliation" in capsys.readouterr().out
     assert _sides(store, submit) == {"AAPL.US": Decimal("30")}
 
 
 def test_recon_report_math():
-    report = reconcile_flex_vs_prior(
+    report = reconcile_books(
         {"AAPL": Decimal("25"), "NKE": Decimal("-100")},
         {"AAPL": Decimal("20"), "MSFT": Decimal("10")},
-        prior_file="Portfolio_20260805.csv",
+        baseline="prior target (Portfolio_20260805.csv)",
         max_shares=Decimal("100"),
         max_names=1,
     )
@@ -180,6 +180,98 @@ def test_recon_report_math():
     assert report.total_abs_diff == Decimal("115")
     assert report.names_diverged == 3
     assert report.breached  # names 3 > max_names 1 even though shares > 100 too
+
+
+# ---------------------------------------------------------------------------
+# flex SOD + book-snapshot recon (the normal, post-bootstrap path)
+# ---------------------------------------------------------------------------
+
+
+def test_flex_sod_snapshot_recon_passes_despite_partial_fill_day(
+    tmp_path, shares_dir, capsys
+):
+    """Yesterday's target said 20 but only 15 filled. The nightly snapshot
+    holds the real book (15); live book == snapshot → strict 0/0 recon passes
+    with no operator override, and the send tops the position up (50−15)."""
+    store = KotlStore(tmp_path / "kotl")
+    store.record_book_snapshot(date(2026, 8, 5), "FAKE", {"AAPL.US": Decimal("15")})
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        store=store,
+        sod_source="flex",
+        flex_positions={"AAPL.US": Decimal("15")},
+    )
+    assert _sides(store, submit) == {
+        "AAPL.US": Decimal("35"),  # 50 target − 15 live book
+        "MSFT.US": Decimal("-30"),
+    }
+    out = capsys.readouterr().out
+    assert "book snapshot as of 2026-08-05" in out
+    assert "no divergence" in out
+
+
+def test_flex_sod_snapshot_recon_trips_on_overnight_drift(tmp_path, shares_dir, capsys):
+    store = KotlStore(tmp_path / "kotl")
+    store.record_book_snapshot(date(2026, 8, 5), "FAKE", {"AAPL.US": Decimal("20")})
+    with pytest.raises(ReconDivergenceError) as err:
+        _submit(
+            tmp_path,
+            shares_dir,
+            store=store,
+            sod_source="flex",
+            flex_positions={"AAPL.US": Decimal("25")},  # book moved overnight
+        )
+    report = err.value.report
+    assert report.total_abs_diff == Decimal("5")
+    assert "book snapshot as of 2026-08-05" in str(err.value)
+    out = capsys.readouterr().out
+    assert "breached=True" in out
+    assert not (tmp_path / "kotl" / "submits.csv").exists()
+
+
+def test_flex_sod_snapshot_recon_uses_latest_before_trade_date(tmp_path, shares_dir):
+    """Only snapshots strictly before the trade date count; the newest wins."""
+    store = KotlStore(tmp_path / "kotl")
+    store.record_book_snapshot(date(2026, 8, 1), "FAKE", {"AAPL.US": Decimal("99")})
+    store.record_book_snapshot(date(2026, 8, 5), "FAKE", {"AAPL.US": Decimal("20")})
+    # same-day snapshot must not be the baseline (it would be post-fill)
+    store.record_book_snapshot(date(2026, 8, 6), "FAKE", {"AAPL.US": Decimal("0")})
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        store=store,
+        sod_source="flex",
+        flex_positions={"AAPL.US": Decimal("20")},
+    )
+    assert submit.ok
+
+
+def test_flex_sod_stale_snapshot_warns(tmp_path, shares_dir, capsys):
+    store = KotlStore(tmp_path / "kotl")
+    store.record_book_snapshot(date(2026, 7, 30), "FAKE", {"AAPL.US": Decimal("20")})
+    _submit(
+        tmp_path,
+        shares_dir,
+        store=store,
+        sod_source="flex",
+        flex_positions={"AAPL.US": Decimal("20")},
+    )
+    out = capsys.readouterr().out
+    assert "book snapshot is 7 days old" in out
+
+
+def test_flex_sod_no_snapshot_falls_back_to_prior_target(tmp_path, shares_dir, capsys):
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        sod_source="flex",
+        flex_positions={"AAPL.US": Decimal("20")},
+    )
+    out = capsys.readouterr().out
+    assert "recon falls back to the prior target file" in out
+    assert "prior target (" in out
+    assert submit.ok
 
 
 # ---------------------------------------------------------------------------

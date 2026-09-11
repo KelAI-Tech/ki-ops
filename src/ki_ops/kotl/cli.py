@@ -19,6 +19,10 @@ EXIT_RECON_DIVERGENCE = 4
 EXIT_SUBMIT_REFUSED = 5
 EXIT_UNRESOLVED_SECURITIES = 6
 EXIT_MARKET_CLOSED = 7
+# snapshot-book: the nightly book moved in a way the ledger does not explain
+# (manual trades? missed fills?) — the snapshot is still recorded, but someone
+# should look.
+EXIT_BOOK_AUDIT_DRIFT = 8
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SOD = ROOT / "examples" / "sod_positions.csv"
@@ -201,6 +205,39 @@ def register_kotl_parser(sub) -> None:
     sk.add_argument("--cache-dir", type=Path, default=None, help="S3 download cache (default: data/kotl/cache)")
     _add_store_args(sk)
 
+    sb = ks.add_parser(
+        "snapshot-book",
+        help="nightly portfolio snapshot: live Flex book (ReplayPositions) → store; "
+        "next morning's SOD recon baseline. Audits book vs previous snapshot + "
+        "ledger fills (exit 8 on unexplained drift; snapshot recorded either way)",
+    )
+    sb.add_argument(
+        "--flex-env",
+        choices=("UAT", "PROD"),
+        default="UAT",
+        help="Flex environment to snapshot (default UAT)",
+    )
+    sb.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        default=None,
+        help="book as-of date (default: today in America/New_York — run after the close)",
+    )
+    sb.add_argument(
+        "--audit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="check book == previous snapshot + ledger fills since (refreshing "
+        "the ledger from live GetOrderInfo2 first); --no-audit skips",
+    )
+    sb.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch + audit but record nothing",
+    )
+    sb.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    _add_store_args(sb)
+
     rf = ks.add_parser(
         "refresh",
         help="refresh from KOTL fills JSON / kelai get_orders export, or live GetOrderInfo2",
@@ -370,6 +407,28 @@ def run_kotl(args) -> int:
             )
         )
         return 0
+
+    if cmd == "snapshot-book":
+        from zoneinfo import ZoneInfo
+
+        from ki_ops.kotl.book_snapshot import snapshot_flex_book
+        from ki_ops.kotl.flex_live import LiveRefreshSource, load_flex_config
+
+        flex_env = getattr(args, "flex_env", "UAT")
+        flex_config = load_flex_config(flex_env=flex_env)
+        as_of = args.as_of or datetime.now(ZoneInfo("America/New_York")).date()
+        summary = snapshot_flex_book(
+            store,
+            env=flex_env,
+            as_of=as_of,
+            flex_config=flex_config,
+            refresh_source=LiveRefreshSource(flex_config) if args.audit else None,
+            audit=args.audit,
+            dry_run=getattr(args, "dry_run", False),
+        )
+        print(json.dumps(summary, indent=2))
+        audit = summary.get("audit")
+        return EXIT_BOOK_AUDIT_DRIFT if audit is not None and not audit["ok"] else 0
 
     if cmd == "refresh":
         source, fixture = _build_refresh_source(args)

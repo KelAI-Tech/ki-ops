@@ -93,6 +93,18 @@ _DDL = (
         PRIMARY KEY (trade_date, env)
     )
     """,
+    # Nightly portfolio book snapshot (kotl snapshot-book): the full signed
+    # Flex position book as of the as_of_date close — next morning's recon
+    # baseline. First-wins via the PK (idempotent nightly re-runs).
+    """
+    CREATE TABLE IF NOT EXISTS kotl_book_snapshots (
+        as_of_date DATE NOT NULL,
+        env VARCHAR(16) NOT NULL,
+        captured_at DATETIME(6) NOT NULL,
+        positions_json JSON NOT NULL,
+        PRIMARY KEY (as_of_date, env)
+    )
+    """,
 )
 
 # Idempotent column additions for tables created before the column existed
@@ -474,6 +486,90 @@ class MysqlKotlStore:
                 return str(row[0]) if row else "unknown"
         finally:
             cur.close()
+
+    # --- portfolio book snapshots ---------------------------------------------
+
+    def record_book_snapshot(self, as_of: date, env: str, book: dict[str, Decimal]) -> bool:
+        """Persist the book as of the *as_of* close — **first-wins** (PK
+        insert). Returns ``True`` when this call recorded it. Empty books
+        store as ``{}`` and stay distinct from "no snapshot"
+        (:meth:`load_book_snapshot` → ``None``)."""
+        import mysql.connector
+
+        conn = self.connection()
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO kotl_book_snapshots (as_of_date, env, captured_at, positions_json)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        as_of,
+                        env.upper(),
+                        _to_db_ts(datetime.now(timezone.utc)),
+                        json.dumps(
+                            {str(sym).upper(): str(qty) for sym, qty in sorted(book.items())},
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+                conn.commit()
+                return True
+            except mysql.connector.IntegrityError:
+                conn.rollback()
+                return False
+        finally:
+            cur.close()
+
+    def load_book_snapshot(self, as_of: date, env: str) -> dict[str, Decimal] | None:
+        conn = self.connection()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT positions_json FROM kotl_book_snapshots "
+                "WHERE as_of_date = %s AND env = %s",
+                (as_of, env.upper()),
+            )
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        if row is None:
+            return None
+        positions = _json_or_none(row[0]) or {}
+        return {str(sym).upper(): Decimal(str(qty)) for sym, qty in positions.items()}
+
+    def load_latest_book_snapshot(
+        self, env: str, *, before: date | None = None
+    ) -> tuple[date, dict[str, Decimal]] | None:
+        conn = self.connection()
+        cur = conn.cursor()
+        try:
+            if before is not None:
+                cur.execute(
+                    "SELECT as_of_date, positions_json FROM kotl_book_snapshots "
+                    "WHERE env = %s AND as_of_date < %s "
+                    "ORDER BY as_of_date DESC LIMIT 1",
+                    (env.upper(), before),
+                )
+            else:
+                cur.execute(
+                    "SELECT as_of_date, positions_json FROM kotl_book_snapshots "
+                    "WHERE env = %s ORDER BY as_of_date DESC LIMIT 1",
+                    (env.upper(),),
+                )
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        if row is None:
+            return None
+        as_of, raw = row
+        positions = _json_or_none(raw) or {}
+        return (
+            as_of,
+            {str(sym).upper(): Decimal(str(qty)) for sym, qty in positions.items()},
+        )
 
     # --- EOD snapshots ------------------------------------------------------
 

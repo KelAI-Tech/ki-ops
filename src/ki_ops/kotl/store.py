@@ -41,12 +41,23 @@ class KotlStoreProtocol(Protocol):
 
     def claim_submission(self, trade_date: date, env: str, submit_id: str) -> str | None: ...
 
+    def record_book_snapshot(
+        self, as_of: date, env: str, book: "dict[str, Decimal]"
+    ) -> bool: ...
+
+    def load_book_snapshot(self, as_of: date, env: str) -> "dict[str, Decimal] | None": ...
+
+    def load_latest_book_snapshot(
+        self, env: str, *, before: date | None = None
+    ) -> "tuple[date, dict[str, Decimal]] | None": ...
+
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = ROOT / "data" / "kotl"
 
 SUBMITS_FILE = "submits.csv"
 WORKING_ORDERS_FILE = "working_orders.csv"
 CLAIMS_DIR = "claims"
+BOOK_SNAPSHOTS_DIR = "book_snapshots"
 
 SUBMIT_FIELDS = (
     "submit_id",
@@ -187,6 +198,84 @@ class KotlStore:
         except FileExistsError:
             return path.read_text(encoding="utf-8").strip() or "unknown"
         return None
+
+    # --- portfolio book snapshots -------------------------------------------
+    #
+    # One JSON file per (as_of, env): the full signed Flex position book
+    # (canonical Flex symbols, e.g. WM.US / BF/B.US) captured nightly after
+    # the close by ``kotl snapshot-book``. It is the next morning's recon
+    # baseline: the live book must equal the last snapshot before any send.
+
+    def _book_snapshot_path(self, as_of: date, env: str) -> Path:
+        return (
+            self.data_dir
+            / BOOK_SNAPSHOTS_DIR
+            / f"{env.upper()}_{as_of.strftime('%Y%m%d')}.json"
+        )
+
+    def record_book_snapshot(self, as_of: date, env: str, book: dict[str, Decimal]) -> bool:
+        """Persist the book as of the *as_of* close — **first-wins**.
+
+        Returns ``True`` when this call recorded it, ``False`` when a snapshot
+        for ``(as_of, env)`` already existed (idempotent nightly re-runs).
+        ``O_CREAT|O_EXCL``; same single-host atomicity note as
+        :meth:`claim_submission`. An empty book is a legitimate observation
+        and stores as ``{}`` — distinct from "no snapshot"
+        (:meth:`load_book_snapshot` → ``None``).
+        """
+        path = self._book_snapshot_path(as_of, env)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {
+                "captured_at": _utc(datetime.now(timezone.utc)).isoformat(),
+                "positions": {
+                    str(sym).upper(): str(qty) for sym, qty in sorted(book.items())
+                },
+            },
+            sort_keys=True,
+        )
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(payload)
+        except FileExistsError:
+            return False
+        return True
+
+    def load_book_snapshot(self, as_of: date, env: str) -> dict[str, Decimal] | None:
+        path = self._book_snapshot_path(as_of, env)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            str(sym).upper(): Decimal(qty)
+            for sym, qty in (data.get("positions") or {}).items()
+        }
+
+    def load_latest_book_snapshot(
+        self, env: str, *, before: date | None = None
+    ) -> tuple[date, dict[str, Decimal]] | None:
+        """Most recent snapshot for *env*, optionally strictly before *before*
+        (a submit for trade date T wants the book as of the last close < T).
+        Returns ``(as_of, book)`` or ``None``."""
+        folder = self.data_dir / BOOK_SNAPSHOTS_DIR
+        if not folder.exists():
+            return None
+        prefix = f"{env.upper()}_"
+        best: date | None = None
+        for path in folder.glob(f"{prefix}*.json"):
+            stem = path.stem[len(prefix):]
+            try:
+                as_of = datetime.strptime(stem, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if before is not None and as_of >= before:
+                continue
+            if best is None or as_of > best:
+                best = as_of
+        if best is None:
+            return None
+        book = self.load_book_snapshot(best, env)
+        return (best, book if book is not None else {})
 
     def _load_all_working_orders(self) -> list[WorkingOrder]:
         if not self.working_orders_path.exists():
