@@ -141,9 +141,11 @@ def make_position(
     symbol: str,
     quantity: float,
     *,
-    # Live UAT reality: account is KELAI, booking fund is KEL-LOMB.
+    # Live UAT reality (verified 2026-09-10): strategy-book rows carry the
+    # POSITION GROUP in the account field, booking fund KEL-LOMB. Only
+    # non-strategy seed rows carry account=KELAI (with fund=Unset).
     fund: str = "KEL-LOMB",
-    account: str = "KELAI",
+    account: str = "USATop2000_strategy_v1",
     strategies: list | None = None,
     **extra,
 ):
