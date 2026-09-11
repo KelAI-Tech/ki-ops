@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Iterable, Mapping
 
 DEFAULT_ACCOUNT = "ernqufb-xqb94021"
@@ -160,6 +161,73 @@ def fetch_sedols_by_infocode(
                 for infocode, sedol in cursor.fetchall():
                     if sedol and str(sedol).strip():
                         out[str(infocode)] = str(sedol).strip()
+        finally:
+            cursor.close()
+    except SecurityMasterError:
+        raise
+    except Exception as exc:
+        raise SecurityMasterError(
+            f"security master query failed (KELAI.{schema}.{SECURITY_MASTER_TABLE}): {exc}"
+        ) from exc
+    finally:
+        if own_connection:
+            connection.close()
+    return out
+
+
+_SEDOL_SHAPE = re.compile(r"^[0-9A-Z]{6,7}$")
+
+
+def _infocode_query(schema: str, sedols: list[str]) -> str:
+    in_list = ",".join(f"'{s}'" for s in sedols)
+    # One row per SEDOL; on duplicates prefer the active, most recent listing.
+    return (
+        "SELECT SEDOL, INFOCODE FROM KELAI."
+        f"{schema}.{SECURITY_MASTER_TABLE} "
+        f"WHERE INFOCODE IS NOT NULL AND SEDOL IN ({in_list}) "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY SEDOL "
+        "ORDER BY ISACTIVE DESC, LISTINGSTARTDATE DESC) = 1"
+    )
+
+
+def fetch_infocodes_by_sedol(
+    sedols: Iterable[str],
+    *,
+    env: str = "UAT",
+    schema: str | None = None,
+    connection=None,
+) -> dict[str, str]:
+    """``{sedol: infocode}`` — the reverse join for Flex→ds2 translation.
+
+    Used by the submit's inverse symbol map for SOD-only live positions (names
+    today's target dropped): their Flex-master SEDOL leads back to the ds2
+    infocode, and the snapshot's ``infocode_by_ticker`` completes the hop to
+    the ds2 ticker. SEDOLs are validated to 6–7 alphanumeric chars (anything
+    else is dropped) so the IN-list stays safe.
+    """
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for raw in sedols:
+        sedol = str(raw).strip().upper()
+        if sedol and _SEDOL_SHAPE.match(sedol) and sedol not in seen:
+            seen.add(sedol)
+            wanted.append(sedol)
+    if not wanted:
+        return {}
+
+    schema = schema or secmaster_schema(env)
+    own_connection = connection is None
+    if own_connection:
+        connection = connect_snowflake()
+    out: dict[str, str] = {}
+    try:
+        cursor = connection.cursor()
+        try:
+            for start in range(0, len(wanted), QUERY_CHUNK):
+                cursor.execute(_infocode_query(schema, wanted[start : start + QUERY_CHUNK]))
+                for sedol, infocode in cursor.fetchall():
+                    if infocode is not None:
+                        out[str(sedol).strip().upper()] = str(int(str(infocode).strip()))
         finally:
             cursor.close()
     except SecurityMasterError:
