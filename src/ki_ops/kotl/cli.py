@@ -136,7 +136,7 @@ def register_kotl_parser(sub) -> None:
         "--allow-outside-market-hours",
         action="store_true",
         help="override the NYSE market-hours gate (live submits are otherwise "
-        "refused outside trading days 07:00 ET to the close, exit 7) — "
+        "refused outside trading days 03:00 ET to the close, exit 7) — "
         "deliberate testing only",
     )
     sk.add_argument(
