@@ -127,3 +127,40 @@ def test_empty_store_returns_empty_lists(tmp_path):
     assert store.load_submits() == []
     assert store.load_working_orders() == []
     assert store.get_working_order("missing") is None
+
+
+# ---------------------------------------------------------------------------
+# portfolio book snapshots (nightly kotl snapshot-book)
+# ---------------------------------------------------------------------------
+
+
+def test_book_snapshot_roundtrip_first_wins_and_latest(tmp_path):
+    store = KotlStore(tmp_path)
+    d1, d2 = date(2026, 9, 9), date(2026, 9, 10)
+    book1 = {"WM.US": Decimal("5"), "BF/B.US": Decimal("48")}
+
+    assert store.load_book_snapshot(d1, "UAT") is None
+    assert store.load_latest_book_snapshot("UAT") is None
+
+    assert store.record_book_snapshot(d1, "UAT", book1) is True
+    # first-wins: a re-run the same night keeps the original capture
+    assert store.record_book_snapshot(d1, "UAT", {"WM.US": Decimal("999")}) is False
+    assert store.load_book_snapshot(d1, "UAT") == book1
+
+    book2 = {"WM.US": Decimal("7")}
+    assert store.record_book_snapshot(d2, "UAT", book2) is True
+    assert store.load_latest_book_snapshot("UAT") == (d2, book2)
+    # a submit for trade date T wants the last close strictly before T
+    assert store.load_latest_book_snapshot("UAT", before=d2) == (d1, book1)
+    assert store.load_latest_book_snapshot("UAT", before=d1) is None
+    # env separation
+    assert store.load_latest_book_snapshot("PROD") is None
+
+
+def test_book_snapshot_empty_book_distinct_from_missing(tmp_path):
+    store = KotlStore(tmp_path)
+    d = date(2026, 9, 9)
+    assert store.record_book_snapshot(d, "UAT", {}) is True
+    assert store.load_book_snapshot(d, "UAT") == {}
+    assert store.load_latest_book_snapshot("UAT", before=date(2026, 9, 10)) == (d, {})
+    assert store.load_book_snapshot(date(2026, 9, 8), "UAT") is None

@@ -179,6 +179,7 @@ def mysql_store(mysql_store_params):
         "kotl_working_orders",
         "kotl_eod_snapshots",
         "kotl_submit_claims",
+        "kotl_book_snapshots",
     ):
         cur.execute(f"DELETE FROM {table}")
     conn.commit()
@@ -284,6 +285,24 @@ def test_csv_mysql_store_parity(tmp_path, mysql_store):
     assert flex1.status is OrderStatus.DONE
     assert flex1.filled_qty == Decimal("-18")
     assert flex1.leaves_qty == Decimal("0")
+
+
+def test_mysql_book_snapshot_parity(tmp_path, mysql_store):
+    def _ex(store):
+        return (
+            store.record_book_snapshot(TD, "UAT", {"WM.US": Decimal("5"), "BF/B.US": Decimal("48")}),
+            store.record_book_snapshot(TD, "UAT", {"WM.US": Decimal("999")}),  # first-wins
+            store.record_book_snapshot(date(2026, 9, 3), "UAT", {}),  # empty ≠ missing
+            store.load_book_snapshot(TD, "UAT"),
+            store.load_book_snapshot(date(2026, 9, 3), "UAT"),
+            store.load_book_snapshot(date(2020, 1, 1), "UAT"),
+            store.load_latest_book_snapshot("UAT"),
+            store.load_latest_book_snapshot("UAT", before=TD),
+            store.load_latest_book_snapshot("UAT", before=date(2026, 9, 3)),
+            store.load_latest_book_snapshot("PROD"),
+        )
+
+    assert _ex(KotlStore(tmp_path)) == _ex(mysql_store)
 
 
 def test_mysql_eod_snapshots(mysql_store):

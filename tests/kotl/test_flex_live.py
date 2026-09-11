@@ -365,6 +365,7 @@ def test_live_refresh_source_updates_ledger(backend, tmp_path):
 def test_is_plain_us_equity():
     assert is_plain_us_equity("NKE.US")
     assert is_plain_us_equity("BRK-B.US")
+    assert is_plain_us_equity("BRK/B.US")  # slash share class, held live
     assert not is_plain_us_equity("18880.KS")
     assert not is_plain_us_equity("AAPL 250117P00150000.US")  # option
     assert not is_plain_us_equity("AAPL")
@@ -383,6 +384,35 @@ def test_fetch_flex_positions_filters_and_signs(backend):
     assert positions == {"NKE.US": Decimal("-100"), "AAPL.US": Decimal("250")}
     assert len(raw) == 6  # raw rows unfiltered for diagnostics
     assert backend.last_replay_request.sequenceId == 0
+
+
+def test_fetch_flex_positions_live_row_shapes(backend):
+    """Mirror of the live UAT ReplayPositions rows (verified 2026-09-10).
+
+    Strategy-book rows carry the POSITION GROUP in the account field, not
+    KELAI — the old ``account == "KELAI"`` filter silently dropped the entire
+    book (read as "empty" on 2026-09-08). Non-strategy seed rows (CAP.FP)
+    carry account=KELAI with fund=Unset and must stay excluded.
+    """
+    backend.positions = [
+        # the CAP.FP setup seed: KELAI account, Unset fund, non-US symbol
+        make_position("CAP.FP", 100.0, account="KELAI", fund="Unset", primeBroker="KEL-GS"),
+        # real strategy-book rows: account = position group
+        make_position("WM.US", 1.0, account="USATop2000_strategy_v1"),
+        make_position("CDNS.US", 12932.0, account="USATop2000_strategy_v1"),
+        # another strategy's book must not leak in
+        make_position("IBM.US", 40.0, account="OTHER_strategy"),
+    ]
+    positions, raw = fetch_flex_positions(CONFIG)
+    assert positions == {"WM.US": Decimal("1"), "CDNS.US": Decimal("12932")}
+    assert len(raw) == 4
+
+
+def test_fetch_flex_positions_explicit_account_still_matches(backend):
+    """Rows carrying the configured account (KELAI) still pass the filter."""
+    backend.positions = [make_position("AAPL.US", 250.0, account="KELAI")]
+    positions, _ = fetch_flex_positions(CONFIG)
+    assert positions == {"AAPL.US": Decimal("250")}
 
 
 def test_fetch_flex_positions_group_markers(backend):
