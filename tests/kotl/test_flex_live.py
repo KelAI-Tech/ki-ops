@@ -189,6 +189,21 @@ def test_create_orders_maps_fields_and_collects_stream(backend):
     assert backend.channels_opened[0].closed
 
 
+def test_create_orders_no_route_payload_maps_to_blank_routing(backend):
+    # No-route mode (FlexTrade-confirmed safe prod test): blank broker + algo
+    # means Flex books the order but sends nothing to the street.
+    backend.create_results = [make_create_result("abc-1")]
+    adapter = LiveFlexAdapter(CONFIG)
+    payload = _payload("AAPL.US", 1, "BUY", origin_id="abc-1")
+    payload.update({"broker": "", "algo": "", "brokerAutomationType": "NO_AUTOMATION"})
+    adapter.create_orders([payload])
+
+    first = backend.last_create_request.orders[0]
+    assert first.broker == ""
+    assert first.algo == ""
+    assert first.brokerAutomation.predefinedType == 2  # NO_AUTOMATION
+
+
 def test_create_orders_send_to_ems_off(backend):
     backend.create_results = [make_create_result("abc-1")]
     adapter = LiveFlexAdapter(

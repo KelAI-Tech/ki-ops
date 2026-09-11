@@ -202,6 +202,44 @@ def test_trade_file_out_override(env_setup, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# no-route mode (safe live test: booked in Flex, never routed to the street)
+# ---------------------------------------------------------------------------
+
+
+def test_no_route_blanks_broker_algo_and_stays_live(env_setup, capsys):
+    submit = _submit(env_setup, env="UAT", no_route=True)
+    assert submit.ok
+    assert submit.payload
+    for p in submit.payload:
+        assert p["broker"] == ""
+        assert p["algo"] == ""
+        assert p["brokerAutomationType"] == "NO_AUTOMATION"
+    # Still a real submit: claim taken, ledger written (broker/algo blank).
+    assert has_ok_submit(env_setup["store"], TD, "UAT") is not None
+    orders = env_setup["store"].load_working_orders(trade_date=TD)
+    assert orders
+    assert all(o.broker is None and o.algo is None for o in orders)
+    assert "NO-ROUTE MODE" in capsys.readouterr().out
+
+
+def test_no_route_consumes_the_day_for_routed_trading(env_setup):
+    _submit(env_setup, env="UAT", no_route=True)
+    _mirror_ledger_to_flex(env_setup)
+    # The staged (never-filled) orders count as sent: a real routed submit for
+    # the same (trade_date, env) is a covered no-op even with --force.
+    routed = _submit(env_setup, env="UAT", force=True)
+    assert (routed.flex_response or {}).get("target_covered") is True
+
+
+def test_default_submit_routing_unchanged(env_setup):
+    submit = _submit(env_setup, env="UAT")
+    for p in submit.payload:
+        assert p["broker"] == "KEL-GS-EQ-LT"
+        assert p["algo"] == "VWAP_AMRS"
+        assert p["brokerAutomationType"] == "AUTOROUTE"
+
+
+# ---------------------------------------------------------------------------
 # caps
 # ---------------------------------------------------------------------------
 
