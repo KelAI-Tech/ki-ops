@@ -32,6 +32,25 @@ class FlexOrderDefaults:
     settlement_currency: str = "USD"
 
 
+def no_route_defaults(defaults: FlexOrderDefaults | None = None) -> FlexOrderDefaults:
+    """Stage-only ("no-route") copy of *defaults*: blank broker, blank algo,
+    ``NO_AUTOMATION``.
+
+    Per FlexTrade: an order without the broker and algo columns set is
+    accepted and booked in Flex but **nothing is sent out to the street** —
+    the safe way to exercise the full submit path in PROD without PnL impact.
+    ``brokerAutomationType`` is also flipped from ``AUTOROUTE`` to
+    ``NO_AUTOMATION`` so Flex cannot pick a broker from its priority list on
+    its own.
+    """
+    return replace(
+        defaults or FlexOrderDefaults(),
+        broker="",
+        algo="",
+        broker_automation_type="NO_AUTOMATION",
+    )
+
+
 def flex_symbol(symbol: str, *, suffix: str = ".US") -> str:
     """Bare ticker → Flex symbol (e.g. ``AAPL`` → ``AAPL.US``). Already-suffixed left as-is."""
     sym = symbol.strip().upper()

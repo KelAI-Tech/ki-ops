@@ -55,6 +55,7 @@ from ki_ops.kotl.fake_flex import FakeFlexAdapter
 from ki_ops.kotl.flex_map import (
     FlexOrderDefaults,
     flex_orders_from_rebalance_csv,
+    no_route_defaults,
     orders_to_flex_dicts,
 )
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
@@ -787,6 +788,7 @@ def submit_kelai_shares(
     sedol_source: str | None = None,
     sent_source: str = "ledger",
     allow_outside_market_hours: bool = False,
+    no_route: bool = False,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -863,6 +865,19 @@ def submit_kelai_shares(
     flex order ids; everything else (recon table, residual audit, trade file,
     caps report) is still produced — but no claim is taken and the live
     cross-check is skipped (no gRPC).
+
+    **No-route mode** (*no_route*): every order goes out with a **blank
+    broker, blank algo and ``NO_AUTOMATION``** — per FlexTrade, such orders
+    are accepted and booked in Flex but never sent to the street. This is the
+    safe way to exercise the real ``CreateOrders`` path (resolution,
+    compliance, booking, ledger, refresh) in PROD without PnL impact. Unlike
+    ``dry_run`` it IS a live submit: the once-a-day claim is taken, the
+    ledger is written, and target mode counts the staged orders as sent
+    (cancelled orders still count, deliberately) — so a no-route run
+    **consumes real trading for that (trade_date, env)**: a routed submit the
+    same day is a covered no-op even with ``--force``. Run it on a day you do
+    not intend to trade for real. The staged orders never fill; cancel them
+    in the Flex UI or let GFD expire them at the close.
     """
     from ki_ops.intents import derive_trade_intents, load_sod_positions_csv
     from ki_ops.kotl.kelaidata_source import (
@@ -889,6 +904,18 @@ def submit_kelai_shares(
     live = env.upper() in ("UAT", "PROD")
     if sent_source == "flex" and not live:
         raise ValueError("sent_source='flex' requires a live env (UAT/PROD)")
+
+    if no_route:
+        defaults = no_route_defaults(defaults)
+        print(
+            "NO-ROUTE MODE: orders go out with blank broker/algo and "
+            "NO_AUTOMATION — Flex accepts and books them but sends nothing to "
+            "the street (no fills, no PnL). This is still a live submit: the "
+            "once-a-day claim is taken, the ledger is written, and target "
+            "mode counts the staged orders as sent — real routed trading for "
+            "this (trade_date, env) is consumed for the rest of the day. "
+            "Cancel the staged orders in the Flex UI or let GFD expire them"
+        )
 
     # --- market-hours gate (live envs; fail fast, before any S3/gRPC work) ---
     if live:
