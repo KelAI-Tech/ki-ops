@@ -19,7 +19,7 @@ SOD sources:
 Safety rails on the live path:
 
 - **market-hours gate** (:mod:`ki_ops.kotl.market_hours`): live submits are
-  refused outside NYSE trading days 07:00 ET–close (exit 7) unless
+  refused outside NYSE trading days 03:00 ET–close (exit 7) unless
   ``--allow-outside-market-hours`` is passed deliberately;
 - **target mode** (:mod:`ki_ops.kotl.target_mode`): cumulative sends can never
   exceed the day's target book. Every live submit subtracts what was already
@@ -86,7 +86,7 @@ class MarketClosedError(SubmitRefusedError):
     """Live submit attempted outside NYSE market hours (CLI exit 7).
 
     Raised before any network or S3 work when the wall clock is outside the
-    submit window (NYSE trading days, 07:00 ET to the close — 16:00, or 13:00
+    submit window (NYSE trading days, 03:00 ET to the close — 16:00, or 13:00
     on early-close days; :mod:`ki_ops.kotl.market_hours`). Override with
     ``allow_outside_market_hours`` / ``--allow-outside-market-hours`` only for
     deliberate testing.
@@ -684,7 +684,7 @@ def submit_kelai_shares(
         else:
             raise MarketClosedError(
                 f"MARKET CLOSED: {reason} — live orders only go out on NYSE "
-                "trading days between 07:00 ET and the close; pass "
+                "trading days between 03:00 ET and the close; pass "
                 "--allow-outside-market-hours to override deliberately"
             )
 

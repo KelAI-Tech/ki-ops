@@ -97,14 +97,14 @@ def test_market_close_times():
 @pytest.mark.parametrize(
     ("now", "expect_open"),
     [
-        # Thu 2026-08-06 is EDT (UTC-4): window 11:00–20:00 UTC.
-        (datetime(2026, 8, 6, 10, 59, tzinfo=UTC), False),  # 06:59 ET
-        (datetime(2026, 8, 6, 11, 0, tzinfo=UTC), True),  # 07:00 ET
+        # Thu 2026-08-06 is EDT (UTC-4): window 07:00–20:00 UTC.
+        (datetime(2026, 8, 6, 6, 59, tzinfo=UTC), False),  # 02:59 ET
+        (datetime(2026, 8, 6, 7, 0, tzinfo=UTC), True),  # 03:00 ET
         (datetime(2026, 8, 6, 19, 59, tzinfo=UTC), True),  # 15:59 ET
         (datetime(2026, 8, 6, 20, 0, tzinfo=UTC), False),  # 16:00 ET close
-        # Thu 2026-01-15 is EST (UTC-5): 12:00 UTC = 07:00 ET.
-        (datetime(2026, 1, 15, 11, 59, tzinfo=UTC), False),
-        (datetime(2026, 1, 15, 12, 0, tzinfo=UTC), True),
+        # Thu 2026-01-15 is EST (UTC-5): 08:00 UTC = 03:00 ET.
+        (datetime(2026, 1, 15, 7, 59, tzinfo=UTC), False),
+        (datetime(2026, 1, 15, 8, 0, tzinfo=UTC), True),
         # Fri 2026-11-27 closes early at 13:00 ET (18:00 UTC, EST).
         (datetime(2026, 11, 27, 17, 59, tzinfo=UTC), True),
         (datetime(2026, 11, 27, 18, 0, tzinfo=UTC), False),

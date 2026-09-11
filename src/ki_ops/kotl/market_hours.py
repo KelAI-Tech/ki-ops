@@ -1,8 +1,10 @@
 """NYSE market-hours gate for live KOTL submits (rules-based, stdlib-only).
 
 Live orders may only go out on NYSE trading days, from :data:`OPEN_GATE`
-(07:00 America/New_York — pre-open staging for the VWAP schedule) up to the
-market close (16:00, or 13:00 on early-close days). Outside that window a
+(03:00 America/New_York — early pre-open staging: the overnight pipeline
+naturally reaches the submit around 03:30–04:00 ET, and FlexTrade parks the
+VWAP schedule until the open) up to the market close (16:00, or 13:00 on
+early-close days). Outside that window a
 live submit blocks (:class:`~ki_ops.kotl.submit.MarketClosedError`, CLI
 exit 7) unless ``--allow-outside-market-hours`` is passed deliberately.
 
@@ -26,7 +28,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
-OPEN_GATE = time(7, 0)
+OPEN_GATE = time(3, 0)
 REGULAR_CLOSE = time(16, 0)
 EARLY_CLOSE = time(13, 0)
 
