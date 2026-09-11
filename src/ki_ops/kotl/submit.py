@@ -432,6 +432,43 @@ def _load_book_sedols(
     return sedols
 
 
+def _reverse_sedol_infocodes(
+    sedol_source: str | None,
+    sedols: set[str],
+    *,
+    env: str,
+    cache_dir,
+) -> dict[str, str]:
+    """``{sedol: infocode}`` for the reverse (Flex→ds2) join — mirrors
+    :func:`_load_book_sedols` source semantics (snowflake / CSV / none)."""
+    source = sedol_source if sedol_source is not None else os.environ.get("KOTL_SEDOL_SOURCE")
+    if source is None:
+        source = "snowflake"
+    source = str(source).strip()
+    if source.lower() in ("", "none") or not sedols:
+        return {}
+    try:
+        if source.lower() == "snowflake":
+            from ki_ops.kotl.security_master import fetch_infocodes_by_sedol
+
+            return fetch_infocodes_by_sedol(sedols, env=env)
+        from ki_ops.kotl.flex_symbols import load_sedol_map
+
+        wanted = {str(s).strip().upper() for s in sedols}
+        out: dict[str, str] = {}
+        for infocode, sedol in load_sedol_map(source, cache_dir=cache_dir).items():
+            key = str(sedol).strip().upper()
+            if key in wanted:
+                out.setdefault(key, str(infocode))
+        return out
+    except Exception as exc:
+        print(
+            f"WARNING: reverse SEDOL lookup ({source}) unavailable ({exc}) — "
+            "SOD-only flex positions keep their bare tickers"
+        )
+        return {}
+
+
 def _flex_book_to_ds2(
     flex_positions: dict[str, Decimal],
     *,
@@ -458,9 +495,19 @@ def _flex_book_to_ds2(
     The inverse map is built by forward-resolving today's target tickers
     through the same SEDOL-first :func:`resolve_flex_symbols` (and the same
     cache) the outbound pass uses, then inverting ``{ds2: flex_symbol}``.
-    Live-book symbols found in the map become their ds2 ticker; anything else
-    keeps the bare-ticker fallback (suffix stripped), so genuinely foreign
-    names still fail closed downstream. Non-live envs skip resolution
+
+    **SOD-only names** (positions today's target dropped — zero-target rows
+    and disappeared names, whose flatten orders still must price): the
+    target-based map cannot know them, so a second pass reverse-resolves the
+    leftover live symbols directly — Flex-master lookup for the symbol's
+    **SEDOL**, security-master ``{sedol → infocode}``
+    (:func:`ki_ops.kotl.security_master.fetch_infocodes_by_sedol`), then the
+    snapshot's ``infocode_by_ticker`` back to the ds2 ticker (2026-09-11:
+    ``BRK/B.US→BRKB`` and the ds2-renamed spellings of ATGE, BK, MMC, …).
+
+    Live-book symbols found in either map become their ds2 ticker; anything
+    else keeps the bare-ticker fallback (suffix stripped), so genuinely
+    foreign names still fail closed downstream. Non-live envs skip resolution
     entirely (no SecurityService); a resolution outage warns and falls back
     to bare tickers — unpriceable names then still block the submit.
     """
@@ -518,6 +565,62 @@ def _flex_book_to_ds2(
                 f"({other}, {ds2_ticker}) — refusing to merge their positions"
             )
         inverse[key] = ds2_ticker
+
+    # --- second pass: SOD-only leftovers (names the target dropped) ---------
+    # Their flatten orders still must price in ds2, but the target-based map
+    # cannot know their ds2 spelling. Reverse-resolve the live symbol itself:
+    # Flex master → SEDOL → security master infocode → snapshot ds2 ticker.
+    leftovers: list[str] = []
+    for sym in flex_positions:
+        key = str(sym).strip().upper()
+        if key in inverse:
+            continue
+        bare = _bare_ticker(key, suffix=symbol_suffix)
+        if bare in target_tickers or snapshot.price(bare) is not None:
+            continue  # already joins (or prices) as-is
+        leftovers.append(key)
+    if leftovers:
+        try:
+            from ki_ops.kotl.flex_symbols import batch_lookup
+
+            results = batch_lookup(flex_config, leftovers)
+        except Exception as exc:
+            print(
+                f"WARNING: Flex lookup for {len(leftovers)} SOD-only "
+                f"position(s) unavailable ({exc}) — they keep bare tickers"
+            )
+            results = [None] * len(leftovers)
+        sedol_by_sym = {}
+        for sym, result in zip(leftovers, results):
+            sedol = ((result or {}).get("identifiers") or {}).get("SEDOL")
+            if sedol:
+                sedol_by_sym[sym] = str(sedol).strip().upper()
+        infocode_by_sedol = _reverse_sedol_infocodes(
+            sedol_source, set(sedol_by_sym.values()), env=env, cache_dir=cache_dir
+        )
+        ticker_by_infocode: dict[str, str] = {}
+        for ticker, infocode in snapshot.infocode_by_ticker.items():
+            try:
+                ticker_by_infocode[str(int(str(infocode).strip()))] = (
+                    str(ticker).strip().upper()
+                )
+            except (TypeError, ValueError):
+                continue
+        unmapped: list[str] = []
+        for sym in leftovers:
+            infocode = infocode_by_sedol.get(sedol_by_sym.get(sym, ""))
+            ds2_ticker = ticker_by_infocode.get(infocode) if infocode else None
+            if ds2_ticker is None:
+                unmapped.append(sym)
+            else:
+                inverse[sym] = ds2_ticker
+        if unmapped:
+            shown = ", ".join(sorted(unmapped)[:20])
+            print(
+                f"WARNING: {len(unmapped)} SOD-only flex position(s) have no "
+                f"SEDOL→ds2 mapping (kept as bare tickers): {shown}"
+                f"{' …' if len(unmapped) > 20 else ''}"
+            )
 
     book: dict[str, Decimal] = {}
     translated: list[str] = []
