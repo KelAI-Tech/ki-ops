@@ -10,13 +10,24 @@ import pytest
 
 pytest.importorskip("h5py")
 
+from types import SimpleNamespace
+
 from ki_ops.kotl.fake_flex import FakeFlexAdapter
+from ki_ops.kotl.flex_live import FlexConfig
 from ki_ops.kotl.store import KotlStore
 from ki_ops.kotl.submit import (
     ReconDivergenceError,
+    _flex_book_to_ds2,
     _resolve_sod_source,
     reconcile_books,
     submit_kelai_shares,
+)
+from tests.kotl.fake_flex_sdk import (
+    ID_SEDOL,
+    ID_TICKER,
+    FakeFlexBackend,
+    install_fake_sdk,
+    make_security,
 )
 from tests.kotl.test_kelaidata_source import make_ds2_h5
 
@@ -307,6 +318,155 @@ def test_prior_target_sod_flattens_dropped_names(tmp_path):
         "AAPL.US": Decimal("30"),
         "TSLA.US": Decimal("-15"),
     }
+
+
+# ---------------------------------------------------------------------------
+# flex SOD: inverse Flex→ds2 symbol map (live envs)
+# ---------------------------------------------------------------------------
+
+FLEX_CONFIG = FlexConfig(endpoint="127.0.0.1:50051", token="tok")
+
+
+def _sedol_csv(tmp_path, rows: dict[str, str]):
+    path = tmp_path / "sedols.csv"
+    path.write_text(
+        "infocode,sedol\n" + "".join(f"{i},{s}\n" for i, s in rows.items())
+    )
+    return path
+
+
+def test_flex_book_to_ds2_fake_env_keeps_bare_tickers():
+    """Non-live envs never touch the SecurityService: bare-ticker book only."""
+    book = _flex_book_to_ds2(
+        {"AAPL.US": Decimal("10"), "BF/B.US": Decimal("5")},
+        snapshot=SimpleNamespace(infocode_by_ticker={}),
+        target_tickers={"AAPL"},
+        env="FAKE",
+        flex_config=None,
+        symbol_suffix=".US",
+        sedol_source="none",
+        cache_dir=None,
+        data_dir=None,
+    )
+    assert book == {"AAPL": Decimal("10"), "BF/B": Decimal("5")}
+
+
+def test_flex_book_to_ds2_translates_sedol_and_class_share_names(
+    tmp_path, monkeypatch, capsys
+):
+    """The two prod failure shapes: SEDOL-translated (CCCS.US ← CCC) and
+    slash class-share (BF/B.US ← BFB) live symbols join back to ds2 tickers."""
+    backend = FakeFlexBackend()
+    backend.security_master = [
+        make_security("CCCS.US", 1, identifiers=[(ID_SEDOL, "BP4CXL8")]),
+        make_security("BF/B.US", 2, identifiers=[(ID_TICKER, "BF.B")]),
+        make_security("AAPL.US", 3),
+    ]
+    install_fake_sdk(monkeypatch, backend)
+    book = _flex_book_to_ds2(
+        {"CCCS.US": Decimal("100"), "BF/B.US": Decimal("50"), "AAPL.US": Decimal("10")},
+        snapshot=SimpleNamespace(
+            infocode_by_ticker={"CCC": "7", "BFB": "8", "AAPL": "9"}
+        ),
+        target_tickers={"CCC", "BFB", "AAPL"},
+        env="UAT",
+        flex_config=FLEX_CONFIG,
+        symbol_suffix=".US",
+        sedol_source=str(_sedol_csv(tmp_path, {"7": "BP4CXL8"})),
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+    )
+    assert book == {
+        "CCC": Decimal("100"),
+        "BFB": Decimal("50"),
+        "AAPL": Decimal("10"),
+    }
+    out = capsys.readouterr().out
+    assert "inverse symbol map" in out
+    assert "CCCS.US→CCC" in out and "BF/B.US→BFB" in out
+
+
+def test_flex_book_to_ds2_outage_warns_and_falls_back(tmp_path, monkeypatch, capsys):
+    backend = FakeFlexBackend()
+    backend.security_error = RuntimeError("flex is down")
+    install_fake_sdk(monkeypatch, backend)
+    book = _flex_book_to_ds2(
+        {"CCCS.US": Decimal("100")},
+        snapshot=SimpleNamespace(infocode_by_ticker={"CCC": "7"}),
+        target_tickers={"CCC"},
+        env="UAT",
+        flex_config=FLEX_CONFIG,
+        symbol_suffix=".US",
+        sedol_source="none",
+        cache_dir=tmp_path / "cache",
+        data_dir=None,
+    )
+    assert book == {"CCCS": Decimal("100")}  # bare fallback, fails closed later
+    assert "inverse symbol map unavailable" in capsys.readouterr().out
+
+
+def test_flex_book_to_ds2_collision_refuses(tmp_path, monkeypatch):
+    """Two ds2 tickers resolving to ONE flex symbol is data corruption —
+    refuse rather than silently merging their positions."""
+    backend = FakeFlexBackend()
+    backend.security_master = [
+        make_security("CCCS.US", 1, identifiers=[(ID_SEDOL, "BP4CXL8")]),
+    ]
+    install_fake_sdk(monkeypatch, backend)
+    with pytest.raises(ValueError, match="two ds2 tickers"):
+        _flex_book_to_ds2(
+            {"CCCS.US": Decimal("100")},
+            snapshot=SimpleNamespace(infocode_by_ticker={"CCC": "7", "XYZ": "8"}),
+            target_tickers={"CCC", "XYZ"},
+            env="UAT",
+            flex_config=FLEX_CONFIG,
+            symbol_suffix=".US",
+            sedol_source=str(_sedol_csv(tmp_path, {"7": "BP4CXL8", "8": "BP4CXL8"})),
+            cache_dir=tmp_path / "cache",
+            data_dir=None,
+        )
+
+
+def test_uat_flex_sod_prices_sedol_translated_position(tmp_path, monkeypatch, capsys):
+    """Regression for the 2026-09-11 prod failure: we hold CCCS.US (bought by
+    yesterday's submit under the canonical Flex spelling of ds2 ticker CCC).
+    Without the inverse map this raised ``1 flex SOD tickers have no ds2
+    close``; with it the position joins the CCC target and the send is the
+    30-share top-up — not a CCCS flatten next to a 50-share CCC buy."""
+    shares = tmp_path / "Portfolio_20260806.csv"
+    shares.write_text("CCC,50,VWAP\nAAPL,-30,VWAP\n")
+    backend = FakeFlexBackend()
+    backend.security_master = [
+        make_security("CCCS.US", 1, identifiers=[(ID_SEDOL, "BP4CXL8")]),
+        make_security("AAPL.US", 2),
+    ]
+    install_fake_sdk(monkeypatch, backend)
+    h5 = make_ds2_h5(tmp_path / "ds2.h5", tickers=("CCC", "AAPL"))
+    sedol_csv = _sedol_csv(tmp_path, {"101": "BP4CXL8"})  # tickers-mode infocodes 101+
+
+    store = KotlStore(tmp_path / "kotl")
+    submit = submit_kelai_shares(
+        store,
+        trade_date=TD,
+        shares_file=shares,
+        ds2_h5=h5,
+        sod_source="flex",
+        flex_positions={"CCCS.US": Decimal("20")},
+        flex_config=FLEX_CONFIG,
+        env="UAT",
+        sedol_source=str(sedol_csv),
+        adapter=FakeFlexAdapter(),
+        submitted_at=TS,
+        cache_dir=tmp_path / "cache",
+    )
+    assert submit.ok
+    rows = store.load_working_orders(submit_id=submit.submit_id)
+    assert {r.symbol: r.sent_qty for r in rows} == {
+        "CCCS.US": Decimal("30"),  # 50 target − 20 held, sent as canonical Flex
+        "AAPL.US": Decimal("-30"),
+    }
+    out = capsys.readouterr().out
+    assert "CCCS.US→CCC" in out
 
 
 def test_strategy_id_shares_path():

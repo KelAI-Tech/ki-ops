@@ -4,13 +4,17 @@
 file (targets) + ds2 prices + a **SOD source** → trade intents → Flex submit.
 SOD sources:
 
-- ``flex`` — live position book via ``ReplayPositions`` (``.US`` suffix
-  stripped to bare tickers), with a reconciliation guard: the live book must
-  match the latest **overnight book snapshot** (``kotl snapshot-book``,
-  captured nightly after the close) — a trivial book-vs-book equality, no
-  explanation heuristics, strict ``0/0`` by default. When no snapshot exists
-  (bootstrap) the guard falls back to comparing against yesterday's target
-  file;
+- ``flex`` — live position book via ``ReplayPositions``. The live book comes
+  back in **canonical Flex symbols** (``BF/B.US``, ``CCCS.US``) — the same
+  spellings the outbound resolution wrote — so it is first translated back to
+  ds2 tickers through the **inverse symbol map** (:func:`_flex_book_to_ds2`:
+  forward-resolve today's target tickers SEDOL-first, invert), then the
+  ``.US`` suffix is stripped from any leftover bare names. Reconciliation
+  guard: the live book must match the latest **overnight book snapshot**
+  (``kotl snapshot-book``, captured nightly after the close) — a trivial
+  book-vs-book equality in Flex symbols, no explanation heuristics, strict
+  ``0/0`` by default. When no snapshot exists (bootstrap) the guard falls
+  back to comparing against yesterday's target file;
 - ``prior-target`` — yesterday's ``Portfolio_*.csv`` located next to today's
   (``ki_ops.gate.find_prior_file``);
 - ``csv`` — explicit SOD CSV (legacy ``--sod``);
@@ -428,6 +432,113 @@ def _load_book_sedols(
     return sedols
 
 
+def _flex_book_to_ds2(
+    flex_positions: dict[str, Decimal],
+    *,
+    snapshot,
+    target_tickers: set,
+    env: str,
+    flex_config,
+    symbol_suffix: str,
+    sedol_source: str | None,
+    cache_dir,
+    data_dir,
+) -> dict[str, Decimal]:
+    """Live Flex book (canonical Flex symbols) → ds2-ticker book.
+
+    The outbound pre-submit resolution rewrites ds2 tickers to the canonical
+    Flex spelling (SEDOL-first: ``BFB → BF/B.US``, ``CCC → CCCS.US``), so the
+    book ``ReplayPositions`` echoes back is in **Flex vocabulary**. Joining
+    that book to the ds2-priced target needs the *inverse* map — without it,
+    every position whose Flex symbol differs from its ds2 ticker looks like a
+    foreign SOD-only name: it cannot be priced (the submit crashes in
+    ``_sod_from_shares``) and, worse, would be *flattened* while the target
+    buys the other spelling of the **same security** (churn).
+
+    The inverse map is built by forward-resolving today's target tickers
+    through the same SEDOL-first :func:`resolve_flex_symbols` (and the same
+    cache) the outbound pass uses, then inverting ``{ds2: flex_symbol}``.
+    Live-book symbols found in the map become their ds2 ticker; anything else
+    keeps the bare-ticker fallback (suffix stripped), so genuinely foreign
+    names still fail closed downstream. Non-live envs skip resolution
+    entirely (no SecurityService); a resolution outage warns and falls back
+    to bare tickers — unpriceable names then still block the submit.
+    """
+
+    def _bare_book() -> dict[str, Decimal]:
+        book: dict[str, Decimal] = {}
+        for sym, qty in flex_positions.items():
+            key = _bare_ticker(sym, suffix=symbol_suffix)
+            book[key] = book.get(key, Decimal("0")) + qty
+        return book
+
+    if env.upper() not in ("UAT", "PROD"):
+        return _bare_book()
+
+    try:
+        from ki_ops.kotl.flex_symbols import CACHE_FILENAME, resolve_flex_symbols
+
+        if flex_config is None:
+            from ki_ops.kotl.flex_live import load_flex_config
+
+            flex_config = load_flex_config(flex_env=env.upper())
+        sedols = _load_book_sedols(
+            sedol_source,
+            {
+                ticker: infocode
+                for ticker, infocode in snapshot.infocode_by_ticker.items()
+                if ticker in target_tickers
+            },
+            env=env,
+            cache_dir=cache_dir,
+        )
+        cache_path = Path(data_dir) / CACHE_FILENAME if data_dir is not None else None
+        resolved, _, _ = resolve_flex_symbols(
+            flex_config,
+            sorted(target_tickers),
+            sedols=sedols,
+            suffix=symbol_suffix,
+            cache_path=cache_path,
+        )
+    except Exception as exc:
+        print(
+            f"WARNING: flex→ds2 inverse symbol map unavailable ({exc}) — the "
+            "live book joins on bare tickers only; positions whose Flex "
+            "symbol differs from their ds2 ticker will not price"
+        )
+        return _bare_book()
+
+    inverse: dict[str, str] = {}
+    for ds2_ticker, flex_symbol in resolved.items():
+        key = str(flex_symbol).strip().upper()
+        other = inverse.get(key)
+        if other is not None and other != ds2_ticker:
+            raise ValueError(
+                f"flex symbol {flex_symbol} resolves from two ds2 tickers "
+                f"({other}, {ds2_ticker}) — refusing to merge their positions"
+            )
+        inverse[key] = ds2_ticker
+
+    book: dict[str, Decimal] = {}
+    translated: list[str] = []
+    for sym, qty in flex_positions.items():
+        key = str(sym).strip().upper()
+        ds2_ticker = inverse.get(key)
+        if ds2_ticker is None:
+            ds2_ticker = _bare_ticker(key, suffix=symbol_suffix)
+        elif ds2_ticker != _bare_ticker(key, suffix=symbol_suffix):
+            translated.append(f"{key}→{ds2_ticker}")
+        book[ds2_ticker] = book.get(ds2_ticker, Decimal("0")) + qty
+    if translated:
+        shown = ", ".join(sorted(translated)[:20])
+        print(
+            f"flex→ds2 inverse symbol map: {len(translated)} live position(s) "
+            f"translated back to ds2 vocabulary: {shown}"
+            f"{' …' if len(translated) > 20 else ''}"
+        )
+    return book
+
+
 def _resolve_payload_symbols(
     payloads: list[dict],
     orders: list,
@@ -581,6 +692,15 @@ def submit_kelai_shares(
     ticker); prices and the ticker map come from ``ds2_data.h5`` on S3. Trades
     are ``target − SOD``; the SOD book comes from *sod_source* (see module
     docstring) — there is no silent default book.
+
+    **Inverse symbol map** (``flex`` SOD, live envs): the live book arrives in
+    canonical Flex symbols (the spellings the outbound resolution wrote —
+    ``BF/B.US``, ``CCCS.US``), so before pricing it is translated back to ds2
+    tickers via :func:`_flex_book_to_ds2` (forward-resolve today's target
+    tickers SEDOL-first, invert). Without this, any position whose Flex symbol
+    differs from its ds2 ticker cannot join the target: it fails pricing
+    (crash) or — worse — would be flattened while the target buys the other
+    spelling of the same security.
 
     **SOD recon** (``flex`` SOD only): before anything is sent, the live book
     is diffed against the latest overnight **book snapshot** captured by the
@@ -744,15 +864,25 @@ def submit_kelai_shares(
                 position_group=flex_defaults.position_group,
                 symbol_suffix=symbol_suffix,
             )
-        bare_book = normalize_tickers_to_ds2(
-            {
-                _bare_ticker(sym, suffix=symbol_suffix): qty
-                for sym, qty in flex_positions.items()
-            },
+        # Canonical Flex symbols → ds2 tickers (inverse of the outbound
+        # resolution) so the live book joins the ds2-priced target in one
+        # vocabulary — see _flex_book_to_ds2.
+        ds2_book = normalize_tickers_to_ds2(
+            _flex_book_to_ds2(
+                flex_positions,
+                snapshot=snapshot,
+                target_tickers=target_tickers,
+                env=env,
+                flex_config=flex_config,
+                symbol_suffix=symbol_suffix,
+                sedol_source=sedol_source,
+                cache_dir=cache,
+                data_dir=getattr(store, "data_dir", None),
+            ),
             snapshot,
             label="flex SOD",
         )
-        sod = _sod_from_shares(bare_book, snapshot, target_tickers, label="flex")
+        sod = _sod_from_shares(ds2_book, snapshot, target_tickers, label="flex")
 
         # Reconciliation guard: the live book must match the latest overnight
         # book snapshot (``kotl snapshot-book``, captured nightly after the
@@ -812,7 +942,7 @@ def submit_kelai_shares(
                 )
                 _recon_guard(
                     reconcile_books(
-                        bare_book,
+                        ds2_book,
                         prior_book,
                         baseline=f"prior target ({prior_url})",
                         max_shares=recon_max_shares,
