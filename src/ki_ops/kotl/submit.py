@@ -6,11 +6,7 @@ SOD sources:
 
 - ``flex`` — live position book via ``ReplayPositions`` (``.US`` suffix
   stripped to bare tickers), with a reconciliation guard against yesterday's
-  target file. The guard runs **explained**: the prior day's ledger-recorded
-  unexecuted orders (partial fills, rejections) are the *expected* divergence
-  and don't count toward the thresholds — only unexplained book drift
-  (manual trades, dropped positions, a corrupted book) blocks
-  (``--no-recon-explained`` restores the raw strict compare);
+  target file;
 - ``prior-target`` — yesterday's ``Portfolio_*.csv`` located next to today's
   (``ki_ops.gate.find_prior_file``);
 - ``csv`` — explicit SOD CSV (legacy ``--sod``);
@@ -38,12 +34,11 @@ Safety rails on the live path:
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol, Sequence
 
 from ki_ops.kotl.fake_flex import FakeFlexAdapter
 from ki_ops.kotl.flex_map import (
@@ -97,15 +92,7 @@ class UnresolvedSecuritiesError(SubmitRefusedError):
 
 @dataclass(frozen=True)
 class ReconReport:
-    """Per-symbol Flex-book vs prior-target diff (bare tickers, signed shares).
-
-    With **explained recon** (an ``explained_unexecuted`` map from the prior
-    day's ledger — see :func:`ki_ops.kotl.target_mode.unexecuted_from_ledger`)
-    each symbol's expected divergence is ``−unexecuted`` (the book falls short
-    of the target by exactly what never executed); thresholds then apply to
-    the **unexplained** residual only. Without a map the unexplained numbers
-    mirror the raw ones and behavior is unchanged.
-    """
+    """Per-symbol Flex-book vs prior-target diff (bare tickers, signed shares)."""
 
     prior_file: str | None
     diffs: tuple[tuple[str, Decimal, Decimal, Decimal], ...]  # symbol, flex, prior, diff
@@ -113,53 +100,16 @@ class ReconReport:
     names_diverged: int
     max_shares: Decimal
     max_names: int
-    # symbol, flex, prior, diff, expected_diff, unexplained — rows where the
-    # raw diff or the unexplained residual is nonzero (explained recon only).
-    detail: tuple[tuple[str, Decimal, Decimal, Decimal, Decimal, Decimal], ...] = ()
-    total_abs_unexplained: Decimal = Decimal("0")
-    names_unexplained: int = 0
-    explained_active: bool = False
 
     @property
     def breached(self) -> bool:
-        return (
-            self.total_abs_unexplained > self.max_shares
-            or self.names_unexplained > self.max_names
-        )
-
-    @staticmethod
-    def _tabulate(cols: tuple[str, ...], table: list[tuple[str, ...]]) -> list[str]:
-        widths = [len(c) for c in cols]
-        for line in table:
-            for i, cell in enumerate(line):
-                widths[i] = max(widths[i], len(cell))
-        fmt = lambda cells: "  ".join(c.ljust(widths[i]) for i, c in enumerate(cells))
-        return [fmt(cols), fmt(tuple("-" * w for w in widths))] + [fmt(t) for t in table]
+        return self.total_abs_diff > self.max_shares or self.names_diverged > self.max_names
 
     def format_table(self) -> str:
         header = (
             f"SOD reconciliation — Flex book vs prior target"
             f" ({self.prior_file or 'no prior file'})"
         )
-        if self.explained_active:
-            if not self.detail:
-                return f"{header}\n  no divergence"
-            cols = (
-                "symbol", "flex_qty", "prior_target_qty", "diff",
-                "expected_diff", "unexplained",
-            )
-            table = [tuple(str(c) for c in row) for row in self.detail]
-            out = [header] + self._tabulate(cols, table)
-            out.append(
-                f"raw: total_abs_diff={self.total_abs_diff} "
-                f"names_diverged={self.names_diverged}; explained by prior-day "
-                f"unexecuted orders (ledger); unexplained: "
-                f"total_abs={self.total_abs_unexplained} "
-                f"names={self.names_unexplained} "
-                f"thresholds: max_shares={self.max_shares} max_names={self.max_names} "
-                f"breached={self.breached}"
-            )
-            return "\n".join(out)
         if not self.diffs:
             return f"{header}\n  no divergence"
         cols = ("symbol", "flex_qty", "prior_target_qty", "diff")
@@ -167,7 +117,13 @@ class ReconReport:
             (sym, str(flex_qty), str(prior_qty), str(diff))
             for sym, flex_qty, prior_qty, diff in self.diffs
         ]
-        out = [header] + self._tabulate(cols, table)
+        widths = [len(c) for c in cols]
+        for line in table:
+            for i, cell in enumerate(line):
+                widths[i] = max(widths[i], len(cell))
+        fmt = lambda cells: "  ".join(c.ljust(widths[i]) for i, c in enumerate(cells))
+        out = [header, fmt(cols), fmt(tuple("-" * w for w in widths))]
+        out.extend(fmt(line) for line in table)
         out.append(
             f"total_abs_diff={self.total_abs_diff} names_diverged={self.names_diverged} "
             f"thresholds: max_shares={self.max_shares} max_names={self.max_names} "
@@ -183,20 +139,10 @@ def reconcile_flex_vs_prior(
     prior_file: str | None,
     max_shares: Decimal = DEFAULT_RECON_MAX_SHARES,
     max_names: int = DEFAULT_RECON_MAX_NAMES,
-    explained_unexecuted: "Mapping[str, Decimal] | None" = None,
 ) -> ReconReport:
-    """Diff the live Flex book against the prior target, netting out
-    *explained_unexecuted* (prior-day unexecuted orders, signed, bare
-    tickers) before the thresholds — see :class:`ReconReport`."""
-    expected = {
-        str(sym).upper(): -qty for sym, qty in (explained_unexecuted or {}).items()
-    }
-    symbols = sorted(set(flex_bare) | set(prior_targets) | set(expected))
+    symbols = sorted(set(flex_bare) | set(prior_targets))
     diffs = []
-    detail = []
     total = Decimal("0")
-    total_unexplained = Decimal("0")
-    names_unexplained = 0
     for sym in symbols:
         flex_qty = flex_bare.get(sym, Decimal("0"))
         prior_qty = prior_targets.get(sym, Decimal("0"))
@@ -204,14 +150,6 @@ def reconcile_flex_vs_prior(
         if diff != 0:
             diffs.append((sym, flex_qty, prior_qty, diff))
             total += abs(diff)
-        expected_diff = expected.get(sym, Decimal("0"))
-        unexplained = diff - expected_diff
-        if unexplained != 0:
-            total_unexplained += abs(unexplained)
-            names_unexplained += 1
-        if diff != 0 or unexplained != 0:
-            detail.append((sym, flex_qty, prior_qty, diff, expected_diff, unexplained))
-    explained_active = bool(expected)
     return ReconReport(
         prior_file=prior_file,
         diffs=tuple(diffs),
@@ -219,10 +157,6 @@ def reconcile_flex_vs_prior(
         names_diverged=len(diffs),
         max_shares=max_shares,
         max_names=max_names,
-        detail=tuple(detail) if explained_active else (),
-        total_abs_unexplained=total_unexplained,
-        names_unexplained=names_unexplained,
-        explained_active=explained_active,
     )
 
 
@@ -341,17 +275,6 @@ def submit_rebalance_csv(
 def _bare_ticker(symbol: str, *, suffix: str = ".US") -> str:
     sym = str(symbol).strip().upper()
     return sym[: -len(suffix)] if suffix and sym.endswith(suffix) else sym
-
-
-def _portfolio_trade_date(url: str | Path) -> date | None:
-    """Trade date embedded in a ``Portfolio_<YYYYMMDD>.csv`` path, if any."""
-    match = re.search(r"Portfolio_(\d{8})", str(url))
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y%m%d").date()
-    except ValueError:
-        return None
 
 
 def _sod_from_shares(
@@ -627,7 +550,6 @@ def submit_kelai_shares(
     unresolved: str = "block",
     sedol_source: str | None = None,
     sent_source: str = "ledger",
-    recon_explained: bool = True,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -636,22 +558,6 @@ def submit_kelai_shares(
     ticker); prices and the ticker map come from ``ds2_data.h5`` on S3. Trades
     are ``target − SOD``; the SOD book comes from *sod_source* (see module
     docstring) — there is no silent default book.
-
-    **Explained SOD recon** (*recon_explained*, default on; ``flex`` SOD
-    only): the Flex-book-vs-prior-target compare first nets out the prior
-    day's **unexecuted** orders from the ledger
-    (:func:`ki_ops.kotl.target_mode.unexecuted_from_ledger` — accepted
-    partial-fill remainders plus rejected orders, re-send-deduplicated), so a
-    routine non-100%-fill day passes the strict ``0/0`` thresholds without an
-    operator approval while *unexplained* divergence — manual Flex trades,
-    dropped/corrupted positions, a stale prior file — still blocks (exit 4).
-    The recon table gains ``expected_diff`` / ``unexplained`` columns. A
-    ledger lookup failure only warns and falls back to the raw strict compare
-    (fail-strict, never fail-open). Fills must be current in the ledger (the
-    ``kotl refresh`` poller / EOD) for the mechanism to reduce friction:
-    stale zero fills make real fills show up as unexplained divergence, which
-    still blocks — conservative, but back to daily approvals until the
-    refresh pipeline is healthy.
 
     **Pre-submit security resolution** (FlexTrade's recommended workflow): for
     live envs (UAT/PROD) every payload symbol is checked through the Flex
@@ -797,60 +703,19 @@ def submit_kelai_shares(
             )
         else:
             prior_book, prior_url = prior
-
-            # Explained recon: net out the prior day's ledger-recorded
-            # unexecuted orders (partial fills, rejections) so routine
-            # shortfalls pass the strict thresholds while *unexplained*
-            # book drift still blocks. Any lookup failure degrades to the
-            # raw strict recon — never the other way.
-            explained_unexecuted: dict[str, Decimal] = {}
-            if recon_explained:
-                prior_dt = _portfolio_trade_date(prior_url)
-                if prior_dt is None:
-                    print(
-                        f"WARNING: no trade date in prior file name {prior_url} — "
-                        "recon runs unexplained (strict)"
-                    )
-                else:
-                    try:
-                        prior_working = store.load_working_orders(trade_date=prior_dt)
-                        if prior_working:
-                            explained_unexecuted = target_mode.unexecuted_from_ledger(
-                                store.load_submits(),
-                                prior_working,
-                                env=env,
-                                suffix=symbol_suffix,
-                            )
-                    except Exception as exc:
-                        print(
-                            f"WARNING: explained-recon ledger lookup failed ({exc}) — "
-                            "recon runs unexplained (strict)"
-                        )
-                if explained_unexecuted:
-                    explained_unexecuted = normalize_tickers_to_ds2(
-                        explained_unexecuted, snapshot, label="explained-recon"
-                    )
-                    print(
-                        f"explained-recon: {len(explained_unexecuted)} symbol(s) "
-                        f"with unexecuted {prior_dt} {env} orders in the ledger"
-                    )
-
             recon = reconcile_flex_vs_prior(
                 bare_book,
                 prior_book,
                 prior_file=prior_url,
                 max_shares=recon_max_shares,
                 max_names=recon_max_names,
-                explained_unexecuted=explained_unexecuted,
             )
             print(recon.format_table())
             if recon.breached and not dry_run:
                 raise ReconDivergenceError(
                     f"Flex book diverges from prior target {prior_url}: "
-                    f"unexplained_abs_diff={recon.total_abs_unexplained} shares over "
-                    f"{recon.names_unexplained} names (raw "
-                    f"{recon.total_abs_diff}/{recon.names_diverged}; "
-                    f"max_shares={recon_max_shares}, "
+                    f"total_abs_diff={recon.total_abs_diff} shares over "
+                    f"{recon.names_diverged} names (max_shares={recon_max_shares}, "
                     f"max_names={recon_max_names}) — raise --recon-max-shares/"
                     "--recon-max-names deliberately, or fix the book",
                     recon,
