@@ -60,10 +60,13 @@ DEFAULT_METADATA_KEY = "authorization"
 DEFAULT_SCHEME = "Bearer"
 DEFAULT_REGION = "us-east-1"
 
-# SOD position scoping (verified against live UAT ReplayPositions 2026-09-08):
-# rows carry account=KELAI and the *booking* fund derived from the position
-# group's fund splits (KEL-LOMB for USATop2000_strategy_v1) — not the payload
-# "fund" key.
+# SOD position scoping (verified against live UAT ReplayPositions 2026-09-10):
+# strategy-book rows carry the *position group* in the account field
+# (account=USATop2000_strategy_v1) and the *booking* fund derived from the
+# position group's fund splits (KEL-LOMB) — not the payload "fund" key.
+# Non-strategy seed rows (e.g. the CAP.FP setup position) carry account=KELAI
+# with fund=Unset. The account filter therefore accepts either the configured
+# account or the position group.
 DEFAULT_SOD_ACCOUNT = "KELAI"
 DEFAULT_SOD_FUND = "KEL-LOMB"
 
@@ -76,9 +79,11 @@ GRPC_OPTIONS = [
 CREATE_TIMEOUT_S = 40.0
 QUERY_TIMEOUT_S = 100.0
 
-# Plain US equity in Flex symbology: TICKER.US, ticker alnum (hyphen for share
-# classes). Excludes non-US listings (18880.KS) and option symbols (spaces).
-_PLAIN_US_EQUITY = re.compile(r"^[A-Z0-9\-]{1,12}\.US$")
+# Plain US equity in Flex symbology: TICKER.US, ticker alnum with hyphen or
+# slash for share classes (live UAT book 2026-09-10 holds BRK/B.US, BF/B.US,
+# LEN/B.US, HEI/A.US — the same slash form the submit path trades). Excludes
+# non-US listings (18880.KS) and option symbols (spaces).
+_PLAIN_US_EQUITY = re.compile(r"^[A-Z0-9\-/]{1,12}\.US$")
 
 
 class FlexSdkMissingError(RuntimeError):
@@ -733,7 +738,9 @@ def fetch_flex_positions(
       *account* / *fund* / *position_group* and to plain-equity
       ``symbol_suffix`` symbols (non-US listings and option symbols are
       dropped), zero rows excluded. *account* defaults to
-      ``KOTL_FLEX_SOD_ACCOUNT`` env or ``KELAI``; *fund* defaults to
+      ``KOTL_FLEX_SOD_ACCOUNT`` env or ``KELAI``; strategy-book rows carry the
+      *position group* in the account field (verified live 2026-09-10), so a
+      row's account may match either. *fund* defaults to
       ``KOTL_FLEX_SOD_FUND`` env or ``KEL-LOMB`` (the **booking** fund the
       position group allocates to — not the payload ``fund`` key).
     - *raw_rows*: every replayed row, unfiltered, for diagnostics.
@@ -760,7 +767,10 @@ def fetch_flex_positions(
     positions: dict[str, Decimal] = {}
     for row in raw_rows:
         symbol = str(row["symbol"]).strip().upper()
-        if account and row.get("account") and str(row["account"]) != account:
+        # Live UAT 2026-09-10: strategy-book rows carry the position group in
+        # the account field, not KELAI — accept either.
+        row_account = str(row.get("account") or "")
+        if account and row_account and row_account not in (account, position_group):
             continue
         if fund and row.get("fund") and str(row["fund"]) != fund:
             continue
