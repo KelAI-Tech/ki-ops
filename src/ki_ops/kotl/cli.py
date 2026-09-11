@@ -133,6 +133,16 @@ def register_kotl_parser(sub) -> None:
         "what already went out",
     )
     sk.add_argument(
+        "--no-route",
+        action="store_true",
+        help="safe live test (FlexTrade-confirmed): send every order with blank "
+        "broker/algo and NO_AUTOMATION — Flex accepts and books them but nothing "
+        "goes to the street (no fills, no PnL). Still a real submit: claim taken, "
+        "ledger written, and target mode counts the staged orders as sent, so "
+        "routed trading for this (trade-date, env) is consumed for the day; "
+        "cancel the staged orders in the Flex UI or let GFD expire them",
+    )
+    sk.add_argument(
         "--allow-outside-market-hours",
         action="store_true",
         help="override the NYSE market-hours gate (live submits are otherwise "
@@ -375,6 +385,7 @@ def run_kotl(args) -> int:
                 allow_outside_market_hours=getattr(
                     args, "allow_outside_market_hours", False
                 ),
+                no_route=getattr(args, "no_route", False),
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")
@@ -396,6 +407,7 @@ def run_kotl(args) -> int:
                     "trade_date": args.trade_date.isoformat(),
                     "env": flex_env,
                     "dry_run": getattr(args, "dry_run", False),
+                    "no_route": getattr(args, "no_route", False),
                     "target_covered": bool(
                         (submit.flex_response or {}).get("target_covered")
                     ),

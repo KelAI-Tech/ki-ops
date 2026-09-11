@@ -9,6 +9,7 @@ from ki_ops.kotl.flex_map import (
     FlexOrderDefaults,
     flex_orders_from_rebalance_csv,
     flex_symbol,
+    no_route_defaults,
     order_to_flex_dict,
     orders_to_flex_dicts,
 )
@@ -57,3 +58,27 @@ def test_flex_orders_from_example_rebalance_csv():
 
 def test_orders_to_flex_dicts_empty():
     assert orders_to_flex_dicts([]) == []
+
+
+def test_no_route_defaults_blanks_only_routing_fields():
+    cfg = no_route_defaults()
+    assert cfg.broker == ""
+    assert cfg.algo == ""
+    assert cfg.broker_automation_type == "NO_AUTOMATION"
+    base = FlexOrderDefaults()
+    assert cfg.fund == base.fund
+    assert cfg.position_group == base.position_group
+    assert cfg.order_type == base.order_type
+    assert cfg.time_in_force == base.time_in_force
+
+    custom = FlexOrderDefaults(position_group="OtherGroup")
+    assert no_route_defaults(custom).position_group == "OtherGroup"
+
+
+def test_no_route_payload_has_blank_broker_and_algo():
+    order = Order("AMZN", Side.BUY, Decimal("12"), Decimal("186"), None)
+    payload = order_to_flex_dict(order, defaults=no_route_defaults(), submit_id="sub-x")
+    assert payload["broker"] == ""
+    assert payload["algo"] == ""
+    assert payload["brokerAutomationType"] == "NO_AUTOMATION"
+    assert payload["symbol"] == "AMZN.US"  # everything else unchanged
