@@ -283,7 +283,7 @@ fills` — unexplained drift (manual Flex trades, missed fills) is the intraday
 alarm, **exit 8**, with the snapshot recorded either way. Missing prices, duplicate
 tickers, and fractional shares abort the submit. Safety rails on every
 submit: a **market-hours gate** (live envs refuse to send outside NYSE
-trading days 07:00 ET–close, early closes included, **exit 7**; rules-based
+trading days 03:00 ET–close, early closes included, **exit 7**; rules-based
 calendar in [`kotl/market_hours.py`](src/ki_ops/kotl/market_hours.py),
 override deliberately with `--allow-outside-market-hours`), **target mode**
 (below — the never-trade-past-the-target invariant), `--dry-run` (build +
