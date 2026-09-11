@@ -7,7 +7,12 @@ import io
 from datetime import date
 from pathlib import Path
 
-from ki_ops.kotl.cli import EXIT_RECON_DIVERGENCE, EXIT_SUBMIT_REFUSED, run_kotl
+from ki_ops.kotl.cli import (
+    EXIT_BOOK_AUDIT_DRIFT,
+    EXIT_RECON_DIVERGENCE,
+    EXIT_SUBMIT_REFUSED,
+    run_kotl,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -260,3 +265,50 @@ def test_kotl_cli_refresh_and_eod_live_source(tmp_path, monkeypatch):
     assert rc == 3
     assert '"fixture": "live"' in buf.getvalue()
     assert (data_dir / "eod" / "2026-08-06" / "report.json").exists()
+
+
+def test_kotl_cli_snapshot_book_exit_codes(tmp_path, monkeypatch):
+    from decimal import Decimal
+
+    from ki_ops.kotl.store import KotlStore
+    from tests.kotl.fake_flex_sdk import FakeFlexBackend, install_fake_sdk, make_position
+
+    monkeypatch.setenv("KOTL_FLEX_ENDPOINT", "127.0.0.1:50051")
+    monkeypatch.setenv("KOTL_FLEX_TOKEN", "tok")
+    backend = FakeFlexBackend()
+    backend.positions = [make_position("WM.US", 5.0)]
+    install_fake_sdk(monkeypatch, backend)
+
+    def _args(**kwargs):
+        base = dict(
+            kotl_command="snapshot-book",
+            flex_env="UAT",
+            as_of=None,
+            audit=True,
+            dry_run=False,
+            data_dir=tmp_path / "kotl",
+        )
+        base.update(kwargs)
+        return Args(**base)
+
+    # bootstrap night: records, audit skipped, exit 0
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_args(as_of=date(2026, 9, 9)))
+    assert rc == 0
+    out = buf.getvalue()
+    assert '"recorded": true' in out
+    assert "bootstrap night" in out
+
+    # next night the book moved with no ledger fills → drift, exit 8
+    backend.positions = [make_position("WM.US", 6.0)]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_args(as_of=date(2026, 9, 10)))
+    assert rc == EXIT_BOOK_AUDIT_DRIFT
+    out = buf.getvalue()
+    assert "DRIFT" in out
+    # the snapshot is still recorded — it is the factual book
+    assert KotlStore(tmp_path / "kotl").load_book_snapshot(date(2026, 9, 10), "UAT") == {
+        "WM.US": Decimal("6")
+    }

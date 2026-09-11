@@ -5,8 +5,12 @@ file (targets) + ds2 prices + a **SOD source** → trade intents → Flex submit
 SOD sources:
 
 - ``flex`` — live position book via ``ReplayPositions`` (``.US`` suffix
-  stripped to bare tickers), with a reconciliation guard against yesterday's
-  target file;
+  stripped to bare tickers), with a reconciliation guard: the live book must
+  match the latest **overnight book snapshot** (``kotl snapshot-book``,
+  captured nightly after the close) — a trivial book-vs-book equality, no
+  explanation heuristics, strict ``0/0`` by default. When no snapshot exists
+  (bootstrap) the guard falls back to comparing against yesterday's target
+  file;
 - ``prior-target`` — yesterday's ``Portfolio_*.csv`` located next to today's
   (``ki_ops.gate.find_prior_file``);
 - ``csv`` — explicit SOD CSV (legacy ``--sod``);
@@ -64,7 +68,7 @@ class FlexSubmitAdapter(Protocol):
 
 
 class ReconDivergenceError(RuntimeError):
-    """Flex book vs prior-target divergence beyond thresholds (CLI exit 4)."""
+    """Live Flex book vs recon-baseline divergence beyond thresholds (CLI exit 4)."""
 
     def __init__(self, message: str, report: "ReconReport") -> None:
         super().__init__(message)
@@ -92,10 +96,16 @@ class UnresolvedSecuritiesError(SubmitRefusedError):
 
 @dataclass(frozen=True)
 class ReconReport:
-    """Per-symbol Flex-book vs prior-target diff (bare tickers, signed shares)."""
+    """Per-symbol live-Flex-book vs recon-baseline diff (signed shares).
 
-    prior_file: str | None
-    diffs: tuple[tuple[str, Decimal, Decimal, Decimal], ...]  # symbol, flex, prior, diff
+    The baseline is either the latest overnight **book snapshot** (canonical
+    Flex symbols; the normal case) or, when no snapshot exists yet, the prior
+    day's **target file** (bare ds2 tickers; bootstrap fallback) — the
+    *baseline* label says which.
+    """
+
+    baseline: str
+    diffs: tuple[tuple[str, Decimal, Decimal, Decimal], ...]  # symbol, live, baseline, diff
     total_abs_diff: Decimal
     names_diverged: int
     max_shares: Decimal
@@ -106,16 +116,13 @@ class ReconReport:
         return self.total_abs_diff > self.max_shares or self.names_diverged > self.max_names
 
     def format_table(self) -> str:
-        header = (
-            f"SOD reconciliation — Flex book vs prior target"
-            f" ({self.prior_file or 'no prior file'})"
-        )
+        header = f"SOD reconciliation — live Flex book vs {self.baseline}"
         if not self.diffs:
             return f"{header}\n  no divergence"
-        cols = ("symbol", "flex_qty", "prior_target_qty", "diff")
+        cols = ("symbol", "flex_qty", "baseline_qty", "diff")
         table = [
-            (sym, str(flex_qty), str(prior_qty), str(diff))
-            for sym, flex_qty, prior_qty, diff in self.diffs
+            (sym, str(flex_qty), str(baseline_qty), str(diff))
+            for sym, flex_qty, baseline_qty, diff in self.diffs
         ]
         widths = [len(c) for c in cols]
         for line in table:
@@ -132,26 +139,27 @@ class ReconReport:
         return "\n".join(out)
 
 
-def reconcile_flex_vs_prior(
-    flex_bare: dict[str, Decimal],
-    prior_targets: dict[str, Decimal],
+def reconcile_books(
+    live: dict[str, Decimal],
+    baseline_book: dict[str, Decimal],
     *,
-    prior_file: str | None,
+    baseline: str,
     max_shares: Decimal = DEFAULT_RECON_MAX_SHARES,
     max_names: int = DEFAULT_RECON_MAX_NAMES,
 ) -> ReconReport:
-    symbols = sorted(set(flex_bare) | set(prior_targets))
+    """Diff two books in the same symbol vocabulary — see :class:`ReconReport`."""
+    symbols = sorted(set(live) | set(baseline_book))
     diffs = []
     total = Decimal("0")
     for sym in symbols:
-        flex_qty = flex_bare.get(sym, Decimal("0"))
-        prior_qty = prior_targets.get(sym, Decimal("0"))
-        diff = flex_qty - prior_qty
+        flex_qty = live.get(sym, Decimal("0"))
+        baseline_qty = baseline_book.get(sym, Decimal("0"))
+        diff = flex_qty - baseline_qty
         if diff != 0:
-            diffs.append((sym, flex_qty, prior_qty, diff))
+            diffs.append((sym, flex_qty, baseline_qty, diff))
             total += abs(diff)
     return ReconReport(
-        prior_file=prior_file,
+        baseline=baseline,
         diffs=tuple(diffs),
         total_abs_diff=total,
         names_diverged=len(diffs),
@@ -559,6 +567,21 @@ def submit_kelai_shares(
     are ``target − SOD``; the SOD book comes from *sod_source* (see module
     docstring) — there is no silent default book.
 
+    **SOD recon** (``flex`` SOD only): before anything is sent, the live book
+    is diffed against the latest overnight **book snapshot** captured by the
+    nightly ``kotl snapshot-book`` job (:mod:`ki_ops.kotl.book_snapshot`) —
+    both books in canonical Flex symbols, so it is a trivial equality check.
+    Overnight nothing should move, so the strict default thresholds (``0/0``,
+    *recon_max_shares* / *recon_max_names*) hold on a normal day regardless of
+    how yesterday's orders filled — partial fills, rejections and multi-step
+    sends are already inside the snapshot. Divergence means overnight drift
+    (manual trades, corporate actions, a Flex-side book change) and blocks
+    with :class:`ReconDivergenceError` (exit 4) until thresholds are raised
+    deliberately. Bootstrap fallback when no snapshot exists yet: the diff
+    runs against yesterday's target file (bare tickers) instead — on that
+    basis unexecuted orders do show as divergence and need a deliberate
+    threshold override.
+
     **Pre-submit security resolution** (FlexTrade's recommended workflow): for
     live envs (UAT/PROD) every payload symbol is checked through the Flex
     ``SecurityService`` first (:mod:`ki_ops.kotl.flex_symbols`) and rewritten
@@ -694,26 +717,19 @@ def submit_kelai_shares(
         )
         sod = _sod_from_shares(bare_book, snapshot, target_tickers, label="flex")
 
-        # Reconciliation guard: Flex book vs yesterday's target file.
-        prior = _prior_target_book()
-        if prior is None:
-            print(
-                f"WARNING: no prior Portfolio_*.csv before {trade_date.isoformat()} "
-                f"next to {shares_url} — skipping Flex-vs-prior-target reconciliation"
-            )
-        else:
-            prior_book, prior_url = prior
-            recon = reconcile_flex_vs_prior(
-                bare_book,
-                prior_book,
-                prior_file=prior_url,
-                max_shares=recon_max_shares,
-                max_names=recon_max_names,
-            )
+        # Reconciliation guard: the live book must match the latest overnight
+        # book snapshot (``kotl snapshot-book``, captured nightly after the
+        # close). Book-vs-book in canonical Flex symbols — overnight nothing
+        # should move, so the strict 0/0 default thresholds are the right
+        # ones and need no explanation heuristics. Bootstrap fallback (no
+        # snapshot yet): compare against yesterday's target file in bare
+        # tickers — a routine partial-fill day then shows as divergence and
+        # needs a deliberate threshold override.
+        def _recon_guard(recon: ReconReport) -> None:
             print(recon.format_table())
             if recon.breached and not dry_run:
                 raise ReconDivergenceError(
-                    f"Flex book diverges from prior target {prior_url}: "
+                    f"live Flex book diverges from {recon.baseline}: "
                     f"total_abs_diff={recon.total_abs_diff} shares over "
                     f"{recon.names_diverged} names (max_shares={recon_max_shares}, "
                     f"max_names={recon_max_names}) — raise --recon-max-shares/"
@@ -722,6 +738,50 @@ def submit_kelai_shares(
                 )
             if recon.breached:
                 print("DRY RUN: recon thresholds breached — a live submit would abort (exit 4)")
+
+        snap = store.load_latest_book_snapshot(env, before=trade_date)
+        if snap is not None:
+            snap_as_of, snap_book = snap
+            age_days = (trade_date - snap_as_of).days
+            if age_days > 4:
+                print(
+                    f"WARNING: latest {env} book snapshot is {age_days} days old "
+                    f"(as of {snap_as_of.isoformat()}) — is the nightly "
+                    "snapshot-book job running?"
+                )
+            _recon_guard(
+                reconcile_books(
+                    {str(sym).upper(): qty for sym, qty in flex_positions.items()},
+                    snap_book,
+                    baseline=f"book snapshot as of {snap_as_of.isoformat()}",
+                    max_shares=recon_max_shares,
+                    max_names=recon_max_names,
+                )
+            )
+        else:
+            prior = _prior_target_book()
+            if prior is None:
+                print(
+                    f"WARNING: no {env} book snapshot and no prior Portfolio_*.csv "
+                    f"before {trade_date.isoformat()} next to {shares_url} — "
+                    "skipping SOD reconciliation"
+                )
+            else:
+                prior_book, prior_url = prior
+                print(
+                    f"WARNING: no {env} book snapshot before "
+                    f"{trade_date.isoformat()} (run kotl snapshot-book nightly) — "
+                    "recon falls back to the prior target file"
+                )
+                _recon_guard(
+                    reconcile_books(
+                        bare_book,
+                        prior_book,
+                        baseline=f"prior target ({prior_url})",
+                        max_shares=recon_max_shares,
+                        max_names=recon_max_names,
+                    )
+                )
     elif source == "prior-target":
         prior = _prior_target_book()
         if prior is None:

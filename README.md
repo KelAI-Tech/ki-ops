@@ -233,8 +233,9 @@ ki-ops is pre-trade (intents + gates). **KOTL** is the KelAI-side **sent / done 
 - **`flex_order_id`** — from Flex create response; join key for refresh / fill updates
 
 Store: CSV (`submits.csv`, `working_orders.csv`, default) **or MySQL**
-(`--store mysql` on submit-kelai/refresh/status/eod; tables `kotl_submits`,
-`kotl_working_orders`, `kotl_eod_snapshots`, idempotent DDL on first use;
+(`--store mysql` on submit-kelai/snapshot-book/refresh/status/eod; tables
+`kotl_submits`, `kotl_working_orders`, `kotl_eod_snapshots`,
+`kotl_book_snapshots`, idempotent DDL on first use;
 creds from `KOTL_DB_*` env vars or `--db-secret dev/kelaidb --db-schema kelai`;
 `pip install "ki-ops[db]"`, local dev via `docker-compose.kotl-db.yml`).
 
@@ -267,9 +268,19 @@ and prior-close prices + the point-in-time ticker map straight from the ds2 H5
 (`s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5`, read row-wise with h5py —
 no CSV exports). SOD comes from `--sod-source {flex,prior-target,csv,flat}`
 (legacy `--sod` CSV / `--assume-flat-sod` still map to csv/flat); with
-`flex` the book is reconciled against yesterday's target file and the submit
-aborts on divergence (**exit 4**, thresholds `--recon-max-shares` /
-`--recon-max-names`, strict `0/0` defaults). Missing prices, duplicate
+`flex` the live book is reconciled against the latest **overnight book
+snapshot** and the submit aborts on divergence (**exit 4**, thresholds
+`--recon-max-shares` / `--recon-max-names`, strict `0/0` defaults — overnight
+nothing should move, so partial fills / rejections never need an override;
+bootstrap fallback when no snapshot exists: yesterday's target file, where
+unexecuted orders *do* show as divergence). The snapshot comes from the
+nightly **`kotl snapshot-book`** job
+([`kotl/book_snapshot.py`](src/ki_ops/kotl/book_snapshot.py)): after the
+close it refreshes the ledger (live `GetOrderInfo2`), captures the full
+signed book via `ReplayPositions` first-wins into `kotl_book_snapshots`
+(canonical Flex symbols), and **audits** `book == previous snapshot + ledger
+fills` — unexplained drift (manual Flex trades, missed fills) is the intraday
+alarm, **exit 8**, with the snapshot recorded either way. Missing prices, duplicate
 tickers, and fractional shares abort the submit. Safety rails on every
 submit: **target mode** (below — the never-trade-past-the-target invariant),
 `--dry-run` (build + print + trade file, no gRPC, no ledger write, no claim),
@@ -365,6 +376,7 @@ ki-ops kotl refresh --trade-date 2026-08-06 --source live --flex-env UAT # live 
 ki-ops kotl status --trade-date 2026-08-06
 ki-ops kotl status --trade-date 2026-08-06 --json
 ki-ops kotl eod --trade-date 2026-08-06 [--fixture PATH | --source live] [--tolerance N] [--json] [--notify] [--eod-dir PATH]
+ki-ops kotl snapshot-book --flex-env UAT --store mysql                   # nightly, after the close
 ```
 
 **End-of-day loop:** `kotl eod` refreshes fills (fixture/export, or live
