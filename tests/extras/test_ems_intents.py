@@ -163,7 +163,6 @@ def test_evaluate_parquet_sod_vs_ems_intents(tmp_path: Path):
             min_order_size=Decimal("1"),
             max_order_size=Decimal("10000000"),
             max_orders_per_minute=100000,
-            max_turnover=Decimal("1"),
         )
     )
     out = evaluate_ems_against_alpha_sod(

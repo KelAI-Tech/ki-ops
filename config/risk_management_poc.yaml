@@ -28,7 +28,10 @@ risk_management:
 
   # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / position GMV.
   # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
-  max_turnover: 0.25
+  # Soft warn above mean; hard block above mean+2σ (here 0.33).
+  turnover_mean: 0.25
+  turnover_std: 0.04
+  allow_turnover_override: false
   # |NMV|/GMV on the projected book (market-neutral band).
   max_net_exposure: 0.10
   # Max abs(order shares) / ADV20_ADJ; warn only for now (does not block).

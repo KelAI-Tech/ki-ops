@@ -24,7 +24,6 @@ PERMISSIVE = dict(
     min_order_size=Decimal("1"),
     max_order_size=Decimal("1000000"),
     max_orders_per_minute=100000,
-    max_turnover=Decimal("1"),
 )
 
 
@@ -93,7 +92,6 @@ def test_missing_price_blocks_run_perturb(tmp_path: Path, capsys):
     cfg = tmp_path / "risk.yaml"
     cfg.write_text(
         "risk_management:\n"
-        "  max_turnover: 1\n"
         "  max_position_size: 1000000\n"
         "  max_portfolio_value: 1000000\n"
         "  max_position_concentration: 1\n"

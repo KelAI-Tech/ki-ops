@@ -18,6 +18,7 @@ BOOLS = {
     "pre_market_trading",
     "after_hours_trading",
     "allow_shorts",
+    "allow_turnover_override",
 }
 INTS = {"volatility_lookback", "max_orders_per_minute"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -60,7 +61,15 @@ class RiskManagementSettings:
     after_hours_trading: bool = False
     # TWO-WAY turnover: (buy$ + sell$) / position GMV — kelaisim's convention.
     # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
-    max_turnover: Decimal = Decimal("0.25")
+    #
+    # Statistical band (requires turnover_mean > 0 and turnover_std > 0):
+    #   mean < TO ≤ mean + 2σ  → WARN_TURNOVER (no block)
+    #   TO > mean + 2σ         → MAX_TURNOVER block, unless allow_turnover_override
+    #                            (override downgrades to TURNOVER_OVERRIDE warn)
+    # When mean/σ are unset (0), the turnover check is skipped.
+    turnover_mean: Decimal = Decimal("0")
+    turnover_std: Decimal = Decimal("0")
+    allow_turnover_override: bool = False
     # |NMV|/GMV on the projected book. 1.0 = 100% (effectively off).
     max_net_exposure: Decimal = Decimal("1")
     # Max abs(order shares) / ADV. 0 disables. Over-cap is a warning for now.
@@ -119,3 +128,14 @@ def load_risk_settings(path: str | Path | None = None) -> RiskManagementSettings
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             return RiskManagementSettings.from_mapping(data)
     return RiskManagementSettings()
+
+
+def with_turnover_override(
+    settings: RiskManagementSettings, override: bool
+) -> RiskManagementSettings:
+    """Return settings with ``allow_turnover_override`` set when *override* is true."""
+    if not override:
+        return settings
+    from dataclasses import replace
+
+    return replace(settings, allow_turnover_override=True)
