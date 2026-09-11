@@ -68,6 +68,34 @@ def test_sedol_query_shape():
     assert "QUALIFY" in sql  # dedupe guard: one row per infocode
 
 
+def test_infocode_query_shape():
+    sql = sm._infocode_query("LSEG_CANARY", ["2073390", "BP4CXL8"])
+    assert "KELAI.LSEG_CANARY.SECURITY_MASTER_DT" in sql
+    assert "IN ('2073390','BP4CXL8')" in sql
+    assert "INFOCODE IS NOT NULL" in sql
+    assert "QUALIFY" in sql  # dedupe guard: one row per SEDOL
+
+
+def test_fetch_infocodes_by_sedol_basic():
+    conn = FakeConnection(lambda sql: [("2073390", 71571), ("BP4CXL8", "36100 ")])
+    out = sm.fetch_infocodes_by_sedol(
+        ["2073390", "bp4cxl8 ", "2073390"], env="UAT", connection=conn
+    )
+    assert out == {"2073390": "71571", "BP4CXL8": "36100"}
+    assert conn.closed is False
+    assert conn.cursor_obj.closed is True
+
+
+def test_fetch_infocodes_by_sedol_rejects_malformed():
+    """Non-SEDOL-shaped strings never reach the IN-list (injection guard)."""
+    conn = FakeConnection(lambda sql: [])
+    out = sm.fetch_infocodes_by_sedol(
+        ["2073390'; DROP TABLE x;--", "", "TOOLONGSEDOL", None], connection=conn
+    )
+    assert out == {}
+    assert conn.cursor_obj.executed == []  # nothing valid → no query at all
+
+
 def test_fetch_sedols_by_infocode_basic():
     conn = FakeConnection(lambda sql: [(36100, "2198163"), (71571, "2073390 ")])
     out = sm.fetch_sedols_by_infocode(

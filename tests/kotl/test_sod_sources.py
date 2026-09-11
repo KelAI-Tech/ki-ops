@@ -386,6 +386,54 @@ def test_flex_book_to_ds2_translates_sedol_and_class_share_names(
     assert "CCCS.US→CCC" in out and "BF/B.US→BFB" in out
 
 
+def test_flex_book_to_ds2_reverse_maps_sod_only_dropped_names(
+    tmp_path, monkeypatch, capsys
+):
+    """Positions today's target dropped (zero-target / disappeared names, the
+    2026-09-11 second failure): the target-based inverse map cannot know them,
+    so the leftover live symbol is reverse-resolved — Flex master SEDOL →
+    security master infocode → snapshot ds2 ticker. Names with no SEDOL→ds2
+    hop keep the bare ticker (and fail closed downstream)."""
+    backend = FakeFlexBackend()
+    backend.security_master = [
+        make_security("CCCS.US", 1, identifiers=[(ID_SEDOL, "BP4CXL8")]),
+        make_security("BRK/B.US", 2, identifiers=[(ID_SEDOL, "2073390")]),
+        make_security("ATGE.US", 3, identifiers=[(ID_SEDOL, "2110255")]),
+        make_security("ZZZQ.US", 4),  # no SEDOL in the master
+    ]
+    install_fake_sdk(monkeypatch, backend)
+    book = _flex_book_to_ds2(
+        {
+            "CCCS.US": Decimal("100"),  # in target — first-pass inverse map
+            "BRK/B.US": Decimal("10"),  # dropped slash class share
+            "ATGE.US": Decimal("5"),  # dropped ds2-renamed name
+            "ZZZQ.US": Decimal("1"),  # unmappable — stays bare
+        },
+        snapshot=SimpleNamespace(
+            infocode_by_ticker={"CCC": "7", "BRKB": "55", "DV": "56"},
+            price=lambda ticker: None,
+        ),
+        target_tickers={"CCC"},
+        env="UAT",
+        flex_config=FLEX_CONFIG,
+        symbol_suffix=".US",
+        sedol_source=str(
+            _sedol_csv(tmp_path, {"7": "BP4CXL8", "55": "2073390", "56": "2110255"})
+        ),
+        cache_dir=tmp_path / "cache",
+        data_dir=None,
+    )
+    assert book == {
+        "CCC": Decimal("100"),
+        "BRKB": Decimal("10"),
+        "DV": Decimal("5"),
+        "ZZZQ": Decimal("1"),
+    }
+    out = capsys.readouterr().out
+    assert "BRK/B.US→BRKB" in out and "ATGE.US→DV" in out
+    assert "no SEDOL→ds2 mapping" in out and "ZZZQ.US" in out
+
+
 def test_flex_book_to_ds2_outage_warns_and_falls_back(tmp_path, monkeypatch, capsys):
     backend = FakeFlexBackend()
     backend.security_error = RuntimeError("flex is down")
@@ -428,21 +476,25 @@ def test_flex_book_to_ds2_collision_refuses(tmp_path, monkeypatch):
 
 
 def test_uat_flex_sod_prices_sedol_translated_position(tmp_path, monkeypatch, capsys):
-    """Regression for the 2026-09-11 prod failure: we hold CCCS.US (bought by
-    yesterday's submit under the canonical Flex spelling of ds2 ticker CCC).
-    Without the inverse map this raised ``1 flex SOD tickers have no ds2
-    close``; with it the position joins the CCC target and the send is the
-    30-share top-up — not a CCCS flatten next to a 50-share CCC buy."""
+    """Regression for the 2026-09-11 prod failures: we hold CCCS.US (bought by
+    yesterday's submit under the canonical Flex spelling of ds2 ticker CCC —
+    still in today's target) and BRK/B.US (ds2 BRKB, dropped from today's
+    target → flatten). Without the inverse map the first raised ``flex SOD
+    tickers have no ds2 close``; without the reverse SOD-only pass the second
+    did. Now CCC tops up 30 and BRKB flattens −10, both sent under their
+    canonical Flex symbols."""
     shares = tmp_path / "Portfolio_20260806.csv"
     shares.write_text("CCC,50,VWAP\nAAPL,-30,VWAP\n")
     backend = FakeFlexBackend()
     backend.security_master = [
         make_security("CCCS.US", 1, identifiers=[(ID_SEDOL, "BP4CXL8")]),
         make_security("AAPL.US", 2),
+        make_security("BRK/B.US", 3, identifiers=[(ID_SEDOL, "2073390"), (ID_TICKER, "BRK.B")]),
     ]
     install_fake_sdk(monkeypatch, backend)
-    h5 = make_ds2_h5(tmp_path / "ds2.h5", tickers=("CCC", "AAPL"))
-    sedol_csv = _sedol_csv(tmp_path, {"101": "BP4CXL8"})  # tickers-mode infocodes 101+
+    h5 = make_ds2_h5(tmp_path / "ds2.h5", tickers=("CCC", "AAPL", "BRKB"))
+    # tickers-mode infocodes are 101+i: CCC=101, AAPL=102, BRKB=103
+    sedol_csv = _sedol_csv(tmp_path, {"101": "BP4CXL8", "103": "2073390"})
 
     store = KotlStore(tmp_path / "kotl")
     submit = submit_kelai_shares(
@@ -451,7 +503,7 @@ def test_uat_flex_sod_prices_sedol_translated_position(tmp_path, monkeypatch, ca
         shares_file=shares,
         ds2_h5=h5,
         sod_source="flex",
-        flex_positions={"CCCS.US": Decimal("20")},
+        flex_positions={"CCCS.US": Decimal("20"), "BRK/B.US": Decimal("10")},
         flex_config=FLEX_CONFIG,
         env="UAT",
         sedol_source=str(sedol_csv),
@@ -464,9 +516,10 @@ def test_uat_flex_sod_prices_sedol_translated_position(tmp_path, monkeypatch, ca
     assert {r.symbol: r.sent_qty for r in rows} == {
         "CCCS.US": Decimal("30"),  # 50 target − 20 held, sent as canonical Flex
         "AAPL.US": Decimal("-30"),
+        "BRK/B.US": Decimal("-10"),  # dropped name flattened at the ds2 close
     }
     out = capsys.readouterr().out
-    assert "CCCS.US→CCC" in out
+    assert "CCCS.US→CCC" in out and "BRK/B.US→BRKB" in out
 
 
 def test_strategy_id_shares_path():
