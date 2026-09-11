@@ -179,15 +179,80 @@ def drop_untradable_orders(
     return kept, findings
 
 
+TURNOVER_BAND_LOGIC = (
+    "max_turnover is mean+2*std (effective hard ceiling). "
+    "mean < TO <= mean+2*std -> WARN_TURNOVER (soft, no block); "
+    "TO > mean+2*std -> MAX_TURNOVER block "
+    "(--override-turnover -> TURNOVER_OVERRIDE warn); "
+    "check skipped when turnover_mean/turnover_std unset"
+)
+
+
+def turnover_band_thresholds(
+    settings: RiskManagementSettings,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Return ``(warn_above, block_above)`` for two-way turnover.
+
+    When mean/σ are set: soft warn above *mean*, hard block above *mean + 2σ*.
+    Otherwise both are ``None`` (turnover check skipped).
+    """
+    mean = settings.turnover_mean
+    std = settings.turnover_std
+    if mean > 0 and std > 0:
+        return mean, mean + (2 * std)
+    return None, None
+
+
+def turnover_band_findings(
+    ratio: Decimal,
+    settings: RiskManagementSettings,
+    *,
+    block_code: str = "MAX_TURNOVER",
+    warn_code: str = "WARN_TURNOVER",
+    override_code: str = "TURNOVER_OVERRIDE",
+) -> list[CheckViolation]:
+    """Two-way turnover band from history mean / σ, with optional block override.
+
+    When ``turnover_mean > 0`` and ``turnover_std > 0``:
+
+    - ``mean < ratio ≤ mean + 2σ`` → soft ``WARN_TURNOVER`` (no block)
+    - ``ratio > mean + 2σ`` → ``MAX_TURNOVER`` block, or ``TURNOVER_OVERRIDE``
+      warn when ``allow_turnover_override`` is set
+
+    When mean/σ are unset, returns no findings (check skipped).
+    """
+    warn_above, block_above = turnover_band_thresholds(settings)
+    if warn_above is None or block_above is None:
+        return []
+
+    mean = settings.turnover_mean
+    std = settings.turnover_std
+    if ratio > block_above:
+        msg = (
+            f"{ratio:.4f} > mean+2*std {block_above:.4f} "
+            f"(mean {mean}, std {std})"
+        )
+        if settings.allow_turnover_override:
+            return [warn(override_code, f"{msg}; override allowed")]
+        return [block(block_code, msg)]
+    if ratio > warn_above:
+        return [
+            warn(
+                warn_code,
+                f"{ratio:.4f} > mean {mean} "
+                f"(std {std}; block above {block_above:.4f})",
+            )
+        ]
+    return []
+
+
 def check_turnover(portfolio: Portfolio, orders: Sequence[Order], settings: RiskManagementSettings) -> list[CheckViolation]:
     ratio = turnover_ratio(portfolio, orders)
     if not ratio.is_finite():
         # Non-zero trade intents against a zero/negative gross-exposure book:
         # the turnover base is meaningless, so fail loudly instead of comparing.
         return [block("ZERO_GMV_BASE", "trade intents against a book with zero gross exposure")]
-    if ratio > settings.max_turnover:
-        return [block("MAX_TURNOVER", f"{ratio:.4f} > {settings.max_turnover}")]
-    return []
+    return turnover_band_findings(ratio, settings)
 
 
 def check_daily_loss(pnl: Decimal, settings: RiskManagementSettings) -> list[CheckViolation]:

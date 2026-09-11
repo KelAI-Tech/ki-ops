@@ -47,7 +47,16 @@ risk_management:
 
   # TWO-WAY turnover (kelaisim convention): (buy$ + sell$) / prior GMV.
   # One-way is half of this, so 0.25 two-way ≈ 12.5% one-way.
-  max_turnover: 0.25
+  #
+  # Statistical band (set mean/std from clean two-way TO history):
+  #   mean < TO ≤ mean+2σ  → WARN_TURNOVER (soft, no block)
+  #   TO > mean+2σ         → MAX_TURNOVER block
+  # Override: allow_turnover_override: true (or CLI --override-turnover)
+  # downgrades the block to TURNOVER_OVERRIDE warn.
+  # When mean/σ are unset (0), the turnover check is skipped.
+  turnover_mean: 0.25
+  turnover_std: 0.04
+  allow_turnover_override: false
 
   # IMA net limit: |net| <= 10% of AUM. The gate observes GMV, not AUM, so
   # this is enforced as |net|/GMV <= 10% -- exactly the C5 recipe's own

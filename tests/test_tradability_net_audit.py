@@ -32,7 +32,6 @@ def _settings(**kwargs) -> RiskManagementSettings:
         min_order_size=Decimal("1"),
         max_order_size=Decimal("1000000"),
         max_orders_per_minute=100000,
-        max_turnover=Decimal("1"),
         max_net_exposure=Decimal("0.10"),
         enforce_market_hours=False,
         allow_shorts=True,
@@ -139,7 +138,6 @@ def test_adv_participation_warns_over_cap():
         settings=_settings(
             max_adv_participation=Decimal("0.10"),
             max_net_exposure=Decimal("1"),
-            max_turnover=Decimal("10"),
         )
     ).evaluate(sod, orders, adv=adv)
     assert result.allowed is True
@@ -159,7 +157,6 @@ def test_missing_adv_warns_and_keeps_ticket():
         settings=_settings(
             max_adv_participation=Decimal("0.10"),
             max_net_exposure=Decimal("1"),
-            max_turnover=Decimal("10"),
         )
     ).evaluate(sod, orders, adv={"999": Decimal("1000")})
     assert result.allowed is True
