@@ -312,13 +312,19 @@ def test_sent_from_flex_rows_kotl_stamped_only():
     assert sent == {"AAPL.US": D("30"), "MSFT.US": D("-10")}
 
 
-def test_sent_from_flex_rows_excludes_rejected_and_subtracts_fills():
+def test_sent_from_flex_rows_rejected_is_unfinalized_and_counts_full():
+    # Flex "REJECTED" is an unfinalized order that can still be worked and
+    # filled later (live-observed 2026-09-14) — it counts exactly like a
+    # working order, leaves protected.
     rows = [
         _flex_row("s1-1", "AAPL.US", 0, 30.0, filled=12.0),
         _flex_row("s1-2", "MSFT.US", 0, 10.0, status=6),  # 6 = REJECTED
     ]
-    assert sent_from_flex_rows(rows) == {"AAPL.US": D("30")}
-    assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("18")}
+    assert sent_from_flex_rows(rows) == {"AAPL.US": D("30"), "MSFT.US": D("10")}
+    assert sent_from_flex_rows(rows, subtract_fills=True) == {
+        "AAPL.US": D("18"),
+        "MSFT.US": D("10"),
+    }
 
 
 def test_sent_from_flex_rows_cancelled_counts_full_by_default():
@@ -328,24 +334,28 @@ def test_sent_from_flex_rows_cancelled_counts_full_by_default():
     assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("30")}
 
 
-def test_sent_from_flex_rows_forced_counts_only_final_fills_for_cancelled():
-    # resend_cancelled_remainder (forced re-runs): terminal ack in hand, only
-    # the FINAL fills ever reached the market — the dead remainder resends.
+def test_sent_from_flex_rows_forced_frees_only_confirmed_cancelled_remainder():
+    # resend_cancelled_remainder (forced re-runs): ONLY a confirmed CANCELLED
+    # order frees its remainder (final fills still count). REJECTED and
+    # LOCATE_FAILED are unfinalized — potentially alive — and stay fully
+    # counted; the retry flow for them is cancel-in-Flex → confirm → force.
     rows = [
         _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3),  # CANCELLED
         _flex_row("s1-2", "MSFT.US", 1, 30.0, filled=5.0, status=4),  # working
-        _flex_row("s1-3", "IBM.US", 0, 10.0, status=7),  # LOCATE_FAILED, no fills
+        _flex_row("s1-3", "IBM.US", 0, 10.0, status=7),  # LOCATE_FAILED
+        _flex_row("s1-4", "GE.US", 1, 8.0, status=6),  # REJECTED (unfinalized)
     ]
     # flat/snapshot SOD (fills NOT in the book): cancelled counts its fills.
     assert sent_from_flex_rows(rows, resend_cancelled_remainder=True) == {
         "AAPL.US": D("20"),  # fills only — 30 dead shares resendable
         "MSFT.US": D("-30"),  # working: FULL sent qty, leaves protected
-        # IBM.US: locate-failed with zero fills → nothing sent, full resend
+        "IBM.US": D("10"),  # locate-failed: unfinalized, fully protected
+        "GE.US": D("-8"),  # rejected: unfinalized, fully protected
     }
     # flex SOD (fills already inside the live book): cancelled contributes 0.
     assert sent_from_flex_rows(
         rows, subtract_fills=True, resend_cancelled_remainder=True
-    ) == {"MSFT.US": D("-25")}
+    ) == {"MSFT.US": D("-25"), "IBM.US": D("10"), "GE.US": D("-8")}
 
 
 # ---------------------------------------------------------------------------

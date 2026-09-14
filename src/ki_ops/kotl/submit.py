@@ -864,12 +864,13 @@ def submit_kelai_shares(
 
     **Forced re-runs always use flex as the already-sent source** on a live
     env (*sent_source* is overridden): the create-time gateway response is
-    not proof an order never worked (a risk-"rejected" order can partially
-    execute before being cancelled), so the residual must come from live
-    ``GetOrderInfo2`` state. Working orders count in full (leaves protected);
-    ``REJECTED`` orders count zero; confirmed-terminal ``CANCELLED`` /
-    ``LOCATE_FAILED`` orders count only their FINAL fills, making the dead
-    remainder resendable — the explicit operator action *force* represents.
+    not proof an order never worked (a risk-"rejected" order is *unfinalized*
+    — it can still be worked and filled later), so the residual must come
+    from live ``GetOrderInfo2`` state. Every non-CANCELLED order counts in
+    full (working, rejected/unfinalized, locate-failed — leaves protected);
+    only a confirmed-terminal ``CANCELLED`` order counts just its FINAL
+    fills, making the dead remainder resendable — the explicit operator flow
+    is cancel in Flex, confirm, then force.
 
     On ``dry_run`` the returned :class:`Submit` is **not** persisted and has no
     flex order ids; everything else (recon table, residual audit, trade file,

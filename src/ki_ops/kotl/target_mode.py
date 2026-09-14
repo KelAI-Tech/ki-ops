@@ -201,7 +201,12 @@ def sent_from_ledger(
     *working_orders* must already be filtered to the trade date; submits join
     through their working orders' ``submit_id`` (submits carry no trade date).
     Only orders Flex **accepted** count (per-order ``success`` from the
-    ``CreateOrders`` results); rejected orders never made it to the market.
+    ``CreateOrders`` results). CAUTION: a create-time rejection is NOT proof
+    the order is dead — Flex "rejected" is an unfinalized order that can
+    still be worked later. Excluding it here only ever *inflates* the
+    residual, which an unforced run turns into a refusal (claim guard /
+    cross-check), never a send; forced runs never use this function (they
+    recompute from live Flex state, where every non-CANCELLED order counts).
     Cancelled orders DO count — conservative: the cancelled remainder can only
     be resent by an operator, never automatically.
 
@@ -235,10 +240,12 @@ def is_kotl_row(row: Mapping[str, Any]) -> bool:
     return "submit_id=" in str(row.get("notes") or "")
 
 
-#: Terminal states where Flex has confirmed no further executions can occur
-#: but the order DID reach the market (unlike REJECTED): the unfilled
-#: remainder is provably dead.
-_TERMINAL_DEAD_STATUSES = frozenset({"CANCELLED", "LOCATE_FAILED"})
+#: The ONLY status that proves an order is dead. Flex "REJECTED" is really
+#: *unfinalized* — a risk-parked order that can still be worked and filled
+#: later (live-observed 2026-09-14: risk-"rejected" UAT SELLs partially
+#: executed) — and LOCATE_FAILED is the same ambiguity class. Anything not
+#: confirmed CANCELLED must be treated as alive.
+_TERMINAL_DEAD_STATUSES = frozenset({"CANCELLED"})
 
 
 def sent_from_flex_rows(
@@ -252,15 +259,18 @@ def sent_from_flex_rows(
     The ``--sent-source flex`` path (forced re-runs and lost/corrupted-ledger
     recovery): *rows* are today's fund-split-aggregated rows, filtered here to
     KOTL-stamped orders (:func:`is_kotl_row`) so manual/non-KOTL trades never
-    count. ``REJECTED`` rows are excluded — Flex never worked them. Working
-    orders always count in FULL (their leaves can still execute, so the
-    remainder must never be resent).
+    count. Every non-CANCELLED row counts in FULL — including ``REJECTED``:
+    a Flex rejection is an *unfinalized* order that can still be worked and
+    filled later, so its quantity (leaves included) must stay protected
+    exactly like a working order's.
 
     *resend_cancelled_remainder* (forced re-runs): a confirmed-terminal
-    ``CANCELLED``/``LOCATE_FAILED`` order can never fill again, so only its
-    FINAL fills count as sent — the dead remainder becomes eligible to
-    resend. Off by default: an unforced run keeps the conservative rule that
-    a cancelled remainder is only ever resent by an explicit operator action.
+    ``CANCELLED`` order can never fill again, so only its FINAL fills count
+    as sent — the dead remainder becomes eligible to resend. The retry flow
+    for rejected/unfinalized orders is therefore: cancel them in Flex,
+    confirm the cancel, then force a re-run. Off by default: an unforced run
+    keeps the conservative rule that a cancelled remainder is only ever
+    resent by an explicit operator action.
     """
     from ki_ops.kotl.qty import flex_status_label
 
@@ -269,8 +279,6 @@ def sent_from_flex_rows(
         if not is_kotl_row(row):
             continue
         label = flex_status_label(row.get("status"))
-        if label == "REJECTED":
-            continue
         symbol = str(row.get("symbol") or "").upper()
         side = flex_side_label(row.get("side")) or ""
         sent_qty = row.get("quantity") or 0

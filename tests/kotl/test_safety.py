@@ -139,6 +139,19 @@ def test_forced_rerun_protects_working_zombie_orders(env_setup):
     assert (forced.flex_response or {}).get("target_covered") is True
 
 
+def test_forced_rerun_protects_rejected_unfinalized_orders(env_setup):
+    """Flex 'REJECTED' is unfinalized — it can still be worked and filled
+    later — so a forced re-run counts it fully as sent and never retries it.
+    The retry flow is: cancel it in Flex, confirm, then force."""
+    _submit(env_setup, env="UAT")
+    _mirror_ledger_to_flex(env_setup)
+    for info in env_setup["backend"].order_infos:
+        if info.symbol == "MSFT.US":
+            info.status = 6  # REJECTED (unfinalized, potentially alive)
+    forced = _submit(env_setup, env="UAT", force=True)
+    assert (forced.flex_response or {}).get("target_covered") is True
+
+
 def test_forced_rerun_resends_confirmed_cancelled_remainder(env_setup):
     """CANCELLED with partial fills: only the FINAL fills count as sent on a
     forced re-run, so the confirmed-dead remainder goes out again — safely,
