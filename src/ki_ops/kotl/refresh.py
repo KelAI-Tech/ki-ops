@@ -44,6 +44,9 @@ def refresh_working_orders(
                 avg_fill_px=snap.get("weightedAvgPrice") or None,
                 last_seen_at=seen_at,
                 flex_batch_id=snap.get("batchId"),
+                finalization_status=snap.get("finalizationStatus"),
+                cancel_status=snap.get("cancelStatus"),
+                rejection_reason=snap.get("rejectionReason"),
             )
         )
 

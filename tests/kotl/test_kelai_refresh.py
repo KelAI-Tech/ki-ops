@@ -194,3 +194,62 @@ def test_kelai_csv_fixture(tmp_path):
     assert len(rows) == 1
     assert fx_date == TD
     assert rows[0]["orderId"] == "OID-X"
+
+
+def test_kelai_row_to_snapshot_maps_workflow_statuses():
+    snap = kelai_row_to_snapshot(
+        {
+            "symbol": "AAPL.US",
+            "side": 1,
+            "quantity": 18,
+            "filledQuantity": 0,
+            "status": 6,  # REJECTED
+            "finalizationStatus": 0,  # UNFINALIZED
+            "cancelStatus": 0,  # CANCEL_ORIGINAL
+            "rejectionReason": "risk: restricted list",
+        },
+        order_id="OID-9",
+        trade_date="2026-08-06",
+    )
+    assert snap["status"] == "REJECTED"
+    assert snap["finalizationStatus"] == "UNFINALIZED"
+    assert snap["cancelStatus"] == "CANCEL_ORIGINAL"
+    assert snap["rejectionReason"] == "risk: restricted list"
+
+
+def test_refresh_persists_workflow_statuses(tmp_path):
+    """A refresh writes Flex's workflow dimensions into the ledger; a later
+    snapshot without them keeps the stored values."""
+    store = KotlStore(tmp_path)
+    submit_rebalance_csv(
+        store,
+        SOD,
+        TARGETS,
+        trade_date=TD,
+        submitted_at=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+    order = store.load_working_orders(trade_date=TD)[0]
+
+    rows = [
+        {
+            "orderId": order.flex_order_id,
+            "symbol": order.symbol,
+            "side": 0 if order.side == "BUY" else 1,
+            "quantity": abs(float(order.sent_qty)),
+            "filledQuantity": 0,
+            "status": 6,  # REJECTED → booked UNFINALIZED, revivable
+            "finalizationStatus": 0,
+            "cancelStatus": 0,
+            "rejectionReason": "risk: max order size",
+        }
+    ]
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource(rows, trade_date=TD),
+        last_seen_at=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+    )
+    after = store.get_working_order(order.flex_order_id)
+    assert after.finalization_status == "UNFINALIZED"
+    assert after.cancel_status == "CANCEL_ORIGINAL"
+    assert after.rejection_reason == "risk: max order size"

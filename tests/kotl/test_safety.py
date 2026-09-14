@@ -106,9 +106,68 @@ def test_rerun_with_target_covered_is_clean_noop(env_setup):
 
 def test_crosscheck_refuses_when_flex_disagrees_with_ledger(env_setup):
     _submit(env_setup, env="UAT")
-    # Fake Flex "lost" the orders (or the ledger has rows Flex never saw).
+    # Fake Flex "lost" the orders (or the ledger has rows Flex never saw):
+    # an UNFORCED re-run refuses — the ledger cannot be trusted as truth.
     with pytest.raises(SubmitRefusedError, match="cross-check failed"):
-        _submit(env_setup, env="UAT", force=True)
+        _submit(env_setup, env="UAT")
+
+
+def test_forced_rerun_treats_flex_as_truth_when_ledger_disagrees(env_setup, capsys):
+    _submit(env_setup, env="UAT")
+    # Flex "lost" the orders: a FORCED re-run recomputes already-sent from
+    # live Flex state (nothing sent there) and resends the full delta — the
+    # ledger's create-time view is never the source of truth under --force.
+    forced = _submit(env_setup, env="UAT", force=True)
+    assert forced.ok
+    assert {p["symbol"] for p in forced.payload} == {"AAPL.US", "MSFT.US"}
+    out = capsys.readouterr().out
+    assert "already-sent source overridden to flex" in out
+
+
+def test_forced_rerun_protects_working_zombie_orders(env_setup):
+    """An order still WORKING in Flex counts fully as sent on a forced re-run
+    (leaves included) — regardless of what the ledger recorded at create."""
+    _submit(env_setup, env="UAT")
+    _mirror_ledger_to_flex(env_setup)
+    # AAPL is partially filled but still working: its leaves can execute.
+    for info in env_setup["backend"].order_infos:
+        if info.symbol == "AAPL.US":
+            info.filledQuantity = 20.0
+            info.status = 4  # PARTIALLY_FILLED, still working
+    forced = _submit(env_setup, env="UAT", force=True)
+    # Full sent qty (50) counts → residual 0 → covered no-op, no double-send.
+    assert (forced.flex_response or {}).get("target_covered") is True
+
+
+def test_forced_rerun_protects_rejected_unfinalized_orders(env_setup):
+    """Flex 'REJECTED' is unfinalized — it can still be worked and filled
+    later — so a forced re-run counts it fully as sent and never retries it.
+    The retry flow is: cancel it in Flex, confirm, then force."""
+    _submit(env_setup, env="UAT")
+    _mirror_ledger_to_flex(env_setup)
+    for info in env_setup["backend"].order_infos:
+        if info.symbol == "MSFT.US":
+            info.status = 6  # REJECTED (unfinalized, potentially alive)
+    forced = _submit(env_setup, env="UAT", force=True)
+    assert (forced.flex_response or {}).get("target_covered") is True
+
+
+def test_forced_rerun_resends_confirmed_cancelled_remainder(env_setup):
+    """CANCELLED with partial fills: only the FINAL fills count as sent on a
+    forced re-run, so the confirmed-dead remainder goes out again — safely,
+    because a terminal order can never add fills."""
+    _submit(env_setup, env="UAT")
+    _mirror_ledger_to_flex(env_setup)
+    # AAPL: filled 20 of 50, then cancelled — 30 shares are provably dead.
+    for info in env_setup["backend"].order_infos:
+        if info.symbol == "AAPL.US":
+            info.filledQuantity = 20.0
+            info.status = 3  # CANCELLED (terminal)
+    forced = _submit(env_setup, env="UAT", force=True)
+    assert forced.ok
+    assert len(forced.payload) == 1
+    assert forced.payload[0]["symbol"] == "AAPL.US"
+    assert forced.payload[0]["quantity"] == 30.0
 
 
 def test_claim_refuses_second_send_without_force(env_setup):

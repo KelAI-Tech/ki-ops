@@ -201,7 +201,12 @@ def sent_from_ledger(
     *working_orders* must already be filtered to the trade date; submits join
     through their working orders' ``submit_id`` (submits carry no trade date).
     Only orders Flex **accepted** count (per-order ``success`` from the
-    ``CreateOrders`` results); rejected orders never made it to the market.
+    ``CreateOrders`` results). CAUTION: a create-time rejection is NOT proof
+    the order is dead — Flex "rejected" is an unfinalized order that can
+    still be worked later. Excluding it here only ever *inflates* the
+    residual, which an unforced run turns into a refusal (claim guard /
+    cross-check), never a send; forced runs never use this function (they
+    recompute from live Flex state, where every non-CANCELLED order counts).
     Cancelled orders DO count — conservative: the cancelled remainder can only
     be resent by an operator, never automatically.
 
@@ -235,29 +240,96 @@ def is_kotl_row(row: Mapping[str, Any]) -> bool:
     return "submit_id=" in str(row.get("notes") or "")
 
 
+def summarize_flex_row_states(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Operator-readable count of KOTL rows per (status, finalization, cancel).
+
+    Makes "unfinalized" visible instead of leaving it to inference: a line
+    like ``390 × REJECTED / UNFINALIZED (alive)`` tells the operator those
+    orders are parked and revivable, not dead.
+    """
+    from ki_ops.kotl.qty import cancel_status_label, finalization_status_label, flex_status_label
+
+    counts: dict[tuple[str, str, str, bool], int] = {}
+    for row in rows:
+        if not is_kotl_row(row):
+            continue
+        key = (
+            flex_status_label(row.get("status")) or "?",
+            finalization_status_label(row.get("finalizationStatus")) or "-",
+            cancel_status_label(row.get("cancelStatus")) or "-",
+            is_confirmed_dead(row),
+        )
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return "flex order states: no KOTL-stamped orders today"
+    lines = ["flex order states (status / finalization / cancel):"]
+    for (status, final, cancel, dead), n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        verdict = "confirmed dead — remainder resendable under --force" if dead else "ALIVE — fully counted as sent"
+        lines.append(f"  {n} × {status} / {final} / {cancel} — {verdict}")
+    return "\n".join(lines)
+
+
+def is_confirmed_dead(row: Mapping[str, Any]) -> bool:
+    """True only when Flex has confirmed this order can never fill again.
+
+    Requires lifecycle ``status == CANCELLED`` — the ONLY OrderStatus that
+    proves death. Flex "REJECTED" is really *unfinalized* (a risk-parked
+    order that can still be worked and filled later; live-observed
+    2026-09-14: risk-"rejected" UAT SELLs partially executed), and
+    LOCATE_FAILED is the same ambiguity class.
+
+    Belt and suspenders: when the row carries ``cancelStatus`` (Orders.proto
+    CancelStatus — an independent workflow field), a cancel that is still
+    REQUESTED / PENDING / REJECTED keeps the order ALIVE: in-flight
+    executions can land until the terminal CANCELED ack. ``CANCEL_ORIGINAL``
+    (no cancel workflow, e.g. GFD expiry) and an absent field defer to the
+    lifecycle status.
+    """
+    from ki_ops.kotl.qty import cancel_status_label, flex_status_label
+
+    if flex_status_label(row.get("status")) != "CANCELLED":
+        return False
+    cancel = cancel_status_label(row.get("cancelStatus"))
+    return cancel in (None, "CANCEL_ORIGINAL", "CANCELED")
+
+
 def sent_from_flex_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
     subtract_fills: bool = False,
+    resend_cancelled_remainder: bool = False,
 ) -> dict[str, Decimal]:
     """Per-symbol signed sent quantity from live ``GetOrderInfo2`` rows.
 
-    The ``--sent-source flex`` recovery path (lost/corrupted ledger): *rows*
-    are today's fund-split-aggregated rows, filtered here to KOTL-stamped
-    orders (:func:`is_kotl_row`) so manual/non-KOTL trades never count.
-    ``REJECTED`` rows are excluded — Flex never worked them.
-    """
-    from ki_ops.kotl.qty import flex_status_label
+    The ``--sent-source flex`` path (forced re-runs and lost/corrupted-ledger
+    recovery): *rows* are today's fund-split-aggregated rows, filtered here to
+    KOTL-stamped orders (:func:`is_kotl_row`) so manual/non-KOTL trades never
+    count. Every non-CANCELLED row counts in FULL — including ``REJECTED``:
+    a Flex rejection is an *unfinalized* order that can still be worked and
+    filled later, so its quantity (leaves included) must stay protected
+    exactly like a working order's.
 
+    *resend_cancelled_remainder* (forced re-runs): a confirmed-dead order
+    (:func:`is_confirmed_dead` — lifecycle CANCELLED with no cancel workflow
+    still in flight) can never fill again, so only its FINAL fills count as
+    sent — the dead remainder becomes eligible to resend. The retry flow for
+    rejected/unfinalized orders is therefore: cancel them in Flex, confirm
+    the cancel, then force a re-run. Off by default: an unforced run keeps
+    the conservative rule that a cancelled remainder is only ever resent by
+    an explicit operator action.
+    """
     sent: dict[str, Decimal] = {}
     for row in rows:
         if not is_kotl_row(row):
             continue
-        if flex_status_label(row.get("status")) == "REJECTED":
-            continue
         symbol = str(row.get("symbol") or "").upper()
         side = flex_side_label(row.get("side")) or ""
-        qty = signed_qty(side, row.get("quantity") or 0)
+        sent_qty = row.get("quantity") or 0
+        if resend_cancelled_remainder and is_confirmed_dead(row):
+            # Terminal ack in hand: only the FINAL fills ever reached the
+            # market; the cancelled remainder is dead and resendable.
+            sent_qty = row.get("filledQuantity") or 0
+        qty = signed_qty(side, sent_qty)
         if subtract_fills:
             qty -= signed_qty(side, row.get("filledQuantity") or 0)
         sent[symbol] = sent.get(symbol, Decimal("0")) + qty

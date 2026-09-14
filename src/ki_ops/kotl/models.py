@@ -87,6 +87,14 @@ class WorkingOrder:
     broker: str | None = None
     algo: str | None = None
     order_type: str | None = None
+    # Flex's independent workflow dimensions (Orders.proto), synced by the
+    # refresh: finalization is reversible (UNFINALIZED = parked, revivable),
+    # cancel_status's only terminal ack is CANCELED. Distinguishes
+    # "unfinalized, potentially alive" from "confirmed dead" in the ledger
+    # itself instead of leaving it to inference from `status`.
+    finalization_status: str | None = None
+    cancel_status: str | None = None
+    rejection_reason: str | None = None
 
     @classmethod
     def from_submit_line(
@@ -140,6 +148,9 @@ class WorkingOrder:
         broker: str | None = None,
         algo: str | None = None,
         order_type: str | None = None,
+        finalization_status: str | None = None,
+        cancel_status: str | None = None,
+        rejection_reason: str | None = None,
     ) -> WorkingOrder:
         """Build from a Flex-like row (unsigned qtys + side)."""
         sent = signed_qty(side, unsigned_sent_qty)
@@ -164,6 +175,9 @@ class WorkingOrder:
             broker=broker,
             algo=algo,
             order_type=order_type,
+            finalization_status=finalization_status,
+            cancel_status=cancel_status,
+            rejection_reason=rejection_reason,
         )
 
     def with_flex_update(
@@ -174,12 +188,18 @@ class WorkingOrder:
         avg_fill_px=None,
         last_seen_at: datetime | None = None,
         flex_batch_id: str | None = None,
+        finalization_status: str | None = None,
+        cancel_status: str | None = None,
+        rejection_reason: str | None = None,
     ) -> WorkingOrder:
         """Return a copy with refreshed fill state (refresh path).
 
         *flex_batch_id* backfills the Flex-side batch when the snapshot carries
         one (``GetOrderInfo2.batchId``); an absent/empty value keeps the stored
-        id — a refresh can never erase it.
+        id — a refresh can never erase it. The workflow-status fields
+        (*finalization_status*, *cancel_status*, *rejection_reason*) follow
+        the same rule: a snapshot that carries a value overwrites, an absent
+        value keeps what the ledger already knows.
         """
         filled = signed_qty(self.side, unsigned_filled_qty)
         status = derive_status(self.sent_qty, filled, flex_status=flex_status)
@@ -202,4 +222,7 @@ class WorkingOrder:
             broker=self.broker,
             algo=self.algo,
             order_type=self.order_type,
+            finalization_status=finalization_status or self.finalization_status,
+            cancel_status=cancel_status or self.cancel_status,
+            rejection_reason=rejection_reason or self.rejection_reason,
         )

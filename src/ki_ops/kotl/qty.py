@@ -23,6 +23,48 @@ _ORDER_STATUS = {
 }
 
 
+#: Orders.proto CancelStatus — the cancel WORKFLOW, independent of OrderStatus.
+#: Only CANCELED (4) is the confirmed terminal ack; REQUESTED/PENDING mean the
+#: cancel window is still open and in-flight executions can still land.
+_CANCEL_STATUS = {
+    0: "CANCEL_ORIGINAL",
+    1: "CANCEL_REQUESTED",
+    2: "CANCEL_PENDING",
+    3: "CANCEL_REJECTED",
+    4: "CANCELED",
+}
+
+#: Orders.proto FinalizationStatus — a separate, REVERSIBLE workflow on top of
+#: OrderStatus (FinalizeOrders has a rollback RPC). A risk-failed order sits
+#: UNFINALIZED: parked and revivable, NOT dead.
+_FINALIZATION_STATUS = {
+    0: "UNFINALIZED",
+    1: "FINALIZED",
+    2: "FINALIZATION_COMPLIANCE_FAILED",
+}
+
+
+def cancel_status_label(status) -> str | None:
+    """Proto enum int, numeric string, or name → CancelStatus label."""
+    return _enum_label(status, _CANCEL_STATUS)
+
+
+def finalization_status_label(status) -> str | None:
+    """Proto enum int, numeric string, or name → FinalizationStatus label."""
+    return _enum_label(status, _FINALIZATION_STATUS)
+
+
+def _enum_label(status, mapping: dict[int, str]) -> str | None:
+    if status is None or status == "":
+        return None
+    if isinstance(status, int):
+        return mapping.get(status, str(status))
+    text = str(status).strip().upper()
+    if text.lstrip("-").isdigit():
+        return mapping.get(int(text), text)
+    return text
+
+
 def flex_status_label(status) -> str | None:
     """Proto enum int, numeric string, or name → status label."""
     if status is None or status == "":
