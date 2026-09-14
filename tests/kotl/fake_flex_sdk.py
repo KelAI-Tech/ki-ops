@@ -180,6 +180,10 @@ def make_order_info(
     fund: str = "KELAI",
     position_group: str = "USATop2000_strategy_v1",
     notes: str = "",
+    finalization_status: int = 0,
+    cancel_status: int = 0,
+    compliance_status: int = 5,
+    rejection_reason: str = "",
 ):
     return SimpleNamespace(
         id=1,
@@ -192,6 +196,10 @@ def make_order_info(
         filledQuantity=filled_quantity,
         weightedAvgPrice=weighted_avg_price,
         status=status,
+        finalizationStatus=finalization_status,
+        cancelStatus=cancel_status,
+        complianceStatus=compliance_status,
+        rejectionReason=rejection_reason,
         tradeDate=trade_date,
         notes=notes,
         clientBatchIdentifier="",

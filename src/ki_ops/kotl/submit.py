@@ -1203,6 +1203,7 @@ def submit_kelai_shares(
                     raise SubmitRefusedError(message)
 
         if sent_source == "flex":
+            print(target_mode.summarize_flex_row_states(flex_rows))
             sent = target_mode.sent_from_flex_rows(
                 flex_rows,
                 subtract_fills=subtract_fills,
