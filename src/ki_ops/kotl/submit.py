@@ -32,7 +32,8 @@ Safety rails on the live path:
   and overshoot (regenerated lower target) clips to zero with a warning —
   never a corrective order. A ``kotl_submit_claims`` row is claimed atomically
   before ``CreateOrders`` so only one run per ``(trade_date, env)`` can send
-  (``--force`` allows another attempt, still residual-capped);
+  (``--force`` allows another attempt, still residual-capped — and on a live
+  env it always recomputes already-sent from LIVE Flex state, see below);
 - ``--dry-run`` (no gRPC, no ledger write, no claim);
 - order-count / gross-notional caps checked before ``CreateOrders``;
 - **pre-submit security resolution** via the Flex ``SecurityService``
@@ -861,6 +862,15 @@ def submit_kelai_shares(
     refused (exit 5) unless *force*, and *force* still only sends the
     residual.
 
+    **Forced re-runs always use flex as the already-sent source** on a live
+    env (*sent_source* is overridden): the create-time gateway response is
+    not proof an order never worked (a risk-"rejected" order can partially
+    execute before being cancelled), so the residual must come from live
+    ``GetOrderInfo2`` state. Working orders count in full (leaves protected);
+    ``REJECTED`` orders count zero; confirmed-terminal ``CANCELLED`` /
+    ``LOCATE_FAILED`` orders count only their FINAL fills, making the dead
+    remainder resendable — the explicit operator action *force* represents.
+
     On ``dry_run`` the returned :class:`Submit` is **not** persisted and has no
     flex order ids; everything else (recon table, residual audit, trade file,
     caps report) is still produced — but no claim is taken and the live
@@ -904,6 +914,20 @@ def submit_kelai_shares(
     live = env.upper() in ("UAT", "PROD")
     if sent_source == "flex" and not live:
         raise ValueError("sent_source='flex' requires a live env (UAT/PROD)")
+    if force and live and sent_source != "flex":
+        # Operator rule (2026-09-14): a forced re-run must compute the
+        # residual from LIVE Flex order state, never from create-time ledger
+        # outcomes. A gateway "rejected" response is not proof an order never
+        # worked (UAT: risk-rejected SELLs partially executed before being
+        # cancelled), so only live state can distinguish working leaves
+        # (protected) from confirmed-dead quantity (resendable).
+        print(
+            "--force: already-sent source overridden to flex — forced re-runs "
+            "compute the residual from live GetOrderInfo2 state: working "
+            "orders (leaves included) stay fully counted as sent; only "
+            "confirmed-terminal unfilled quantity is eligible to resend"
+        )
+        sent_source = "flex"
 
     if no_route:
         defaults = no_route_defaults(defaults)
@@ -1178,7 +1202,11 @@ def submit_kelai_shares(
                     raise SubmitRefusedError(message)
 
         if sent_source == "flex":
-            sent = target_mode.sent_from_flex_rows(flex_rows, subtract_fills=subtract_fills)
+            sent = target_mode.sent_from_flex_rows(
+                flex_rows,
+                subtract_fills=subtract_fills,
+                resend_cancelled_remainder=force,
+            )
             print(
                 f"already-sent source: flex GetOrderInfo2 "
                 f"({len(sent)} symbol(s) with KOTL-stamped sends today)"

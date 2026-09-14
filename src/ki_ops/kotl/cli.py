@@ -130,7 +130,10 @@ def register_kotl_parser(sub) -> None:
         help="allow a second live submission attempt for the same (trade-date, env) "
         "past the once-a-day claim — target mode still caps the send to the "
         "residual (target − already-sent), so a forced re-run can never resend "
-        "what already went out",
+        "what already went out. On a live env the already-sent source is always "
+        "flex (live GetOrderInfo2 state, overriding --sent-source): working "
+        "orders count in full, and cancelled orders count only their final "
+        "fills so the confirmed-dead remainder can be resent",
     )
     sk.add_argument(
         "--no-route",
@@ -156,7 +159,8 @@ def register_kotl_parser(sub) -> None:
         help="where 'already sent today' comes from for the target-mode residual: "
         "the KOTL ledger (default, cross-checked against live Flex orders) or "
         "flex (recovery when the ledger lost a write: recompute from live "
-        "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies)",
+        "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies). "
+        "--force on a live env always uses flex regardless of this flag",
     )
     sk.add_argument(
         "--recon-max-shares",

@@ -235,17 +235,32 @@ def is_kotl_row(row: Mapping[str, Any]) -> bool:
     return "submit_id=" in str(row.get("notes") or "")
 
 
+#: Terminal states where Flex has confirmed no further executions can occur
+#: but the order DID reach the market (unlike REJECTED): the unfilled
+#: remainder is provably dead.
+_TERMINAL_DEAD_STATUSES = frozenset({"CANCELLED", "LOCATE_FAILED"})
+
+
 def sent_from_flex_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
     subtract_fills: bool = False,
+    resend_cancelled_remainder: bool = False,
 ) -> dict[str, Decimal]:
     """Per-symbol signed sent quantity from live ``GetOrderInfo2`` rows.
 
-    The ``--sent-source flex`` recovery path (lost/corrupted ledger): *rows*
-    are today's fund-split-aggregated rows, filtered here to KOTL-stamped
-    orders (:func:`is_kotl_row`) so manual/non-KOTL trades never count.
-    ``REJECTED`` rows are excluded — Flex never worked them.
+    The ``--sent-source flex`` path (forced re-runs and lost/corrupted-ledger
+    recovery): *rows* are today's fund-split-aggregated rows, filtered here to
+    KOTL-stamped orders (:func:`is_kotl_row`) so manual/non-KOTL trades never
+    count. ``REJECTED`` rows are excluded — Flex never worked them. Working
+    orders always count in FULL (their leaves can still execute, so the
+    remainder must never be resent).
+
+    *resend_cancelled_remainder* (forced re-runs): a confirmed-terminal
+    ``CANCELLED``/``LOCATE_FAILED`` order can never fill again, so only its
+    FINAL fills count as sent — the dead remainder becomes eligible to
+    resend. Off by default: an unforced run keeps the conservative rule that
+    a cancelled remainder is only ever resent by an explicit operator action.
     """
     from ki_ops.kotl.qty import flex_status_label
 
@@ -253,11 +268,17 @@ def sent_from_flex_rows(
     for row in rows:
         if not is_kotl_row(row):
             continue
-        if flex_status_label(row.get("status")) == "REJECTED":
+        label = flex_status_label(row.get("status"))
+        if label == "REJECTED":
             continue
         symbol = str(row.get("symbol") or "").upper()
         side = flex_side_label(row.get("side")) or ""
-        qty = signed_qty(side, row.get("quantity") or 0)
+        sent_qty = row.get("quantity") or 0
+        if resend_cancelled_remainder and label in _TERMINAL_DEAD_STATUSES:
+            # Terminal ack in hand: only the FINAL fills ever reached the
+            # market; the cancelled remainder is dead and resendable.
+            sent_qty = row.get("filledQuantity") or 0
+        qty = signed_qty(side, sent_qty)
         if subtract_fills:
             qty -= signed_qty(side, row.get("filledQuantity") or 0)
         sent[symbol] = sent.get(symbol, Decimal("0")) + qty

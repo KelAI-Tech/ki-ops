@@ -321,6 +321,33 @@ def test_sent_from_flex_rows_excludes_rejected_and_subtracts_fills():
     assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("18")}
 
 
+def test_sent_from_flex_rows_cancelled_counts_full_by_default():
+    # Conservative default: a cancelled remainder is never auto-resendable.
+    rows = [_flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3)]  # CANCELLED
+    assert sent_from_flex_rows(rows) == {"AAPL.US": D("50")}
+    assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("30")}
+
+
+def test_sent_from_flex_rows_forced_counts_only_final_fills_for_cancelled():
+    # resend_cancelled_remainder (forced re-runs): terminal ack in hand, only
+    # the FINAL fills ever reached the market — the dead remainder resends.
+    rows = [
+        _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3),  # CANCELLED
+        _flex_row("s1-2", "MSFT.US", 1, 30.0, filled=5.0, status=4),  # working
+        _flex_row("s1-3", "IBM.US", 0, 10.0, status=7),  # LOCATE_FAILED, no fills
+    ]
+    # flat/snapshot SOD (fills NOT in the book): cancelled counts its fills.
+    assert sent_from_flex_rows(rows, resend_cancelled_remainder=True) == {
+        "AAPL.US": D("20"),  # fills only — 30 dead shares resendable
+        "MSFT.US": D("-30"),  # working: FULL sent qty, leaves protected
+        # IBM.US: locate-failed with zero fills → nothing sent, full resend
+    }
+    # flex SOD (fills already inside the live book): cancelled contributes 0.
+    assert sent_from_flex_rows(
+        rows, subtract_fills=True, resend_cancelled_remainder=True
+    ) == {"MSFT.US": D("-25")}
+
+
 # ---------------------------------------------------------------------------
 # crosscheck_ledger_vs_flex
 # ---------------------------------------------------------------------------
