@@ -259,6 +259,14 @@ def register_kotl_parser(sub) -> None:
     rf.add_argument("--trade-date", type=date.fromisoformat, required=True)
     rf.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     rf.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    rf.add_argument(
+        "--trade-file-out",
+        default=None,
+        help="existing trade file (local path or s3://) to back-fill with ledger "
+        "dispositions after the refresh: filled_qty + final_status (filled/partial/"
+        "working/unfinalized/cancel_pending/cancelled) + raw Flex workflow columns "
+        "— the create-time `status` column is the gateway verdict only",
+    )
     _add_live_source_args(rf)
     _add_store_args(rf)
 
@@ -449,17 +457,20 @@ def run_kotl(args) -> int:
     if cmd == "refresh":
         source, fixture = _build_refresh_source(args)
         updated = refresh_working_orders(store, args.trade_date, source)
-        print(
-            json.dumps(
-                {
-                    "trade_date": args.trade_date.isoformat(),
-                    "updated_count": len(updated),
-                    "source": getattr(args, "source", "fixture"),
-                    "fixture": str(fixture) if fixture is not None else "live",
-                },
-                indent=2,
-            )
-        )
+        summary = {
+            "trade_date": args.trade_date.isoformat(),
+            "updated_count": len(updated),
+            "source": getattr(args, "source", "fixture"),
+            "fixture": str(fixture) if fixture is not None else "live",
+        }
+        if getattr(args, "trade_file_out", None):
+            from ki_ops.kotl.trade_file import apply_ledger_dispositions
+
+            orders = store.load_working_orders(trade_date=args.trade_date)
+            written, matched = apply_ledger_dispositions(args.trade_file_out, orders)
+            summary["trade_file"] = written
+            summary["trade_file_rows_updated"] = matched
+        print(json.dumps(summary, indent=2))
         return 0
 
     if cmd == "eod":

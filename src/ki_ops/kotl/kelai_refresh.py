@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ki_ops.kotl.models import WorkingOrder
-from ki_ops.kotl.qty import flex_status_label
+from ki_ops.kotl.qty import cancel_status_label, finalization_status_label, flex_status_label
 
 # Brooklyn Orders.proto enums (MarketSide).
 _MARKET_SIDE = {
@@ -93,6 +93,9 @@ def kelai_row_to_snapshot(row: dict[str, Any], *, order_id: str, trade_date: str
         "quantity": float(row.get("quantity") or 0),
         "filledQuantity": float(filled or 0),
         "status": flex_status_label(row.get("status")),
+        "finalizationStatus": finalization_status_label(row.get("finalizationStatus")),
+        "cancelStatus": cancel_status_label(row.get("cancelStatus")),
+        "rejectionReason": str(row.get("rejectionReason") or "") or None,
         "weightedAvgPrice": row.get("weightedAvgPrice") or row.get("weightedAvgPrice_st"),
         "fund": row.get("fund_acc_tgt") or row.get("fund"),
         "positionGroup": row.get("positionGroup_acc_tgt") or row.get("positionGroup"),

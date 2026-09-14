@@ -89,6 +89,9 @@ WORKING_ORDER_FIELDS = (
     "broker",
     "algo",
     "order_type",
+    "finalization_status",
+    "cancel_status",
+    "rejection_reason",
 )
 
 
@@ -348,6 +351,9 @@ def _working_order_to_row(order: WorkingOrder) -> dict[str, str]:
         "broker": order.broker or "",
         "algo": order.algo or "",
         "order_type": order.order_type or "",
+        "finalization_status": order.finalization_status or "",
+        "cancel_status": order.cancel_status or "",
+        "rejection_reason": order.rejection_reason or "",
     }
 
 
@@ -371,4 +377,7 @@ def _working_order_from_row(row: dict[str, str]) -> WorkingOrder:
         broker=row.get("broker") or None,
         algo=row.get("algo") or None,
         order_type=row.get("order_type") or None,
+        finalization_status=row.get("finalization_status") or None,
+        cancel_status=row.get("cancel_status") or None,
+        rejection_reason=row.get("rejection_reason") or None,
     )

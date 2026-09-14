@@ -164,3 +164,49 @@ def test_book_snapshot_empty_book_distinct_from_missing(tmp_path):
     assert store.load_book_snapshot(d, "UAT") == {}
     assert store.load_latest_book_snapshot("UAT", before=date(2026, 9, 10)) == (d, {})
     assert store.load_book_snapshot(date(2026, 9, 8), "UAT") is None
+
+
+def test_working_order_flex_workflow_fields_roundtrip(tmp_path):
+    """finalization/cancel/rejection columns survive the CSV roundtrip."""
+    import dataclasses
+
+    store = KotlStore(tmp_path)
+    order = dataclasses.replace(
+        _order("ORD-WF"),
+        finalization_status="UNFINALIZED",
+        cancel_status="CANCEL_ORIGINAL",
+        rejection_reason="risk: max position breach",
+    )
+    store.upsert_working_orders([order])
+
+    loaded = store.load_working_orders(trade_date=order.trade_date)
+    assert len(loaded) == 1
+    assert loaded[0].finalization_status == "UNFINALIZED"
+    assert loaded[0].cancel_status == "CANCEL_ORIGINAL"
+    assert loaded[0].rejection_reason == "risk: max position breach"
+
+
+def test_working_order_csv_missing_workflow_columns_load_as_none(tmp_path):
+    """Pre-migration CSV files (no workflow columns) still load."""
+    store = KotlStore(tmp_path)
+    store.upsert_working_orders([_order("ORD-OLD")])
+    # Strip the new columns to simulate a file written by an older ki-ops.
+    import csv as _csv
+
+    path = store.working_orders_path
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(_csv.DictReader(fh))
+    old_fields = [
+        f
+        for f in rows[0]
+        if f not in ("finalization_status", "cancel_status", "rejection_reason")
+    ]
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=old_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    loaded = store.load_working_orders()
+    assert loaded[0].finalization_status is None
+    assert loaded[0].cancel_status is None
+    assert loaded[0].rejection_reason is None

@@ -1361,6 +1361,13 @@ def _working_order_from_submit(
         unsigned_sent_qty=payload["quantity"],
         submitted_at=submit.submitted_at,
     )
+    # Gateway verdict: a failed CreateOrders result is still booked in Flex
+    # (UNFINALIZED, revivable) — record why, and let the first refresh sync
+    # the live workflow statuses.
+    rejection_reason: str | None = None
+    if not result.get("success", True):
+        issues = "; ".join(str(i) for i in (result.get("issues") or []) if str(i))
+        rejection_reason = str(result.get("description") or "") or issues or "create rejected"
     return WorkingOrder(
         flex_order_id=row.flex_order_id,
         submit_id=row.submit_id,
@@ -1378,4 +1385,5 @@ def _working_order_from_submit(
         broker=payload.get("broker") or None,
         algo=payload.get("algo") or None,
         order_type=payload.get("orderType") or None,
+        rejection_reason=rejection_reason,
     )
