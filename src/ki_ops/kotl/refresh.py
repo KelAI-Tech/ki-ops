@@ -13,21 +13,20 @@ class FlexRefreshSource(Protocol):
     def fetch_orders(self, trade_date: str, *, stored: Sequence[WorkingOrder]) -> list[dict]: ...
 
 
-def refresh_working_orders(
-    store: KotlStore,
-    trade_date: date,
-    source: FlexRefreshSource,
+def merge_order_snapshots(
+    stored: Sequence[WorkingOrder],
+    snapshots: Sequence[dict],
     *,
     last_seen_at: datetime | None = None,
 ) -> list[WorkingOrder]:
-    """Update stored rows for *trade_date* from *source* snapshots (matched by ``orderId``)."""
-    stored = store.load_working_orders(trade_date=trade_date)
-    if not stored:
-        return []
+    """Stored rows updated from *snapshots* (matched by ``orderId``), pure.
 
-    snapshots = source.fetch_orders(trade_date.isoformat(), stored=stored)
+    Returns only the rows that had a matching snapshot; rows without one are
+    omitted (their ledger state is already the freshest known). No store I/O —
+    the refresh persists the result, ``kotl fills --live`` merges it for
+    display only.
+    """
     by_id = {str(row["orderId"]): row for row in snapshots}
-
     updated: list[WorkingOrder] = []
     seen_at = _utc(last_seen_at)
     for row in stored:
@@ -49,7 +48,23 @@ def refresh_working_orders(
                 rejection_reason=snap.get("rejectionReason"),
             )
         )
+    return updated
 
+
+def refresh_working_orders(
+    store: KotlStore,
+    trade_date: date,
+    source: FlexRefreshSource,
+    *,
+    last_seen_at: datetime | None = None,
+) -> list[WorkingOrder]:
+    """Update stored rows for *trade_date* from *source* snapshots (matched by ``orderId``)."""
+    stored = store.load_working_orders(trade_date=trade_date)
+    if not stored:
+        return []
+
+    snapshots = source.fetch_orders(trade_date.isoformat(), stored=stored)
+    updated = merge_order_snapshots(stored, snapshots, last_seen_at=last_seen_at)
     if updated:
         store.upsert_working_orders(updated)
     return updated

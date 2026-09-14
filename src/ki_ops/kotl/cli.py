@@ -276,6 +276,65 @@ def register_kotl_parser(sub) -> None:
     st.add_argument("--json", action="store_true", help="JSON instead of table")
     _add_store_args(st)
 
+    fl = ks.add_parser(
+        "fills",
+        help="latest fills from the KOTL ledger "
+        "(env-aware: canary/prod via KI_OPS_ENV, default canary)",
+    )
+    fl.add_argument(
+        "--ki-env",
+        choices=("canary", "prod"),
+        default=None,
+        help="ops environment (default: KI_OPS_ENV env var, else canary); picks "
+        "the ledger db secret (kelai/kotl/db-canary|db-prod) and the Flex env for --live",
+    )
+    fl.add_argument(
+        "--trade-date",
+        type=date.fromisoformat,
+        default=None,
+        help="default: latest trade date in the ledger",
+    )
+    fl.add_argument(
+        "--ticker",
+        default=None,
+        help="show one symbol only (AAPL and AAPL.US both match)",
+    )
+    fl.add_argument("--limit", type=int, default=None, help="show at most N rows")
+    fl.add_argument("--json", action="store_true", help="JSON instead of table")
+    fl.add_argument(
+        "--no-pager",
+        action="store_true",
+        help="never page through less (tables longer than the terminal page by default)",
+    )
+    fl.add_argument(
+        "--live",
+        action="store_true",
+        help="merge live Flex GetOrderInfo2 state over the ledger rows for "
+        "display (read-only — the ledger is not written; use kotl refresh for that)",
+    )
+    fl.add_argument(
+        "--flex-env",
+        choices=("UAT", "PROD"),
+        default=None,
+        help="Flex environment for --live (default: KOTL_FLEX_ENV, else the "
+        "KI_OPS_ENV preset: canary→UAT, prod→PROD)",
+    )
+    fl.add_argument(
+        "--store",
+        choices=("csv", "mysql"),
+        default=None,
+        help="ledger backend (default: mysql with the env's db secret; "
+        "csv reads --data-dir for local use)",
+    )
+    fl.add_argument(
+        "--db-secret",
+        default=None,
+        help="Secrets Manager secret id (default: the KI_OPS_ENV preset's; "
+        "KOTL_DB_* env vars take priority as usual)",
+    )
+    fl.add_argument("--db-schema", default=None, help="MySQL schema (default: kotl)")
+    fl.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+
     eod = ks.add_parser(
         "eod",
         help="end-of-day: refresh, flatness check, immutable snapshot + fills CSV (exit 3 when not flat)",
@@ -322,6 +381,112 @@ def _build_store(args):
     return KotlStore(args.data_dir)
 
 
+def _build_fills_store(args, ops_env):
+    """Fills default to the env preset's MySQL ledger; ``--store csv`` opts out.
+
+    Precedence: explicit flags > ``KOTL_DB_*`` env vars (inside
+    ``resolve_db_params``: ``KOTL_DB_HOST`` bypasses the secret entirely) >
+    the ``KI_OPS_ENV`` preset.
+    """
+    import os
+
+    if getattr(args, "store", None) == "csv":
+        return KotlStore(args.data_dir)
+    from ki_ops.kotl.mysql_store import MysqlKotlStore
+
+    db_secret = getattr(args, "db_secret", None) or ops_env.kotl_db_secret
+    db_schema = (
+        getattr(args, "db_schema", None)
+        or os.environ.get("KOTL_DB_SCHEMA")
+        or ops_env.kotl_db_schema
+    )
+    return MysqlKotlStore.from_env_or_secret(db_secret=db_secret, db_schema=db_schema)
+
+
+def _emit_paged(text: str, *, no_pager: bool = False) -> None:
+    """Print, paging through ``less`` when interactive and taller than the terminal."""
+    import shutil
+    import subprocess
+    import sys
+
+    if no_pager or not sys.stdout.isatty():
+        print(text)
+        return
+    if text.count("\n") + 2 <= shutil.get_terminal_size().lines:
+        print(text)
+        return
+    try:
+        subprocess.run(["less", "-RS"], input=text.encode("utf-8"), check=False)
+    except (FileNotFoundError, OSError):
+        print(text)
+
+
+def _run_fills(args) -> int:
+    from ki_ops.kotl.flex_map import flex_symbol
+    from ki_ops.kotl.report import fills_rows, fills_to_dicts, format_fills_table
+    from ki_ops.opsenv import resolve_flex_env, resolve_ops_env
+
+    ops_env = resolve_ops_env(getattr(args, "ki_env", None))
+    store = _build_fills_store(args, ops_env)
+
+    trade_date = args.trade_date or store.latest_trade_date()
+    if trade_date is None:
+        if args.json:
+            print(json.dumps({"env": ops_env.name, "trade_date": None, "fills": []}, indent=2))
+        else:
+            print(f"KOTL fills (env={ops_env.name}): ledger is empty — nothing to show")
+        return 0
+
+    orders = store.load_working_orders(trade_date=trade_date)
+
+    note = f"env={ops_env.name}"
+    if args.live:
+        from ki_ops.kotl.flex_live import LiveRefreshSource, load_flex_config
+        from ki_ops.kotl.refresh import merge_order_snapshots
+
+        flex_env = resolve_flex_env(getattr(args, "flex_env", None), ops_env)
+        source = LiveRefreshSource(load_flex_config(flex_env=flex_env))
+        snapshots = source.fetch_orders(trade_date.isoformat(), stored=orders)
+        by_id = {o.flex_order_id: o for o in orders}
+        for updated in merge_order_snapshots(orders, snapshots):
+            by_id[updated.flex_order_id] = updated
+        orders = list(by_id.values())
+        note = f"{note}, live flex {flex_env}"
+
+    if args.ticker:
+        want = flex_symbol(args.ticker)
+        orders = [o for o in orders if flex_symbol(o.symbol) == want]
+        note = f"{note}, ticker {want}"
+
+    rows = fills_to_dicts(orders)
+    if args.limit is not None and args.limit >= 0:
+        rows = rows[: args.limit]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "env": ops_env.name,
+                    "trade_date": trade_date.isoformat(),
+                    "live": bool(args.live),
+                    "count": len(rows),
+                    "fills": rows,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    shown = orders
+    if args.limit is not None and args.limit >= 0:
+        shown = fills_rows(orders)[: args.limit]
+    _emit_paged(
+        format_fills_table(shown, trade_date=trade_date, header_note=note),
+        no_pager=getattr(args, "no_pager", False),
+    )
+    return 0
+
+
 def _build_refresh_source(args):
     """fixture path (default) vs live GetOrderInfo2."""
     if getattr(args, "source", "fixture") == "live":
@@ -332,8 +497,12 @@ def _build_refresh_source(args):
 
 
 def run_kotl(args) -> int:
-    store = _build_store(args)
     cmd = args.kotl_command
+    if cmd == "fills":
+        # fills resolves its own store (env-preset MySQL default, not csv)
+        return _run_fills(args)
+
+    store = _build_store(args)
 
     if cmd == "submit-rebalance":
         submit = submit_rebalance_csv(

@@ -405,6 +405,17 @@ class MysqlKotlStore:
             cur.close()
         return [self._working_order_from_db(row) for row in rows]
 
+    def latest_trade_date(self) -> date | None:
+        """Most recent ``trade_date`` in the working-orders ledger."""
+        conn = self.connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT MAX(trade_date) FROM kotl_working_orders")
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        return row[0] if row else None
+
     def get_working_order(self, flex_order_id: str) -> WorkingOrder | None:
         conn = self.connection()
         cur = conn.cursor()
