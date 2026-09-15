@@ -759,6 +759,63 @@ def _resolve_payload_symbols(
     return [p for p, _ in kept], [o for _, o in kept]
 
 
+def _apply_ticker_scope(
+    payloads: list[dict],
+    orders: list,
+    *,
+    strict_tickers: Sequence[str],
+    lenient_tickers: Sequence[str],
+    symbol_suffix: str,
+) -> tuple[list[dict], list]:
+    """Restrict the parallel payload/order lists to the requested tickers.
+
+    The resend scope (``kotl resend``). *strict_tickers* (operator-typed
+    ``--ticker``) must each match a derived trade intent — a miss refuses the
+    submit (typo protection, and "nothing left to send for this name" is an
+    explicit verdict, never a silent no-op). *lenient_tickers* (from a prior
+    unresolved report) may legitimately have dropped out of today's target,
+    so their misses only warn.
+    """
+    strict = {_bare_ticker(t, suffix=symbol_suffix) for t in strict_tickers}
+    lenient = {_bare_ticker(t, suffix=symbol_suffix) for t in lenient_tickers}
+    wanted = strict | lenient
+
+    def _payload_ticker(payload: dict) -> str:
+        return _bare_ticker(
+            str(payload.get("sourceSymbol") or payload["symbol"]), suffix=symbol_suffix
+        )
+
+    kept = [
+        (payload, order)
+        for payload, order in zip(payloads, orders)
+        if _payload_ticker(payload) in wanted
+    ]
+    matched = {_payload_ticker(payload) for payload, _ in kept}
+    missing_strict = sorted(strict - matched)
+    if missing_strict:
+        raise SubmitRefusedError(
+            "resend scope: no trade intent for ticker(s) "
+            f"{', '.join(missing_strict)} — not in today's target − SOD delta "
+            "(target already met, or the name is not in the book)"
+        )
+    skipped = sorted(lenient - matched - strict)
+    if skipped:
+        shown = ", ".join(skipped[:20])
+        print(
+            f"resend scope: {len(skipped)} unresolved-report ticker(s) have no "
+            f"trade intent today (skipped): {shown}{' …' if len(skipped) > 20 else ''}"
+        )
+    if not kept:
+        raise SubmitRefusedError(
+            "resend scope: no order matches the requested tickers — nothing to send"
+        )
+    print(
+        f"resend scope: {len(kept)} of {len(payloads)} order(s) kept "
+        f"({', '.join(sorted(matched))})"
+    )
+    return [p for p, _ in kept], [o for _, o in kept]
+
+
 def submit_kelai_shares(
     store,
     *,
@@ -790,6 +847,8 @@ def submit_kelai_shares(
     sent_source: str = "ledger",
     allow_outside_market_hours: bool = False,
     no_route: bool = False,
+    only_tickers: Sequence[str] | None = None,
+    retry_unresolved: str | Path | None = None,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -876,6 +935,23 @@ def submit_kelai_shares(
     flex order ids; everything else (recon table, residual audit, trade file,
     caps report) is still produced — but no claim is taken and the live
     cross-check is skipped (no gRPC).
+
+    **Resend scope** (*only_tickers* / *retry_unresolved* — the ``kotl
+    resend`` command): restrict the run to specific tickers after the day's
+    main submit. *only_tickers* is the operator-picked list (ds2 vocabulary;
+    every name must have a trade intent today or the submit refuses — typo
+    protection); *retry_unresolved* is a prior ``unresolved_<submit_id>.csv``
+    report whose tickers are retried leniently (names that dropped out of
+    the target only warn). The scope is applied to the derived intents
+    BEFORE resolution and target mode, so every safety rail still runs on
+    the scoped set; already-sent symbols outside the scope are ignored for
+    residual purposes (no orders are generated for them, and no overshoot
+    noise is reported about them). Typical flows: a submit ran with
+    ``--unresolved skip`` and FlexTrade has since seeded the master → resend
+    with the unresolved report; or an order was cancelled in Flex and its
+    dead remainder should go out again → resend with ``--ticker`` under
+    *force* (only confirmed-CANCELLED remainders are freed — working and
+    unfinalized orders stay fully protected).
 
     **No-route mode** (*no_route*): every order goes out with a **blank
     broker, blank algo and ``NO_AUTOMATION``** — per FlexTrade, such orders
@@ -1130,6 +1206,26 @@ def submit_kelai_shares(
         submit_id=pending.submit_id,
     )
 
+    # --- resend scope: restrict the run to specific tickers (see docstring) --
+    scoped = bool(only_tickers) or retry_unresolved is not None
+    if scoped:
+        retry_tickers: Sequence[str] = ()
+        if retry_unresolved is not None:
+            from ki_ops.kotl.flex_symbols import load_unresolved_tickers
+
+            retry_tickers = load_unresolved_tickers(retry_unresolved, cache_dir=cache)
+            print(
+                f"resend scope: {len(retry_tickers)} ticker(s) from unresolved "
+                f"report {retry_unresolved}"
+            )
+        payloads, orders = _apply_ticker_scope(
+            payloads,
+            orders,
+            strict_tickers=only_tickers or (),
+            lenient_tickers=retry_tickers,
+            symbol_suffix=symbol_suffix,
+        )
+
     # --- pre-submit security resolution (live envs; see docstring) -----------
     if env.upper() in ("UAT", "PROD"):
         payload_tickers = {_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads}
@@ -1217,6 +1313,22 @@ def submit_kelai_shares(
             sent = target_mode.sent_from_ledger(
                 all_submits, today_working, env=env, subtract_fills=subtract_fills
             )
+
+        if scoped:
+            # Out-of-scope symbols get no orders this run, so their sends are
+            # not this run's business: drop them from the residual input to
+            # avoid spurious overshoot warnings about names we never touch.
+            scope_symbols = {str(p["symbol"]).upper() for p in payloads}
+            outside = sorted(set(sent) - scope_symbols)
+            if outside:
+                shown = ", ".join(outside[:10])
+                print(
+                    f"resend scope: ignoring {len(outside)} already-sent "
+                    f"symbol(s) outside the scope ({shown}"
+                    f"{' …' if len(outside) > 10 else ''}) — no orders are "
+                    "generated for them"
+                )
+                sent = {s: q for s, q in sent.items() if s in scope_symbols}
 
         deltas = {
             str(p["symbol"]).upper(): signed_qty(p["side"], p["quantity"]) for p in payloads

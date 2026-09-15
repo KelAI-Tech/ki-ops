@@ -65,6 +65,163 @@ def _add_live_source_args(parser) -> None:
     )
 
 
+def _add_submit_kelai_args(parser, *, resend: bool = False) -> None:
+    """Shared options of ``submit-kelai`` and ``resend``.
+
+    ``resend`` runs the same pipeline scoped to specific tickers with force
+    implied, so it drops ``--force`` (always on) and ``--sent-source`` (a
+    forced live run always recomputes already-sent from live Flex state) and
+    flips the ``--unresolved`` default to ``skip`` (a retried name that is
+    STILL missing from the master should not block the rest of the scope).
+    """
+    parser.add_argument("--trade-date", type=date.fromisoformat, required=True)
+    parser.add_argument(
+        "--shares",
+        default=None,
+        help="shares trade file, s3:// or local (default: "
+        "s3://kelaitrading/portfolio/shares/[<strategy-id>/]Portfolio_<YYYYMMDD>.csv)",
+    )
+    parser.add_argument(
+        "--ds2",
+        default=None,
+        help="ds2 H5, s3:// or local (default: s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5)",
+    )
+    parser.add_argument(
+        "--strategy-id",
+        default=None,
+        help="pipeline strategy subfolder (e.g. USATop2000_neutralized); also "
+        "routes the trade file to s3://kelaitrading/trades/<strategy-id>/…",
+    )
+    parser.add_argument(
+        "--sod-source",
+        choices=("flex", "prior-target", "csv", "flat"),
+        default=None,
+        help="SOD book source: flex = live ReplayPositions (with recon guard), "
+        "prior-target = yesterday's Portfolio_*.csv, csv = --sod file, flat = no book; "
+        "legacy --sod/--assume-flat-sod map to csv/flat",
+    )
+    sod_group = parser.add_mutually_exclusive_group(required=False)
+    sod_group.add_argument("--sod", type=Path, default=None, help="SOD CSV (ticker, quantity, market_price)")
+    sod_group.add_argument(
+        "--assume-flat-sod",
+        action="store_true",
+        help="no SOD book: trade the full target file from flat",
+    )
+    parser.add_argument(
+        "--flex-env",
+        choices=("FAKE", "UAT", "PROD"),
+        default="FAKE",
+        help="FAKE (default, offline adapter) or UAT/PROD via the live gRPC adapter",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="build + print orders and write the trade file; no gRPC, no ledger write",
+    )
+    if not resend:
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="allow a second live submission attempt for the same (trade-date, env) "
+            "past the once-a-day claim — target mode still caps the send to the "
+            "residual (target − already-sent), so a forced re-run can never resend "
+            "what already went out. On a live env the already-sent source is always "
+            "flex (live GetOrderInfo2 state, overriding --sent-source): working "
+            "orders count in full, and cancelled orders count only their final "
+            "fills so the confirmed-dead remainder can be resent",
+        )
+    parser.add_argument(
+        "--no-route",
+        action="store_true",
+        help="safe live test (FlexTrade-confirmed): send every order with blank "
+        "broker/algo and NO_AUTOMATION — Flex accepts and books them but nothing "
+        "goes to the street (no fills, no PnL). Still a real submit: claim taken, "
+        "ledger written, and target mode counts the staged orders as sent, so "
+        "routed trading for this (trade-date, env) is consumed for the day; "
+        "cancel the staged orders in the Flex UI or let GFD expire them",
+    )
+    parser.add_argument(
+        "--allow-outside-market-hours",
+        action="store_true",
+        help="override the NYSE market-hours gate (live submits are otherwise "
+        "refused outside trading days 03:00 ET to the close, exit 7) — "
+        "deliberate testing only",
+    )
+    if not resend:
+        parser.add_argument(
+            "--sent-source",
+            choices=("ledger", "flex"),
+            default="ledger",
+            help="where 'already sent today' comes from for the target-mode residual: "
+            "the KOTL ledger (default, cross-checked against live Flex orders) or "
+            "flex (recovery when the ledger lost a write: recompute from live "
+            "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies). "
+            "--force on a live env always uses flex regardless of this flag",
+        )
+    parser.add_argument(
+        "--recon-max-shares",
+        type=Decimal,
+        default=None,
+        help="flex SOD recon: abort when total |Flex − prior target| shares exceed N "
+        "(default 0 = any divergence aborts; env KOTL_RECON_MAX_SHARES)",
+    )
+    parser.add_argument(
+        "--recon-max-names",
+        type=int,
+        default=None,
+        help="flex SOD recon: abort when more than N names diverge "
+        "(default 0; env KOTL_RECON_MAX_NAMES)",
+    )
+    parser.add_argument(
+        "--max-orders",
+        type=int,
+        default=None,
+        help="refuse before CreateOrders above this order count "
+        "(default 5000; env KOTL_MAX_ORDERS)",
+    )
+    parser.add_argument(
+        "--max-gross-notional",
+        type=Decimal,
+        default=None,
+        help="refuse before CreateOrders above this gross $ notional at ds2 prices "
+        "(default 100000000; env KOTL_MAX_GROSS_NOTIONAL)",
+    )
+    parser.add_argument(
+        "--unresolved",
+        choices=("block", "skip"),
+        default="skip" if resend else "block",
+        help="symbols missing from the Flex security master (pre-submit "
+        "SecurityService lookup, live envs): block the submit (exit 6) "
+        "or skip them and submit resolved names only; the unresolved list is "
+        "always written as unresolved_<submit_id>.csv next to the trade file"
+        + (
+            " (default skip: a retried name still missing from the master "
+            "does not block the rest of the scope)"
+            if resend
+            else " (default block)"
+        ),
+    )
+    parser.add_argument(
+        "--sedol-source",
+        default=None,
+        help="book SEDOL map for pre-submit lookup (SEDOL is FlexTrade's "
+        "preferred identifier): 'snowflake' (default; daily kelai security "
+        "master KELAI.LSEG[_CANARY].SECURITY_MASTER_DT, schema by env), a CSV "
+        "path/s3:// URL with infocode,sedol columns, or 'none' for "
+        "symbol-only resolution (env KOTL_SEDOL_SOURCE)",
+    )
+    parser.add_argument(
+        "--trade-file-out",
+        default=None,
+        help="trade file destination, local path or s3:// URL (default: "
+        "s3://kelaitrading/trades/<strategy-id>/<yyyymmdd>/trades_<submit_id>.csv "
+        "when --strategy-id is given, else <data-dir>/trades/<yyyymmdd>/…)",
+    )
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--cache-dir", type=Path, default=None, help="S3 download cache (default: data/kotl/cache)")
+    _add_store_args(parser)
+
+
 def register_kotl_parser(sub) -> None:
     kotl = sub.add_parser("kotl", help="Order Tracking Ledger (sent / done / left)")
     ks = kotl.add_subparsers(dest="kotl_command", required=True)
@@ -80,144 +237,32 @@ def register_kotl_parser(sub) -> None:
         help="submit from kelaidata shares trade file (S3 CSV) + ds2 H5 prices "
         "(fake by default; --flex-env UAT/PROD goes live)",
     )
-    sk.add_argument("--trade-date", type=date.fromisoformat, required=True)
-    sk.add_argument(
-        "--shares",
+    _add_submit_kelai_args(sk)
+
+    rs = ks.add_parser(
+        "resend",
+        help="re-send specific tickers for a day already submitted (forced, "
+        "residual-capped): unresolved names skipped earlier "
+        "(--retry-unresolved) or an operator-picked --ticker after a cancel",
+    )
+    rs.add_argument(
+        "--ticker",
+        action="append",
         default=None,
-        help="shares trade file, s3:// or local (default: "
-        "s3://kelaitrading/portfolio/shares/[<strategy-id>/]Portfolio_<YYYYMMDD>.csv)",
+        metavar="TICKER",
+        help="re-send this ds2 ticker only (repeatable; AAPL and AAPL.US both "
+        "match) — every named ticker must have a residual trade today, or "
+        "the resend refuses (exit 5)",
     )
-    sk.add_argument(
-        "--ds2",
+    rs.add_argument(
+        "--retry-unresolved",
         default=None,
-        help="ds2 H5, s3:// or local (default: s3://kelaidata/data/LSEG/Datastream2/ds2_data.h5)",
+        metavar="CSV",
+        help="unresolved_<submit_id>.csv (local or s3://) written by a prior "
+        "submit — re-send its tickers now that FlexTrade seeded the master; "
+        "tickers that dropped out of today's target only warn",
     )
-    sk.add_argument(
-        "--strategy-id",
-        default=None,
-        help="pipeline strategy subfolder (e.g. USATop2000_neutralized); also "
-        "routes the trade file to s3://kelaitrading/trades/<strategy-id>/…",
-    )
-    sk.add_argument(
-        "--sod-source",
-        choices=("flex", "prior-target", "csv", "flat"),
-        default=None,
-        help="SOD book source: flex = live ReplayPositions (with recon guard), "
-        "prior-target = yesterday's Portfolio_*.csv, csv = --sod file, flat = no book; "
-        "legacy --sod/--assume-flat-sod map to csv/flat",
-    )
-    sod_group = sk.add_mutually_exclusive_group(required=False)
-    sod_group.add_argument("--sod", type=Path, default=None, help="SOD CSV (ticker, quantity, market_price)")
-    sod_group.add_argument(
-        "--assume-flat-sod",
-        action="store_true",
-        help="no SOD book: trade the full target file from flat",
-    )
-    sk.add_argument(
-        "--flex-env",
-        choices=("FAKE", "UAT", "PROD"),
-        default="FAKE",
-        help="FAKE (default, offline adapter) or UAT/PROD via the live gRPC adapter",
-    )
-    sk.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="build + print orders and write the trade file; no gRPC, no ledger write",
-    )
-    sk.add_argument(
-        "--force",
-        action="store_true",
-        help="allow a second live submission attempt for the same (trade-date, env) "
-        "past the once-a-day claim — target mode still caps the send to the "
-        "residual (target − already-sent), so a forced re-run can never resend "
-        "what already went out. On a live env the already-sent source is always "
-        "flex (live GetOrderInfo2 state, overriding --sent-source): working "
-        "orders count in full, and cancelled orders count only their final "
-        "fills so the confirmed-dead remainder can be resent",
-    )
-    sk.add_argument(
-        "--no-route",
-        action="store_true",
-        help="safe live test (FlexTrade-confirmed): send every order with blank "
-        "broker/algo and NO_AUTOMATION — Flex accepts and books them but nothing "
-        "goes to the street (no fills, no PnL). Still a real submit: claim taken, "
-        "ledger written, and target mode counts the staged orders as sent, so "
-        "routed trading for this (trade-date, env) is consumed for the day; "
-        "cancel the staged orders in the Flex UI or let GFD expire them",
-    )
-    sk.add_argument(
-        "--allow-outside-market-hours",
-        action="store_true",
-        help="override the NYSE market-hours gate (live submits are otherwise "
-        "refused outside trading days 03:00 ET to the close, exit 7) — "
-        "deliberate testing only",
-    )
-    sk.add_argument(
-        "--sent-source",
-        choices=("ledger", "flex"),
-        default="ledger",
-        help="where 'already sent today' comes from for the target-mode residual: "
-        "the KOTL ledger (default, cross-checked against live Flex orders) or "
-        "flex (recovery when the ledger lost a write: recompute from live "
-        "GetOrderInfo2, KOTL-stamped orders only; the target cap still applies). "
-        "--force on a live env always uses flex regardless of this flag",
-    )
-    sk.add_argument(
-        "--recon-max-shares",
-        type=Decimal,
-        default=None,
-        help="flex SOD recon: abort when total |Flex − prior target| shares exceed N "
-        "(default 0 = any divergence aborts; env KOTL_RECON_MAX_SHARES)",
-    )
-    sk.add_argument(
-        "--recon-max-names",
-        type=int,
-        default=None,
-        help="flex SOD recon: abort when more than N names diverge "
-        "(default 0; env KOTL_RECON_MAX_NAMES)",
-    )
-    sk.add_argument(
-        "--max-orders",
-        type=int,
-        default=None,
-        help="refuse before CreateOrders above this order count "
-        "(default 5000; env KOTL_MAX_ORDERS)",
-    )
-    sk.add_argument(
-        "--max-gross-notional",
-        type=Decimal,
-        default=None,
-        help="refuse before CreateOrders above this gross $ notional at ds2 prices "
-        "(default 100000000; env KOTL_MAX_GROSS_NOTIONAL)",
-    )
-    sk.add_argument(
-        "--unresolved",
-        choices=("block", "skip"),
-        default="block",
-        help="symbols missing from the Flex security master (pre-submit "
-        "SecurityService lookup, live envs): block the submit (default, exit 6) "
-        "or skip them and submit resolved names only; the unresolved list is "
-        "always written as unresolved_<submit_id>.csv next to the trade file",
-    )
-    sk.add_argument(
-        "--sedol-source",
-        default=None,
-        help="book SEDOL map for pre-submit lookup (SEDOL is FlexTrade's "
-        "preferred identifier): 'snowflake' (default; daily kelai security "
-        "master KELAI.LSEG[_CANARY].SECURITY_MASTER_DT, schema by env), a CSV "
-        "path/s3:// URL with infocode,sedol columns, or 'none' for "
-        "symbol-only resolution (env KOTL_SEDOL_SOURCE)",
-    )
-    sk.add_argument(
-        "--trade-file-out",
-        default=None,
-        help="trade file destination, local path or s3:// URL (default: "
-        "s3://kelaitrading/trades/<strategy-id>/<yyyymmdd>/trades_<submit_id>.csv "
-        "when --strategy-id is given, else <data-dir>/trades/<yyyymmdd>/…)",
-    )
-    sk.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
-    sk.add_argument("--cache-dir", type=Path, default=None, help="S3 download cache (default: data/kotl/cache)")
-    _add_store_args(sk)
+    _add_submit_kelai_args(rs, resend=True)
 
     sb = ks.add_parser(
         "snapshot-book",
@@ -524,7 +569,7 @@ def run_kotl(args) -> int:
         )
         return 0
 
-    if cmd == "submit-kelai":
+    if cmd in ("submit-kelai", "resend"):
         from ki_ops.kotl.submit import (
             MarketClosedError,
             ReconDivergenceError,
@@ -532,6 +577,24 @@ def run_kotl(args) -> int:
             UnresolvedSecuritiesError,
             submit_kelai_shares,
         )
+
+        resend = cmd == "resend"
+        only_tickers = list(getattr(args, "ticker", None) or [])
+        retry_unresolved = getattr(args, "retry_unresolved", None)
+        if resend and not only_tickers and not retry_unresolved:
+            print(
+                "resend needs a scope: pass --ticker TICKER (repeatable) and/or "
+                "--retry-unresolved <unresolved_<submit_id>.csv>"
+            )
+            return 2
+        if resend:
+            print(
+                "RESEND: forced re-submit scoped to "
+                + ", ".join(only_tickers + ([str(retry_unresolved)] if retry_unresolved else []))
+                + " — target mode caps every send to the residual; working and "
+                "unfinalized orders stay fully protected, only never-sent "
+                "quantity and confirmed-cancelled remainders go out"
+            )
 
         flex_env = getattr(args, "flex_env", "FAKE")
         adapter = None
@@ -556,7 +619,7 @@ def run_kotl(args) -> int:
                 recon_max_shares=getattr(args, "recon_max_shares", None),
                 recon_max_names=getattr(args, "recon_max_names", None),
                 dry_run=getattr(args, "dry_run", False),
-                force=getattr(args, "force", False),
+                force=getattr(args, "force", False) or resend,
                 max_orders=getattr(args, "max_orders", None),
                 max_gross_notional=getattr(args, "max_gross_notional", None),
                 trade_file_out=getattr(args, "trade_file_out", None),
@@ -567,6 +630,8 @@ def run_kotl(args) -> int:
                     args, "allow_outside_market_hours", False
                 ),
                 no_route=getattr(args, "no_route", False),
+                only_tickers=only_tickers or None,
+                retry_unresolved=retry_unresolved,
             )
         except ReconDivergenceError as exc:
             print(f"RECON BLOCKED: {exc}")
@@ -581,24 +646,26 @@ def run_kotl(args) -> int:
             print(f"SUBMIT REFUSED: {exc}")
             return EXIT_SUBMIT_REFUSED
 
-        print(
-            json.dumps(
-                {
-                    "submit_id": submit.submit_id,
-                    "trade_date": args.trade_date.isoformat(),
-                    "env": flex_env,
-                    "dry_run": getattr(args, "dry_run", False),
-                    "no_route": getattr(args, "no_route", False),
-                    "target_covered": bool(
-                        (submit.flex_response or {}).get("target_covered")
-                    ),
-                    "shares_file": args.shares or "s3 default",
-                    "order_count": len(submit.payload),
-                    "flex_order_ids": list(submit.flex_order_ids),
-                },
-                indent=2,
-            )
-        )
+        summary = {
+            "submit_id": submit.submit_id,
+            "trade_date": args.trade_date.isoformat(),
+            "env": flex_env,
+            "dry_run": getattr(args, "dry_run", False),
+            "no_route": getattr(args, "no_route", False),
+            "target_covered": bool(
+                (submit.flex_response or {}).get("target_covered")
+            ),
+            "shares_file": args.shares or "s3 default",
+            "order_count": len(submit.payload),
+            "flex_order_ids": list(submit.flex_order_ids),
+        }
+        if resend:
+            summary["resend"] = True
+            summary["scope"] = {
+                "tickers": only_tickers,
+                "retry_unresolved": retry_unresolved,
+            }
+        print(json.dumps(summary, indent=2))
         return 0
 
     if cmd == "snapshot-book":

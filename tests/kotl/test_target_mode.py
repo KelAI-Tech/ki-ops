@@ -592,6 +592,93 @@ def test_e2e_sent_source_flex_recovers_lost_ledger(e2e):
     assert e2e["store"].load_submits() == []
 
 
+def test_e2e_resend_ticker_frees_only_cancelled_remainder(e2e, capsys):
+    """kotl resend --ticker: forced re-submit scoped to one name — the
+    confirmed-cancelled remainder goes out, everything else stays untouched
+    (and out-of-scope sends produce no overshoot noise)."""
+    from tests.kotl.fake_flex_sdk import make_order_info
+
+    _echo_create_results(e2e)
+    first = _e2e_submit(e2e)
+    assert first.ok and len(first.payload) == 2
+
+    stored = e2e["store"].load_working_orders(trade_date=date(2026, 8, 6))
+    by_symbol = {o.symbol: o for o in stored}
+    aapl, msft = by_symbol["AAPL.US"], by_symbol["MSFT.US"]
+    # Operator cancelled the AAPL order in Flex after 20 of 50 filled; the
+    # MSFT order is still working.
+    e2e["backend"].order_infos = [
+        make_order_info(
+            aapl.flex_order_id, "AAPL.US", side=0, quantity=50.0,
+            filled_quantity=20.0, status=3, notes=f"submit_id={aapl.submit_id}",
+        ),
+        make_order_info(
+            msft.flex_order_id, "MSFT.US", side=1, quantity=30.0,
+            notes=f"submit_id={msft.submit_id}",
+        ),
+    ]
+
+    resent = _e2e_submit(e2e, force=True, only_tickers=["AAPL"])
+    assert resent.ok
+    assert len(resent.payload) == 1
+    assert resent.payload[0]["symbol"] == "AAPL.US"
+    assert resent.payload[0]["side"] == "BUY"
+    assert resent.payload[0]["quantity"] == 30.0  # 50 target − 20 final fills
+    out = capsys.readouterr().out
+    assert "resend scope: 1 of 2 order(s) kept (AAPL)" in out
+    assert "ignoring 1 already-sent symbol(s) outside the scope (MSFT.US" in out
+    assert "PAST today's delta" not in out  # no overshoot noise about MSFT
+
+
+def test_e2e_resend_unknown_or_absent_ticker_refuses(e2e):
+    """--ticker names must have a residual trade intent — typo protection."""
+    from ki_ops.kotl.submit import SubmitRefusedError
+
+    _echo_create_results(e2e)
+    _e2e_submit(e2e)
+    _mirror_to_backend(e2e)
+
+    with pytest.raises(SubmitRefusedError, match="no trade intent for ticker\\(s\\) ZZZZ"):
+        _e2e_submit(e2e, force=True, only_tickers=["ZZZZ"])
+    # a fully-working scoped name is a clean covered no-op, not a resend
+    covered = _e2e_submit(e2e, force=True, only_tickers=["AAPL"])
+    assert (covered.flex_response or {}).get("target_covered") is True
+
+
+def test_e2e_resend_retry_unresolved_after_master_seeded(e2e, capsys):
+    """kotl resend --retry-unresolved: names skipped by --unresolved skip go
+    out once FlexTrade seeds the master; names that dropped out of the target
+    only warn; already-sent names outside the scope are ignored."""
+    from tests.kotl.fake_flex_sdk import make_security
+
+    _echo_create_results(e2e)
+    e2e["backend"].security_master = [make_security("AAPL.US", 15)]  # no MSFT yet
+    first = _e2e_submit(e2e, unresolved="skip")
+    assert first.ok
+    assert [p["symbol"] for p in first.payload] == ["AAPL.US"]
+
+    trades_dir = e2e["store"].data_dir / "trades" / "20260806"
+    (unresolved_csv,) = trades_dir.glob("unresolved_*.csv")
+    assert "MSFT" in unresolved_csv.read_text()
+    # a ticker that dropped out of today's target must only warn on retry
+    with unresolved_csv.open("a", encoding="utf-8") as fh:
+        fh.write("GONE,GONE.US,BUY,10,GONE.US\n")
+
+    _mirror_to_backend(e2e)
+    e2e["backend"].security_master.append(make_security("MSFT.US", 540))
+
+    resent = _e2e_submit(e2e, force=True, retry_unresolved=str(unresolved_csv))
+    assert resent.ok
+    assert len(resent.payload) == 1
+    assert resent.payload[0]["symbol"] == "MSFT.US"
+    assert resent.payload[0]["side"] == "SELL"
+    assert resent.payload[0]["quantity"] == 30.0
+    out = capsys.readouterr().out
+    assert "2 ticker(s) from unresolved report" in out
+    assert "no trade intent today (skipped): GONE" in out
+    assert "ignoring 1 already-sent symbol(s) outside the scope (AAPL.US" in out
+
+
 def test_e2e_dry_run_prints_residual_audit_without_grpc(e2e, capsys):
     """The canary nightly dry-run exercises the guard with no cross-check."""
 

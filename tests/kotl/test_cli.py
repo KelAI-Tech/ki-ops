@@ -172,6 +172,57 @@ def test_kotl_cli_submit_kelai_no_route(tmp_path):
     assert (tmp_path / "kotl" / "working_orders.csv").exists()
 
 
+def test_kotl_cli_resend_offline(tmp_path):
+    import pytest
+
+    pytest.importorskip("h5py")
+    from tests.kotl.test_kelaidata_source import make_ds2_h5
+
+    h5 = make_ds2_h5(tmp_path / "ds2_data.h5")
+    shares_dir = tmp_path / "shares"
+    shares_dir.mkdir()
+    shares = shares_dir / "Portfolio_20260806.csv"
+    shares.write_text("AAPL,50,VWAP\nMSFT,-30,VWAP\n")
+
+    rc = run_kotl(_kelai_args(tmp_path, shares, h5, sod_source="flat"))
+    assert rc == 0
+
+    def _resend_args(**kwargs):
+        base = dict(
+            kotl_command="resend",
+            sod_source="flat",
+            ticker=None,
+            retry_unresolved=None,
+        )
+        base.update(kwargs)
+        return _kelai_args(tmp_path, shares, h5, **base)
+
+    # no scope → usage error
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args())
+    assert rc == 2
+    assert "resend needs a scope" in buf.getvalue()
+
+    # scoped to one ticker (FAKE env: no target mode; the filter still applies)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args(ticker=["AAPL"]))
+    assert rc == 0
+    out = buf.getvalue()
+    assert "RESEND" in out
+    assert "resend scope: 1 of 2 order(s) kept (AAPL)" in out
+    assert '"order_count": 1' in out
+    assert '"resend": true' in out
+
+    # unknown ticker → refusal, exit 5
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args(ticker=["ZZZZ"]))
+    assert rc == EXIT_SUBMIT_REFUSED
+    assert "no trade intent" in buf.getvalue()
+
+
 def test_kotl_cli_submit_kelai_flex_sod_recon_exit_code(tmp_path, monkeypatch):
     import pytest
 
