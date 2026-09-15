@@ -526,7 +526,7 @@ def scale_orders_to_turnover_and_gmv(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.34"),
     target_gmv: Decimal = Decimal("90000000"),
 ) -> list[Order]:
     """Scale expanding vs contracting trades to hit two-way TO and projected GMV."""
@@ -645,7 +645,7 @@ def turnover_breach_scale(
     sod: Portfolio,
     orders: Sequence[Order],
     *,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.34"),
 ) -> Decimal:
     """Scale factor so two-way turnover vs ``sod`` reaches ``target_turnover``."""
     base = turnover_ratio(sod, orders)
@@ -719,7 +719,7 @@ def run_lseg_perturb(
     trades_csv: str | Path | None = None,
     cash: Decimal | float | int | str = 0,
     config_path: str | Path | None = None,
-    target_turnover: Decimal = Decimal("0.26"),
+    target_turnover: Decimal = Decimal("0.34"),
     target_gmv: Decimal = Decimal("90000000"),
     prices_csv: str | Path | None = None,
     price_by_infocode: Mapping[str, Decimal] | None = None,
@@ -728,16 +728,19 @@ def run_lseg_perturb(
     ticker_mapping_csv: str | Path | None = None,
     adv_csv: str | Path | None = None,
     as_of: date | None = None,
+    override_turnover: bool = False,
 ) -> dict[str, Any]:
     """POC risk check: same SOD + trade CSVs; optional scale or zero-qty book."""
     from datetime import date as date_cls
 
     from ki_ops.audit import input_hashes, settings_hash
+    from ki_ops.checks.rules import TURNOVER_BAND_LOGIC, turnover_band_thresholds
+    from ki_ops.config import with_turnover_override
     from ki_ops.intents import load_sod_positions_csv
     from ki_ops.listing import listing_csv_has_status_fields, load_adv_map, load_listing_status
 
     trade_as_of = as_of or date_cls(2026, 8, 6)
-    settings = load_risk_settings(config_path)
+    settings = with_turnover_override(load_risk_settings(config_path), override_turnover)
     if sod is None:
         if sod_csv is None:
             raise ValueError("Need sod Portfolio or sod_csv")
@@ -805,6 +808,7 @@ def run_lseg_perturb(
             "trade_intents_out": trades_out,
         }
     )
+    warn_above, block_above = turnover_band_thresholds(settings)
     return {
         "perturb": scenario,
         "input": {
@@ -821,7 +825,17 @@ def run_lseg_perturb(
             "prices_csv": str(prices_csv) if prices_csv else None,
             "sod_csv": str(sod_csv) if sod_csv else None,
             "trade_intents_file": str(trades_out) if trades_out else None,
-            "max_turnover": format_decimal(settings.max_turnover),
+            "max_turnover": (
+                format_decimal(block_above) if block_above is not None else None
+            ),
+            "turnover_band_logic": TURNOVER_BAND_LOGIC,
+            "turnover_warn_above": (
+                format_decimal(warn_above) if warn_above is not None else None
+            ),
+            "turnover_block_above": (
+                format_decimal(block_above) if block_above is not None else None
+            ),
+            "allow_turnover_override": settings.allow_turnover_override,
             "max_net_exposure": format_decimal(settings.max_net_exposure),
             "max_adv_participation": format_decimal(settings.max_adv_participation),
             "max_order_size": format_decimal(settings.max_order_size),

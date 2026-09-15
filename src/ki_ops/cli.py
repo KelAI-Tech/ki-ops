@@ -175,6 +175,11 @@ def _parser() -> argparse.ArgumentParser:
             default=None,
             help="write the same JSON artifact (with input/config hashes) to FILE",
         )
+        parser.add_argument(
+            "--override-turnover",
+            action="store_true",
+            help="downgrade MAX_TURNOVER block to TURNOVER_OVERRIDE warn",
+        )
 
     rp = sub.add_parser(
         "run-perturb-baseline",
@@ -184,13 +189,13 @@ def _parser() -> argparse.ArgumentParser:
 
     pt = sub.add_parser(
         "run-perturb-var-checks",
-        help="scale trades above max_turnover, then run the full pre-trade gate",
+        help="scale trades above the turnover block band, then run the full pre-trade gate",
     )
     _add_poc_csv_args(pt)
     pt.add_argument(
         "--target-turnover",
-        default="0.26",
-        help="scaled two-way turnover target (default 0.26 vs 0.25 cap)",
+        default="0.34",
+        help="scaled two-way turnover target (default 0.34 vs mean+2σ ≈ 0.33)",
     )
     pt.add_argument(
         "--target-gmv",
@@ -507,7 +512,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
     tickers = load_infocode_ticker_map(poc.security_master)
     if mapping:
         tickers.update(load_infocode_ticker_map(mapping, as_of=as_of))
-    target = Decimal(getattr(args, "target_turnover", "0.26")) if scenario == "var-checks" else Decimal("0.26")
+    target = Decimal(getattr(args, "target_turnover", "0.34")) if scenario == "var-checks" else Decimal("0.26")
     out = run_lseg_perturb(
         _load_orders(trades),
         scenario=scenario,  # type: ignore[arg-type]
@@ -524,6 +529,7 @@ def _run_perturb_breach(args, *, scenario: str) -> int:
         ticker_mapping_csv=mapping,
         adv_csv=getattr(args, "adv", None) or poc.adv,
         as_of=as_of,
+        override_turnover=getattr(args, "override_turnover", False),
     )
     from ki_ops.gate import format_verdict_json
 

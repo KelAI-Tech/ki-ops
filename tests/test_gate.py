@@ -43,7 +43,8 @@ def write_config(tmp_path: Path) -> Path:
     cfg.write_text(
         "risk_management:\n"
         "  max_net_exposure: 0.10\n"
-        "  max_turnover: 0.25\n"
+        "  turnover_mean: 0.10\n"
+        "  turnover_std: 0.05\n"
         "  max_position_concentration: 0.5\n"
     )
     return cfg
@@ -160,7 +161,8 @@ def test_sma_ima_config_matches_mandate():
     settings = load_risk_settings(repo_yaml)
     assert settings.max_net_exposure == Decimal("0.10")  # IMA |net| <= 10%, per-GMV form
     assert settings.max_position_concentration == Decimal("0.05")  # IMA 5% of GMV
-    assert settings.max_turnover == Decimal("0.25")  # two-way, kelaisim convention
+    assert settings.turnover_mean == Decimal("0.25")
+    assert settings.turnover_std == Decimal("0.04")
     assert settings.max_adv_participation == Decimal("0.10")  # warn-only
     assert settings.max_portfolio_value == Decimal("125000000")  # 500% of $25M AUM
 
@@ -274,10 +276,8 @@ def test_gate_adv_participation_warns(tmp_path, capsys):
     cfg.write_text(
         "risk_management:\n"
         "  max_net_exposure: 0.10\n"
-        # The AAPL trade below is ~400x the book's GMV; an effectively
-        # unbounded turnover limit keeps this test on the ADV check alone
+        # Leave turnover_mean/std unset so the turnover check is skipped
         # (turnover blocking has its own tests).
-        "  max_turnover: 100000\n"
         "  max_position_concentration: 0.5\n"
         "  max_adv_participation: 0.10\n"
     )

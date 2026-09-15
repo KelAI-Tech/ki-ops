@@ -34,8 +34,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from ki_ops.checks import CheckViolation, block, warn
-from ki_ops.config import load_risk_settings
+from ki_ops.checks import CheckViolation, Severity, block, warn
+from ki_ops.checks.rules import (
+    turnover_band_findings,
+    turnover_band_thresholds,
+    TURNOVER_BAND_LOGIC,
+)
+from ki_ops.config import load_risk_settings, with_turnover_override
 from ki_ops.engine import format_decimal, passed_status
 from ki_ops.kotl.kelaidata_source import (
     DEFAULT_CACHE_DIR,
@@ -253,10 +258,11 @@ def check_dollar_book(
             ratio, prior_gmv = turn
             metrics["turnover"] = format_decimal(ratio, places=_RATIO)
             metrics["prior_gmv"] = format_decimal(prior_gmv)
-            if ratio > settings.max_turnover:
-                violations.append(
-                    block("MAX_TURNOVER", f"{ratio:.4f} > max {settings.max_turnover}")
-                )
+            for finding in turnover_band_findings(ratio, settings):
+                if finding.severity == Severity.BLOCK:
+                    violations.append(finding)
+                else:
+                    warnings.append(finding)
     return violations, warnings, metrics
 
 
@@ -345,13 +351,27 @@ def check_shares_book(
             ratio, prior_gmv = turn
             metrics["churn"] = format_decimal(ratio, places=_RATIO)
             metrics["prior_gmv"] = format_decimal(prior_gmv)
-            if ratio > settings.max_turnover:
-                violations.append(
-                    block(
-                        "SHARES_MAX_TURNOVER",
-                        f"shares day-over-day churn {ratio:.4f} > max {settings.max_turnover}",
+            for finding in turnover_band_findings(
+                ratio,
+                settings,
+                block_code="SHARES_MAX_TURNOVER",
+                warn_code="SHARES_WARN_TURNOVER",
+                override_code="SHARES_TURNOVER_OVERRIDE",
+            ):
+                if finding.severity == Severity.BLOCK:
+                    violations.append(
+                        block(
+                            finding.code,
+                            f"shares day-over-day churn {finding.message}",
+                        )
                     )
-                )
+                else:
+                    warnings.append(
+                        warn(
+                            finding.code,
+                            f"shares day-over-day churn {finding.message}",
+                        )
+                    )
 
     # Names in the dollar book that never made it into the shares file.
     ticker_by_infocode = {sid: t for t, sid in snapshot.infocode_by_ticker.items()}
@@ -454,6 +474,7 @@ def run_gate_checks(
     ds2: str | None = None,
     config: str | Path | None = None,
     cache_dir: str | Path | None = None,
+    override_turnover: bool = False,
 ) -> dict[str, Any]:
     """Resolve inputs, run all gate checks, and build the verdict payload.
 
@@ -468,7 +489,7 @@ def run_gate_checks(
     # The risk YAML may live on S3 (s3://kelaitrading/config/…) so limit
     # changes are an S3 upload, not a wheel release / Airflow redeploy.
     config_local = fetch(config, cache_dir=cache)
-    settings = load_risk_settings(config_local)
+    settings = with_turnover_override(load_risk_settings(config_local), override_turnover)
 
     dollar_spec = dollar_file or dollar_book_path(strategy_id, trade_date, env=env)
     dollar_local = fetch(dollar_spec, cache_dir=cache)
@@ -531,6 +552,7 @@ def run_gate_checks(
     allowed = not violations
     ds2_spec = (ds2 or DEFAULT_DS2_H5) if shares_spec is not None else None
     two_way_turnover = dollar_metrics.pop("turnover", None)
+    warn_above, block_above = turnover_band_thresholds(settings)
     return {
         "command": "gate",
         "ki_ops_version": __version__,
@@ -550,7 +572,17 @@ def run_gate_checks(
             "max_position_concentration": format_decimal(
                 settings.max_position_concentration, places=_RATIO
             ),
-            "max_turnover": format_decimal(settings.max_turnover, places=_RATIO),
+            "max_turnover": (
+                format_decimal(block_above, places=_RATIO) if block_above is not None else None
+            ),
+            "turnover_band_logic": TURNOVER_BAND_LOGIC,
+            "turnover_warn_above": (
+                format_decimal(warn_above, places=_RATIO) if warn_above is not None else None
+            ),
+            "turnover_block_above": (
+                format_decimal(block_above, places=_RATIO) if block_above is not None else None
+            ),
+            "allow_turnover_override": settings.allow_turnover_override,
             "max_adv_participation": format_decimal(
                 settings.max_adv_participation, places=_RATIO
             ),
@@ -620,6 +652,12 @@ def register_gate_parser(sub) -> None:
         default=None,
         help="S3 download cache (default: data/kotl/cache)",
     )
+    g.add_argument(
+        "--override-turnover",
+        action="store_true",
+        help="downgrade MAX_TURNOVER block to TURNOVER_OVERRIDE warn "
+        "(mean+2σ breach)",
+    )
 
 
 def run_gate(args) -> int:
@@ -637,6 +675,7 @@ def run_gate(args) -> int:
             ds2=args.ds2,
             config=args.gate_config,
             cache_dir=args.cache_dir,
+            override_turnover=getattr(args, "override_turnover", False),
         )
         if args.json_out:
             write_verdict(args.json_out, payload)

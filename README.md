@@ -75,18 +75,18 @@ Each command runs the **full** pre-trade gate on the same POC SOD + trade CSVs (
 |---------|------|------|----------|------------|
 | `run-perturb-baseline` | live intents (~24% two-way TO) | 0 | `"with warnings"` | Drop delisted **56992** (`NOT_TRADABLE`); **335446** over 10% ADV (`MAX_ADV_PARTICIPATION`, warn) |
 | `run-perturb-zero` | all trade qty → 0 | 0 | `"with warnings"` | Turnover 0; `MAX_POSITION_SIZE` warn on SOD **335446** |
-| `run-perturb-var-checks` | scale trades above `max_turnover` (~26% vs 25% cap) | 2 | `false` | **Block `MAX_TURNOVER`**; same two warnings as baseline |
+| `run-perturb-var-checks` | scale trades above the turnover block band (~34% vs mean+2σ ≈ 0.33) | 2 | `false` | **Block `MAX_TURNOVER`**; same two warnings as baseline |
 
 Stdout JSON has a top-level `perturb` (`"baseline"` / `"zero-turnover"` / `"var-checks"`), then `input` and `output` (blank line between them):
 
-- `input`: `as_of`, `sod_source`, paths (`config`, `security_master`, `ticker_mapping_dt`, `adv`, `prices_csv`, `sod_csv`, `trade_intents_file`), hashes (`config_hash`, `input_hashes`), caps (`max_turnover`, `max_net_exposure`, `max_adv_participation`, `max_order_size`), `turnover_convention`
+- `input`: `as_of`, `sod_source`, paths (`config`, `security_master`, `ticker_mapping_dt`, `adv`, `prices_csv`, `sod_csv`, `trade_intents_file`), hashes (`config_hash`, `input_hashes`), caps (`max_turnover` (= mean+2σ), `turnover_band_logic`, `turnover_warn_above`, `turnover_block_above`, `allow_turnover_override`, `max_net_exposure`, `max_adv_participation`, `max_order_size`), `turnover_convention`
 - `output`: SOD GMV / NMV / net exposure, `turnover`, `projected_portfolio_value`, `projected_net_exposure`, `passed` (`true` / `false` / `"with warnings"`), `violation_codes` / `warning_codes` plus full `violations` / `warnings`
 
 Write the same JSON to disk with `--json-out FILE`.
 
 Shared overrides: `--sod`, `--trades`, `--prices`, `--adv`, `--ticker-mapping`, `--poc-data`, `--config` (POC YAML, default `config/risk_management_poc.yaml`), `--as-of` (default `2026-08-06`), `--cash`, `--json-out`.
 
-`run-perturb-var-checks` also takes `--target-turnover` (default `0.26`) and `--target-gmv` (default `90000000`).
+`run-perturb-var-checks` also takes `--target-turnover` (default `0.34`) and `--target-gmv` (default `90000000`).
 
 There are no other perturb command names (no `run-perturb`, `run-perturb-turnover`, or `run-perturb-scaled`).
 
@@ -99,9 +99,12 @@ turnover = (buy$ + sell$) / position GMV        # GMV = Σ|position MV|, cash ex
 ```
 
 **One-way turnover is exactly half of this** (a full book replace = 200% two-way
-= 100% one-way). The YAML `max_turnover: 0.25` is a **two-way** cap, i.e.
-≈ 12.5% one-way — tighter than a 25% one-way cap would be. The POC baseline
-reads ~24% two-way and clears the cap.
+= 100% one-way). With `turnover_mean` / `turnover_std` set from history:
+`mean < TO ≤ mean+2σ` → soft `WARN_TURNOVER` (still passes `"with warnings"`);
+`TO > mean+2σ` → hard `MAX_TURNOVER` block (or `TURNOVER_OVERRIDE` warn with
+`--override-turnover` / `allow_turnover_override: true`). When mean/σ are unset,
+the turnover check is skipped. The POC baseline reads ~24% two-way and clears a
+typical mean+2σ band when mean≈0.25 and σ≈0.04.
 Every JSON output carries a `turnover_convention` field stating the formula so
 numbers are never compared across conventions by accident.
 
@@ -109,14 +112,17 @@ numbers are never compared across conventions by accident.
 
 Two explicit portfolio measures (`Portfolio.gmv` / `Portfolio.gmv_plus_cash`):
 
-- `gmv` — Σ|position MV|, **cash excluded**. Denominator for `max_turnover`
+- `gmv` — Σ|position MV|, **cash excluded**. Denominator for turnover
   and `max_position_concentration` (matches kelaisim's positions-only GMV).
 - `gmv_plus_cash` — deployed capital. Used by `max_portfolio_value` and
   reported as `projected_portfolio_value`.
 
 ### Risk notes (POC)
 
-- `max_turnover` — two-way / position GMV; **blocks**
+- `turnover_mean` / `turnover_std` — history band: soft warn above mean, **block**
+  above mean+2σ; both `0` skips the turnover check
+- `allow_turnover_override` / CLI `--override-turnover` — downgrade the hard block
+  to `TURNOVER_OVERRIDE` warn
 - `max_net_exposure` — projected `|NMV|/GMV`; **blocks** (POC cap 0.10)
 - `max_portfolio_value` — projected GMV + cash; **blocks**
 - `max_position_concentration` — |MV| / position GMV; **blocks**
@@ -169,7 +175,7 @@ ki-ops gate --strategy-id df_combo_..._neutralized --trade-date 2026-08-06 \
   [--ds2 PATH] [--config PATH-or-s3://] [--json-out PATH-or-s3://]
 ```
 
-Checks (limits from the risk YAML): GMV > 0, `|net|/GMV` vs `max_net_exposure`, per-name `|dollars|/GMV` vs `max_position_concentration`, two-way turnover vs the latest prior `Portfolio_*.csv` in the same folder vs `max_turnover` (prior missing → warning, check skipped). Shares side adds net/GMV, day-over-day churn, and a dropped-names count vs the dollar book.
+Checks (limits from the risk YAML): GMV > 0, `|net|/GMV` vs `max_net_exposure`, per-name `|dollars|/GMV` vs `max_position_concentration`, two-way turnover vs the latest prior `Portfolio_*.csv` in the same folder vs the mean/σ band (prior missing → warning, check skipped). Shares side adds net/GMV, day-over-day churn, and a dropped-names count vs the dollar book.
 
 `--config` accepts an `s3://` URI (fetched through the ETag cache like every other S3 input), so limits can change without a wheel release or Airflow redeploy. The SMA/IMA mandate limits live in [`config/risk_management_sma_ima.yaml`](config/risk_management_sma_ima.yaml) (repo source of record); the runtime copy the kelaidata gate task reads is `s3://kelaitrading/config/ki_ops/risk_management_sma_ima.yaml` — re-upload after changing the repo copy. `--config` defaults to the POC limits (`config/risk_management_poc.yaml`).
 
@@ -181,7 +187,7 @@ Exit codes (Airflow contract):
 | `1` | infra error (missing input, S3 failure…) | `{"passed": false, "error": …, "error_type": "infra", "ki_ops_version": …}` |
 | `2` | a blocking risk check failed | full verdict JSON with `violation_codes` |
 
-The verdict JSON has two sections. `input` is what was read: files, hashes, and the limits that were applied (`max_net_exposure`, `max_position_concentration`, `max_turnover`, `max_adv_participation`). `output` is the result: `passed` (`true` / `false` / `"with warnings"`), `2-way turnover` (dollar turnover vs the prior book; `null` if no prior), `dollar` / `shares` metrics, `violation_codes` / `violations`, `warning_codes` / `warnings`, and `corp_action_check: "not_implemented"` (Snowflake DS2Adj corp-action check is a schema-reserved follow-up). Top-level fields are only `command` and `ki_ops_version`. `--json-out` writes the same payload to a local file or an `s3://` URI.
+The verdict JSON has two sections. `input` is what was read: files, hashes, and the limits that were applied (`max_net_exposure`, `max_position_concentration`, `max_turnover` (= mean+2σ), `turnover_band_logic`, `turnover_warn_above`, `turnover_block_above`, `max_adv_participation`). `output` is the result: `passed` (`true` / `false` / `"with warnings"`), `2-way turnover` (dollar turnover vs the prior book; `null` if no prior), `dollar` / `shares` metrics, `violation_codes` / `violations`, `warning_codes` / `warnings`, and `corp_action_check: "not_implemented"` (Snowflake DS2Adj corp-action check is a schema-reserved follow-up). Top-level fields are only `command` and `ki_ops_version`. `--json-out` writes the same payload to a local file or an `s3://` URI.
 
 ## Email + Slack notifications
 
