@@ -137,6 +137,7 @@ def _payload(symbol: str, qty: float, side: str, *, origin_id: str | None = None
         "timeInForce": "GFD",
         "algo": "VWAP_AMRS",
         "broker": "KEL-GS-EQ-LT",
+        "accountType": "SWAP",
         "notes": "submit_id=abc",
     }
 
@@ -183,6 +184,8 @@ def test_create_orders_maps_fields_and_collects_stream(backend):
     assert first.notes == "submit_id=abc"
     assert first.brokerAutomation.predefinedType == 3  # AUTOROUTE
     assert not hasattr(first, "fund")  # no fund field on the Order proto
+    # Desk requirement: Account Type = Swap on every order (AccountType enum).
+    assert all(o.accountType == 1 for o in req.orders)
 
     assert backend.last_metadata == [("authorization", "Bearer tok")]
     assert backend.channels_opened[0].endpoint == "127.0.0.1:50051"
@@ -202,6 +205,27 @@ def test_create_orders_no_route_payload_maps_to_blank_routing(backend):
     assert first.broker == ""
     assert first.algo == ""
     assert first.brokerAutomation.predefinedType == 2  # NO_AUTOMATION
+    assert first.accountType == 1  # SWAP — required in no-route mode too
+
+
+def test_create_orders_account_type_defaults_to_swap(backend):
+    # A payload missing accountType entirely (hand-built) must still go out as
+    # SWAP — Flex rejects the proto default (PRIME = 0).
+    backend.create_results = [make_create_result("abc-1")]
+    adapter = LiveFlexAdapter(CONFIG)
+    payload = _payload("AAPL.US", 1, "BUY", origin_id="abc-1")
+    del payload["accountType"]
+    adapter.create_orders([payload])
+    assert backend.last_create_request.orders[0].accountType == 1  # SWAP
+
+
+def test_create_orders_account_type_override(backend):
+    backend.create_results = [make_create_result("abc-1")]
+    adapter = LiveFlexAdapter(CONFIG)
+    payload = _payload("AAPL.US", 1, "BUY", origin_id="abc-1")
+    payload["accountType"] = "otc"  # label, any case — resolved via the enum
+    adapter.create_orders([payload])
+    assert backend.last_create_request.orders[0].accountType == 2  # OTC
 
 
 def test_create_orders_send_to_ems_off(backend):

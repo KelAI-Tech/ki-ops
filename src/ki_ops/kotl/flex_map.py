@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import os
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
 from ki_ops.intents import derive_trade_intents, load_sod_positions_csv, load_target_intents_csv
 from ki_ops.models import Order, Side
+
+# Trading-desk requirement (2026-09-15): every order sent to FlexTrade must
+# carry Account Type "Swap" or Flex rejects it (PROD that morning: 1193 BUYs
+# accepted, all 877 SELLs + 1 BUY rejected — orders were going out with the
+# proto default). The proto enum is AccountType in DomainCommons.proto:
+# PRIME = 0 (the unset default), SWAP = 1, OTC = 2.
+DEFAULT_ACCOUNT_TYPE = "SWAP"
+
+
+def _default_account_type() -> str:
+    """``KOTL_FLEX_ACCOUNT_TYPE`` env override, else ``SWAP`` (desk default)."""
+    return (os.environ.get("KOTL_FLEX_ACCOUNT_TYPE") or DEFAULT_ACCOUNT_TYPE).strip().upper()
 
 
 @dataclass(frozen=True)
@@ -30,6 +43,9 @@ class FlexOrderDefaults:
     manual_fill: bool = False
     trading_currency: str = "USD"
     settlement_currency: str = "USD"
+    # Desk requirement: Flex rejects orders without Account Type = Swap (see
+    # DEFAULT_ACCOUNT_TYPE above). Env KOTL_FLEX_ACCOUNT_TYPE overrides.
+    account_type: str = field(default_factory=_default_account_type)
 
 
 def no_route_defaults(defaults: FlexOrderDefaults | None = None) -> FlexOrderDefaults:
@@ -92,6 +108,7 @@ def order_to_flex_dict(
         "broker": cfg.broker,
         "tradingCurrency": cfg.trading_currency,
         "settlementCurrency": cfg.settlement_currency,
+        "accountType": cfg.account_type,
         "price": float(order.limit_price),
         "notes": notes,
     }
@@ -156,6 +173,7 @@ def with_defaults(defaults: FlexOrderDefaults, **overrides: str | bool) -> FlexO
         "manual_fill": "manual_fill",
         "trading_currency": "trading_currency",
         "settlement_currency": "settlement_currency",
+        "account_type": "account_type",
     }
     updates = {field_map[k]: v for k, v in overrides.items() if k in field_map}
     return replace(defaults, **updates) if updates else defaults

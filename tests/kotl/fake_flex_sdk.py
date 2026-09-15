@@ -26,6 +26,9 @@ MARKET_SIDE = {"BUY": 0, "SELL": 1, "COVER": 2, "SHORT": 3}
 ORDER_TYPE = {"MARKET": 0, "LIMIT": 1, "STOP_MARKET": 2, "STOP_LIMIT": 3}
 TIME_IN_FORCE = {"GFD": 0, "GTC": 1, "OPEN": 2, "CLOSE": 3, "GTX": 4, "IOC": 5}
 BROKER_AUTOMATION = {"UNSPECIFIED_AUTOMATION": 0, "NO_AUTOMATION": 2, "AUTOROUTE": 3}
+# AccountType enum (DomainCommons.proto): PRIME is the proto default when the
+# field is never set — the desk requires SWAP on every order.
+ACCOUNT_TYPE = {"PRIME": 0, "SWAP": 1, "OTC": 2}
 
 
 class FakeProtoOrder:
@@ -360,6 +363,7 @@ def install_fake_sdk(monkeypatch, backend: FakeFlexBackend) -> None:
     domain_pb2.PRE_TRADE = 0
     domain_pb2.ALL_ORDERS = 4
     domain_pb2.OrderQueryRequest = FakeOrderQueryRequest
+    domain_pb2.AccountType = _EnumWrapper(ACCOUNT_TYPE)
 
     securities_pb2 = types.ModuleType("API.Securities_pb2")
     securities_pb2.LookupSecurityRequest = FakeLookupSecurityRequest

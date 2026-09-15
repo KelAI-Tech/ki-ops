@@ -14,6 +14,18 @@ Symbols are joined on the full Flex payload symbol (``AAPL.US``, canonical
 master spelling): pre-submit resolution runs *before* the guard, so today's
 payloads, the ledger payloads, and live ``GetOrderInfo2`` rows all speak the
 same vocabulary — a same-day ticker rename cannot split a symbol's history.
+
+GFD session expiry (live-observed PROD 2026-09-14): Flex's ~17:45 ET EOD
+sweep PURGES never-routed orders from the live working set, but their
+queryable ``GetOrderInfo2`` records stay ``TRADABLE / UNFINALIZED /
+CANCEL_ORIGINAL`` forever and ``CancelOrders`` refuses them ("Cancel on
+missing orders is not supported") — no Flex-side transition will ever mark
+them dead. KOTL orders are good-for-day, so once a row's trade session has
+closed (:func:`ki_ops.kotl.market_hours.session_expired`) its fills are
+final and the unfilled remainder is confirmed dead — the same
+"confirmed dead" contract as a terminal cancel ack, extended to the
+calendar. During the live session every unfinalized/rejected order remains
+fully protected.
 """
 
 from __future__ import annotations
@@ -21,11 +33,13 @@ from __future__ import annotations
 import csv
 import io
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ki_ops.kotl.kelai_refresh import flex_side_label
+from ki_ops.kotl.kelai_refresh import _parse_trade_date, flex_side_label
+from ki_ops.kotl.market_hours import session_expired
 from ki_ops.kotl.models import Submit, WorkingOrder
 from ki_ops.kotl.qty import D, signed_qty
 from ki_ops.models import Order
@@ -240,12 +254,18 @@ def is_kotl_row(row: Mapping[str, Any]) -> bool:
     return "submit_id=" in str(row.get("notes") or "")
 
 
-def summarize_flex_row_states(rows: Sequence[Mapping[str, Any]]) -> str:
+def summarize_flex_row_states(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> str:
     """Operator-readable count of KOTL rows per (status, finalization, cancel).
 
     Makes "unfinalized" visible instead of leaving it to inference: a line
     like ``390 × REJECTED / UNFINALIZED (alive)`` tells the operator those
-    orders are parked and revivable, not dead.
+    orders are parked and revivable, not dead. The dead/alive verdict follows
+    :func:`is_confirmed_dead`, so a stale ``TRADABLE / UNFINALIZED`` row
+    whose trade session has ended (Flex EOD purge) reads as confirmed dead.
     """
     from ki_ops.kotl.qty import cancel_status_label, finalization_status_label, flex_status_label
 
@@ -257,7 +277,7 @@ def summarize_flex_row_states(rows: Sequence[Mapping[str, Any]]) -> str:
             flex_status_label(row.get("status")) or "?",
             finalization_status_label(row.get("finalizationStatus")) or "-",
             cancel_status_label(row.get("cancelStatus")) or "-",
-            is_confirmed_dead(row),
+            is_confirmed_dead(row, now=now),
         )
         counts[key] = counts.get(key, 0) + 1
     if not counts:
@@ -269,24 +289,57 @@ def summarize_flex_row_states(rows: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def is_confirmed_dead(row: Mapping[str, Any]) -> bool:
-    """True only when Flex has confirmed this order can never fill again.
+def _session_expired_remainder(row: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """True when the row's trade session has ended with a remainder unfilled.
 
-    Requires lifecycle ``status == CANCELLED`` — the ONLY OrderStatus that
-    proves death. Flex "REJECTED" is really *unfinalized* (a risk-parked
-    order that can still be worked and filled later; live-observed
-    2026-09-14: risk-"rejected" UAT SELLs partially executed), and
-    LOCATE_FAILED is the same ambiguity class.
+    Conservative bias: a missing or unparseable ``tradeDate`` means the
+    session-close determination is uncertain — treat the order as ALIVE. A
+    fully filled row is DONE (nothing left to expire), and a non-trading
+    trade date has no defined close (:func:`session_expired` returns False).
+    """
+    trade_date = _parse_trade_date(row.get("tradeDate"))
+    if trade_date is None:
+        return False
+    filled = abs(D(row.get("filledQuantity") or 0))
+    qty = abs(D(row.get("quantity") or 0))
+    if filled >= qty:
+        return False
+    return session_expired(trade_date, now=now)
 
-    Belt and suspenders: when the row carries ``cancelStatus`` (Orders.proto
-    CancelStatus — an independent workflow field), a cancel that is still
-    REQUESTED / PENDING / REJECTED keeps the order ALIVE: in-flight
-    executions can land until the terminal CANCELED ack. ``CANCEL_ORIGINAL``
-    (no cancel workflow, e.g. GFD expiry) and an absent field defer to the
-    lifecycle status.
+
+def is_confirmed_dead(row: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """True only when this order can never fill again.
+
+    Two independent proofs of death:
+
+    1. **Terminal cancel** — lifecycle ``status == CANCELLED``, the ONLY
+       OrderStatus that proves death. Flex "REJECTED" is really
+       *unfinalized* (a risk-parked order that can still be worked and
+       filled later; live-observed 2026-09-14: risk-"rejected" UAT SELLs
+       partially executed), and LOCATE_FAILED is the same ambiguity class.
+       Belt and suspenders: when the row carries ``cancelStatus``
+       (Orders.proto CancelStatus — an independent workflow field), a cancel
+       that is still REQUESTED / PENDING / REJECTED keeps the order ALIVE:
+       in-flight executions can land until the terminal CANCELED ack.
+       ``CANCEL_ORIGINAL`` (no cancel workflow) and an absent field defer to
+       the lifecycle status.
+
+    2. **Session expiry** — the row's trade session (from ``tradeDate``,
+       America/New_York, NYSE calendar) closed with a remainder unfilled.
+       KOTL orders are good-for-day: post-close the fills are final and the
+       remainder can never execute, whatever the stale record claims —
+       live-observed PROD 2026-09-14, Flex's EOD sweep purged never-routed
+       orders that stay queryable as ``TRADABLE / UNFINALIZED /
+       CANCEL_ORIGINAL`` and refuse cancels. This overrides an in-flight
+       cancel workflow too (nothing can land after the close). Missing or
+       ambiguous ``tradeDate`` → ALIVE (conservative).
+
+    *now* defaults to the real clock (the market-hours seam); tests pin it.
     """
     from ki_ops.kotl.qty import cancel_status_label, flex_status_label
 
+    if _session_expired_remainder(row, now=now):
+        return True
     if flex_status_label(row.get("status")) != "CANCELLED":
         return False
     cancel = cancel_status_label(row.get("cancelStatus"))
@@ -298,6 +351,7 @@ def sent_from_flex_rows(
     *,
     subtract_fills: bool = False,
     resend_cancelled_remainder: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Decimal]:
     """Per-symbol signed sent quantity from live ``GetOrderInfo2`` rows.
 
@@ -310,13 +364,19 @@ def sent_from_flex_rows(
     exactly like a working order's.
 
     *resend_cancelled_remainder* (forced re-runs): a confirmed-dead order
-    (:func:`is_confirmed_dead` — lifecycle CANCELLED with no cancel workflow
-    still in flight) can never fill again, so only its FINAL fills count as
-    sent — the dead remainder becomes eligible to resend. The retry flow for
-    rejected/unfinalized orders is therefore: cancel them in Flex, confirm
-    the cancel, then force a re-run. Off by default: an unforced run keeps
-    the conservative rule that a cancelled remainder is only ever resent by
-    an explicit operator action.
+    (:func:`is_confirmed_dead` — a terminal cancel, or a trade session that
+    ended with the remainder unfilled) can never fill again, so only its
+    FINAL fills count as sent — the dead remainder becomes eligible to
+    resend. Session expiry matters because Flex's EOD sweep purges
+    never-routed orders while their queryable rows stay ``TRADABLE /
+    UNFINALIZED`` and refuse cancels (live-observed PROD 2026-09-14): the
+    cancel-in-Flex-then-force retry flow is impossible for them, but
+    post-close their fills are final so freeing the remainder is safe. A
+    row for today's still-open session stays fully protected. Off by
+    default: an unforced run keeps the conservative rule that a dead
+    remainder is only ever resent by an explicit operator action.
+
+    *now* is the session-expiry clock (default: real clock; tests pin it).
     """
     sent: dict[str, Decimal] = {}
     for row in rows:
@@ -325,9 +385,10 @@ def sent_from_flex_rows(
         symbol = str(row.get("symbol") or "").upper()
         side = flex_side_label(row.get("side")) or ""
         sent_qty = row.get("quantity") or 0
-        if resend_cancelled_remainder and is_confirmed_dead(row):
-            # Terminal ack in hand: only the FINAL fills ever reached the
-            # market; the cancelled remainder is dead and resendable.
+        if resend_cancelled_remainder and is_confirmed_dead(row, now=now):
+            # Order confirmed dead (terminal cancel ack, or its trade session
+            # closed): only the FINAL fills ever reached the market; the
+            # remainder can never execute and is resendable.
             sent_qty = row.get("filledQuantity") or 0
         qty = signed_qty(side, sent_qty)
         if subtract_fills:

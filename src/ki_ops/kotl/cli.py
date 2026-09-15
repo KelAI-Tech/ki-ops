@@ -209,6 +209,13 @@ def register_kotl_parser(sub) -> None:
         "symbol-only resolution (env KOTL_SEDOL_SOURCE)",
     )
     sk.add_argument(
+        "--account-type",
+        default=None,
+        help="Flex Account Type stamped on every order (proto enum: PRIME, "
+        "SWAP, OTC). Default SWAP — the desk requirement; FlexTrade rejects "
+        "orders without Account Type = Swap (env KOTL_FLEX_ACCOUNT_TYPE)",
+    )
+    sk.add_argument(
         "--trade-file-out",
         default=None,
         help="trade file destination, local path or s3:// URL (default: "
@@ -448,7 +455,7 @@ def _run_fills(args) -> int:
         source = LiveRefreshSource(load_flex_config(flex_env=flex_env))
         snapshots = source.fetch_orders(trade_date.isoformat(), stored=orders)
         by_id = {o.flex_order_id: o for o in orders}
-        for updated in merge_order_snapshots(orders, snapshots):
+        for updated in merge_order_snapshots(orders, snapshots, trade_date=trade_date):
             by_id[updated.flex_order_id] = updated
         orders = list(by_id.values())
         note = f"{note}, live flex {flex_env}"
@@ -540,6 +547,13 @@ def run_kotl(args) -> int:
 
             adapter = LiveFlexAdapter(load_flex_config(flex_env=flex_env))
 
+        defaults = None
+        account_type = getattr(args, "account_type", None)
+        if account_type:
+            from ki_ops.kotl.flex_map import FlexOrderDefaults
+
+            defaults = FlexOrderDefaults(account_type=str(account_type).strip().upper())
+
         try:
             submit = submit_kelai_shares(
                 store,
@@ -551,6 +565,7 @@ def run_kotl(args) -> int:
                 sod_source=getattr(args, "sod_source", None),
                 strategy_id=getattr(args, "strategy_id", None),
                 env=flex_env,
+                defaults=defaults,
                 adapter=adapter,
                 cache_dir=args.cache_dir,
                 recon_max_shares=getattr(args, "recon_max_shares", None),

@@ -9,7 +9,13 @@ from typing import Iterable
 from uuid import uuid4
 
 from ki_ops.kotl.enums import OrderStatus
-from ki_ops.kotl.qty import derive_status, leaves_qty, signed_qty
+from ki_ops.kotl.qty import (
+    EXPIRED_SESSION,
+    derive_status,
+    is_cancelled_flex_status,
+    leaves_qty,
+    signed_qty,
+)
 
 D = lambda v: v if isinstance(v, Decimal) else Decimal(str(v))
 
@@ -191,6 +197,7 @@ class WorkingOrder:
         finalization_status: str | None = None,
         cancel_status: str | None = None,
         rejection_reason: str | None = None,
+        session_expired: bool = False,
     ) -> WorkingOrder:
         """Return a copy with refreshed fill state (refresh path).
 
@@ -200,10 +207,27 @@ class WorkingOrder:
         (*finalization_status*, *cancel_status*, *rejection_reason*) follow
         the same rule: a snapshot that carries a value overwrites, an absent
         value keeps what the ledger already knows.
+
+        *session_expired* (GFD expiry, decided by the caller from the trade
+        date's NYSE close): an order the snapshot still shows not DONE derives
+        CANCELLED (expired) and releases its leaves — Flex's EOD sweep purges
+        never-routed orders while their queryable records stay
+        TRADABLE/UNFINALIZED forever (live-observed PROD 2026-09-14). The
+        expiry is recorded by setting ``cancel_status`` to the KOTL-derived
+        literal :data:`~ki_ops.kotl.qty.EXPIRED_SESSION` (overriding the
+        stale Flex label); *finalization_status* stays as reported. An order
+        Flex itself reports as cancelled keeps Flex's own cancel label.
         """
         filled = signed_qty(self.side, unsigned_filled_qty)
-        status = derive_status(self.sent_qty, filled, flex_status=flex_status)
+        status = derive_status(
+            self.sent_qty, filled, flex_status=flex_status, session_expired=session_expired
+        )
         leaves = leaves_qty(self.sent_qty, filled, status)
+        expired = (
+            session_expired
+            and status is OrderStatus.CANCELLED
+            and not is_cancelled_flex_status(flex_status)
+        )
         return WorkingOrder(
             flex_order_id=self.flex_order_id,
             submit_id=self.submit_id,
@@ -223,6 +247,6 @@ class WorkingOrder:
             algo=self.algo,
             order_type=self.order_type,
             finalization_status=finalization_status or self.finalization_status,
-            cancel_status=cancel_status or self.cancel_status,
+            cancel_status=EXPIRED_SESSION if expired else (cancel_status or self.cancel_status),
             rejection_reason=rejection_reason or self.rejection_reason,
         )
