@@ -310,9 +310,11 @@ def _parser() -> argparse.ArgumentParser:
 
     from ki_ops.gate import register_gate_parser
     from ki_ops.kotl.cli import register_kotl_parser
+    from ki_ops.strat_cli import register_strat_parser
 
     register_gate_parser(sub)
     register_kotl_parser(sub)
+    register_strat_parser(sub)
 
     return p
 
@@ -553,6 +555,11 @@ def main(argv: list[str] | None = None) -> int:
         from ki_ops.kotl.cli import run_kotl
 
         return run_kotl(args)
+
+    if command == "strat":
+        from ki_ops.strat_cli import run_strat
+
+        return run_strat(args)
 
     if command == "run-perturb-baseline":
         return _run_perturb(args)

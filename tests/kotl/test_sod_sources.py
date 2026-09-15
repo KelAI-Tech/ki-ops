@@ -178,6 +178,52 @@ def test_flex_sod_no_prior_file_warns_and_proceeds(tmp_path, capsys):
     assert _sides(store, submit) == {"AAPL.US": Decimal("30")}
 
 
+def test_flex_sod_recon_scoped_resend_out_of_scope_drift_is_informational(
+    tmp_path, shares_dir, capsys
+):
+    """Scoped resend: the strict 0/0 default guards only the scoped tickers'
+    book rows — divergence on the rest of the book (normal intraday fills)
+    prints but never blocks."""
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        sod_source="flex",
+        # AAPL moved 20 → 35 (today's fills); the scope is MSFT only.
+        flex_positions={"AAPL.US": Decimal("35")},
+        only_tickers=["MSFT"],
+    )
+    assert _sides(store, submit) == {"MSFT.US": Decimal("-30")}
+    out = capsys.readouterr().out
+    assert "1 diverged name(s) outside the scoped tickers" in out
+    assert "informational only" in out
+
+
+def test_flex_sod_recon_scoped_resend_blocks_on_scoped_name(tmp_path, shares_dir):
+    """A scoped ticker whose own book row diverged still blocks at 0/0; the
+    thresholds then apply to the scoped subset (acknowledge exactly its
+    movement, not the whole book's)."""
+    with pytest.raises(ReconDivergenceError) as err:
+        _submit(
+            tmp_path,
+            shares_dir,
+            sod_source="flex",
+            flex_positions={"AAPL.US": Decimal("35")},  # AAPL diff 15, in scope
+            only_tickers=["AAPL"],
+        )
+    assert "scoped tickers only" in str(err.value)
+
+    store, submit = _submit(
+        tmp_path,
+        shares_dir,
+        sod_source="flex",
+        flex_positions={"AAPL.US": Decimal("35")},
+        only_tickers=["AAPL"],
+        recon_max_shares=Decimal("15"),
+        recon_max_names=1,
+    )
+    assert _sides(store, submit) == {"AAPL.US": Decimal("15")}  # 50 − 35
+
+
 def test_recon_report_math():
     report = reconcile_books(
         {"AAPL": Decimal("25"), "NKE": Decimal("-100")},

@@ -232,6 +232,29 @@ def test_unresolved_rows_and_csv():
     assert "UNRESOLVED SECURITIES (1)" in table and "FlexTrade" in table
 
 
+def test_load_unresolved_tickers_roundtrip(tmp_path):
+    from ki_ops.kotl.flex_symbols import load_unresolved_tickers, write_unresolved_csv
+
+    rows = build_unresolved_rows(
+        ["MSFT", "GONE"],
+        {"MSFT": {"tried": ["MSFT.US"]}, "GONE": {"tried": ["GONE.US"]}},
+        [{"symbol": "MSFT.US", "side": "SELL", "quantity": 30.0}],
+    )
+    dest = tmp_path / "unresolved_s1.csv"
+    write_unresolved_csv(rows, dest)
+    assert load_unresolved_tickers(dest) == ["MSFT", "GONE"]
+
+    bad = tmp_path / "bad.csv"
+    bad.write_text("symbol\nMSFT\n")
+    with pytest.raises(ValueError, match="'ticker' column"):
+        load_unresolved_tickers(bad)
+
+    empty = tmp_path / "empty.csv"
+    empty.write_text("ticker\n")
+    with pytest.raises(ValueError, match="no tickers"):
+        load_unresolved_tickers(empty)
+
+
 def test_resolution_summary_counts_and_rewrites():
     resolved = {"AAPL": "AAPL.US", "BFB": "BF/B.US"}
     details = {

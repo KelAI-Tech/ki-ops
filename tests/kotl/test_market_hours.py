@@ -317,6 +317,10 @@ def test_cli_market_closed_exit_code(tmp_path, monkeypatch):
                 assume_flat_sod=False,
                 sod_source="flat",
                 flex_env="UAT",
+                # csv store: this test exercises the market-hours gate only —
+                # the live-env MySQL ledger default would hit Secrets Manager
+                # before the gate (no AWS creds in CI).
+                store="csv",
                 data_dir=tmp_path / "kotl",
                 cache_dir=tmp_path / "cache",
             )

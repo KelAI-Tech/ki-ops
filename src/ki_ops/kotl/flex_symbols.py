@@ -472,6 +472,40 @@ def write_unresolved_csv(rows: Sequence[dict[str, Any]], dest: str | Path) -> st
     return dest_text
 
 
+def load_unresolved_tickers(
+    source: str | Path,
+    *,
+    cache_dir: str | Path | None = None,
+) -> list[str]:
+    """Tickers from an ``unresolved_<submit_id>.csv`` report (local or ``s3://``).
+
+    The retry input for ``kotl resend --retry-unresolved``: after FlexTrade
+    seeds the master, the same report a submit wrote becomes the scope of the
+    re-send. Only the ``ticker`` column is read; order is preserved and
+    duplicates are dropped.
+    """
+    from ki_ops.kotl.kelaidata_source import DEFAULT_CACHE_DIR, fetch
+
+    path = fetch(str(source), cache_dir=cache_dir or DEFAULT_CACHE_DIR)
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if "ticker" not in (reader.fieldnames or ()):
+            raise ValueError(
+                f"unresolved report {source} needs a 'ticker' column, "
+                f"got {sorted(reader.fieldnames or ())}"
+            )
+        tickers: list[str] = []
+        seen: set[str] = set()
+        for row in reader:
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if ticker and ticker not in seen:
+                seen.add(ticker)
+                tickers.append(ticker)
+    if not tickers:
+        raise ValueError(f"unresolved report {source} has no tickers")
+    return tickers
+
+
 def format_unresolved_table(rows: Sequence[dict[str, Any]]) -> str:
     cols = UNRESOLVED_CSV_FIELDS
     table = [[str(r.get(c, "")) for c in cols] for r in rows]

@@ -45,8 +45,24 @@ def default_shares_path(trade_date: date, *, strategy_id: str | None = None) -> 
 
     The pipeline writes per-strategy subfolders (e.g. ``USATop2000_neutralized``);
     the legacy flat path remains the default when *strategy_id* is omitted.
+
+    When ``KI_OPS_ENV`` is **explicitly set** the shares root follows that
+    ops-env preset (canary → ``s3://kelaitrading/portfolio_canary/shares``) —
+    the env var declares which namespace the machine operates in, so a
+    canary operator box resolves the canary book without spelling out
+    ``--shares``. Unset, the legacy prod root applies unchanged (the
+    pipeline passes ``--shares`` explicitly either way).
     """
+    import os
+
     yyyymmdd = trade_date.strftime("%Y%m%d")
+    from ki_ops.opsenv import ENV_VAR, resolve_ops_env
+
+    if os.environ.get(ENV_VAR):
+        base = f"{resolve_ops_env(None).portfolio_root}/shares"
+        if strategy_id:
+            return f"{base}/{strategy_id}/Portfolio_{yyyymmdd}.csv"
+        return f"{base}/Portfolio_{yyyymmdd}.csv"
     if strategy_id:
         return STRATEGY_SHARES_TEMPLATE.format(strategy_id=strategy_id, yyyymmdd=yyyymmdd)
     return DEFAULT_SHARES_TEMPLATE.format(yyyymmdd=yyyymmdd)
