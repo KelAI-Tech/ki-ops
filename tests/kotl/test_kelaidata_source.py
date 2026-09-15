@@ -81,6 +81,22 @@ def test_default_shares_path():
     assert default_shares_path(TD) == "s3://kelaitrading/portfolio/shares/Portfolio_20260806.csv"
 
 
+def test_default_shares_path_follows_explicit_ops_env(monkeypatch):
+    """KI_OPS_ENV set → the ops-env preset's portfolio root; unset → legacy."""
+    monkeypatch.setenv("KI_OPS_ENV", "canary")
+    assert default_shares_path(TD) == (
+        "s3://kelaitrading/portfolio_canary/shares/Portfolio_20260806.csv"
+    )
+    assert default_shares_path(TD, strategy_id="SID_neutralized") == (
+        "s3://kelaitrading/portfolio_canary/shares/SID_neutralized/Portfolio_20260806.csv"
+    )
+    # prod preset resolves to the same root as the legacy default
+    monkeypatch.setenv("KI_OPS_ENV", "prod")
+    assert default_shares_path(TD) == (
+        "s3://kelaitrading/portfolio/shares/Portfolio_20260806.csv"
+    )
+
+
 def test_parse_s3_url():
     assert parse_s3_url("s3://bucket/a/b.csv") == ("bucket", "a/b.csv")
     with pytest.raises(ValueError):
