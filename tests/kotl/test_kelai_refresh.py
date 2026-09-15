@@ -15,7 +15,8 @@ from ki_ops.kotl.kelai_refresh import (
     kelai_row_to_snapshot,
     load_kelai_orders_fixture,
 )
-from ki_ops.kotl.qty import flex_status_label
+from ki_ops.kotl.models import WorkingOrder
+from ki_ops.kotl.qty import EXPIRED_SESSION, flex_status_label
 from ki_ops.kotl.refresh import refresh_working_orders
 from ki_ops.kotl.refresh_source import load_refresh_source
 from ki_ops.kotl.store import KotlStore
@@ -194,3 +195,186 @@ def test_kelai_csv_fixture(tmp_path):
     assert len(rows) == 1
     assert fx_date == TD
     assert rows[0]["orderId"] == "OID-X"
+
+
+def test_kelai_row_to_snapshot_maps_workflow_statuses():
+    snap = kelai_row_to_snapshot(
+        {
+            "symbol": "AAPL.US",
+            "side": 1,
+            "quantity": 18,
+            "filledQuantity": 0,
+            "status": 6,  # REJECTED
+            "finalizationStatus": 0,  # UNFINALIZED
+            "cancelStatus": 0,  # CANCEL_ORIGINAL
+            "rejectionReason": "risk: restricted list",
+        },
+        order_id="OID-9",
+        trade_date="2026-08-06",
+    )
+    assert snap["status"] == "REJECTED"
+    assert snap["finalizationStatus"] == "UNFINALIZED"
+    assert snap["cancelStatus"] == "CANCEL_ORIGINAL"
+    assert snap["rejectionReason"] == "risk: restricted list"
+
+
+def test_refresh_persists_workflow_statuses(tmp_path):
+    """A refresh writes Flex's workflow dimensions into the ledger; a later
+    snapshot without them keeps the stored values."""
+    store = KotlStore(tmp_path)
+    submit_rebalance_csv(
+        store,
+        SOD,
+        TARGETS,
+        trade_date=TD,
+        submitted_at=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+    order = store.load_working_orders(trade_date=TD)[0]
+
+    rows = [
+        {
+            "orderId": order.flex_order_id,
+            "symbol": order.symbol,
+            "side": 0 if order.side == "BUY" else 1,
+            "quantity": abs(float(order.sent_qty)),
+            "filledQuantity": 0,
+            "status": 6,  # REJECTED → booked UNFINALIZED, revivable
+            "finalizationStatus": 0,
+            "cancelStatus": 0,
+            "rejectionReason": "risk: max order size",
+        }
+    ]
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource(rows, trade_date=TD),
+        last_seen_at=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+    )
+    after = store.get_working_order(order.flex_order_id)
+    assert after.finalization_status == "UNFINALIZED"
+    assert after.cancel_status == "CANCEL_ORIGINAL"
+    assert after.rejection_reason == "risk: max order size"
+
+
+# ---------------------------------------------------------------------------
+# GFD session expiry (PROD 2026-09-14: Flex's EOD sweep purges never-routed
+# orders; their queryable rows stay TRADABLE/UNFINALIZED/CANCEL_ORIGINAL and
+# CancelOrders refuses them — the refresh must mark them dead itself)
+# ---------------------------------------------------------------------------
+
+# TD 2026-08-06 is an ordinary Thursday (EDT): close 16:00 ET = 20:00 UTC.
+IN_SESSION = datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc)  # 12:00 ET
+AFTER_CLOSE = datetime(2026, 8, 6, 21, 0, tzinfo=timezone.utc)  # 17:00 ET
+
+
+def _seed(store, order_id, symbol, side, qty):
+    order = WorkingOrder.from_submit_line(
+        submit_id="sub-1",
+        flex_order_id=order_id,
+        trade_date=TD,
+        symbol=symbol,
+        side=side,
+        fund="KELAI",
+        position_group="G",
+        unsigned_sent_qty=qty,
+        submitted_at=datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc),
+    )
+    store.upsert_working_orders([order])
+    return order
+
+
+def _stale_tradable_row(order, *, filled=0.0, status=2, cancel_status=0):
+    """The purge signature: TRADABLE / UNFINALIZED / CANCEL_ORIGINAL."""
+    return {
+        "orderId": order.flex_order_id,
+        "symbol": order.symbol,
+        "side": 0 if order.side == "BUY" else 1,
+        "quantity": abs(float(order.sent_qty)),
+        "filledQuantity": filled,
+        "status": status,
+        "finalizationStatus": 0,
+        "cancelStatus": cancel_status,
+    }
+
+
+def test_refresh_past_session_close_expires_unfilled_order(tmp_path):
+    store = KotlStore(tmp_path)
+    order = _seed(store, "O-1", "AAPL.US", "BUY", 100)
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource([_stale_tradable_row(order)], trade_date=TD),
+        last_seen_at=AFTER_CLOSE,
+    )
+    after = store.get_working_order("O-1")
+    assert after.status.value == "cancelled"
+    assert after.cancel_status == EXPIRED_SESSION  # KOTL-derived, not a Flex label
+    assert after.leaves_qty == Decimal("0")  # phantom leaves released
+    assert after.filled_qty == Decimal("0")
+    assert after.finalization_status == "UNFINALIZED"  # left as reported
+
+
+def test_refresh_past_session_close_partial_fill_keeps_fills(tmp_path):
+    store = KotlStore(tmp_path)
+    order = _seed(store, "O-2", "MSFT.US", "SELL", 40)
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource([_stale_tradable_row(order, filled=15.0, status=4)], trade_date=TD),
+        last_seen_at=AFTER_CLOSE,
+    )
+    after = store.get_working_order("O-2")
+    assert after.status.value == "cancelled"
+    assert after.cancel_status == EXPIRED_SESSION
+    assert after.filled_qty == Decimal("-15")  # final fills preserved
+    assert after.leaves_qty == Decimal("0")
+
+
+def test_refresh_past_session_close_done_order_unaffected(tmp_path):
+    store = KotlStore(tmp_path)
+    order = _seed(store, "O-3", "IBM.US", "BUY", 10)
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource([_stale_tradable_row(order, filled=10.0, status=5)], trade_date=TD),
+        last_seen_at=AFTER_CLOSE,
+    )
+    after = store.get_working_order("O-3")
+    assert after.status.value == "done"
+    assert after.cancel_status == "CANCEL_ORIGINAL"  # snapshot label, no expiry stamp
+    assert after.leaves_qty == Decimal("0")
+
+
+def test_refresh_during_live_session_stays_open(tmp_path):
+    # The expiry rule must never weaken live-session protections: a refresh
+    # while today's session is still open leaves the order fully working.
+    store = KotlStore(tmp_path)
+    order = _seed(store, "O-4", "AAPL.US", "BUY", 100)
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource([_stale_tradable_row(order)], trade_date=TD),
+        last_seen_at=IN_SESSION,
+    )
+    after = store.get_working_order("O-4")
+    assert after.status.value == "open"
+    assert after.cancel_status == "CANCEL_ORIGINAL"
+    assert after.leaves_qty == Decimal("100")
+
+
+def test_refresh_flex_cancelled_keeps_flex_cancel_label(tmp_path):
+    # An order Flex itself cancelled carries Flex's terminal ack — the
+    # session-expiry stamp must not overwrite it.
+    store = KotlStore(tmp_path)
+    order = _seed(store, "O-5", "GE.US", "SELL", 25)
+    refresh_working_orders(
+        store,
+        TD,
+        KelaiRefreshSource(
+            [_stale_tradable_row(order, status=3, cancel_status=4)], trade_date=TD
+        ),
+        last_seen_at=AFTER_CLOSE,
+    )
+    after = store.get_working_order("O-5")
+    assert after.status.value == "cancelled"
+    assert after.cancel_status == "CANCELED"  # Flex's own terminal ack, kept

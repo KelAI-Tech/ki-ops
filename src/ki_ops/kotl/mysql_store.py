@@ -70,6 +70,9 @@ _DDL = (
         broker VARCHAR(64) NULL,
         algo VARCHAR(64) NULL,
         order_type VARCHAR(32) NULL,
+        finalization_status VARCHAR(40) NULL,
+        cancel_status VARCHAR(24) NULL,
+        rejection_reason VARCHAR(255) NULL,
         KEY idx_kotl_wo_trade_date (trade_date),
         KEY idx_kotl_wo_submit (submit_id)
     )
@@ -112,6 +115,18 @@ _DDL = (
 _COLUMN_MIGRATIONS = (
     ("kotl_submits", "trade_date", "ADD COLUMN trade_date DATE NULL"),
     ("kotl_submits", "claim_submit_id", "ADD COLUMN claim_submit_id VARCHAR(64) NULL"),
+    # Flex workflow-status dimensions (Orders.proto), synced by the refresh.
+    (
+        "kotl_working_orders",
+        "finalization_status",
+        "ADD COLUMN finalization_status VARCHAR(40) NULL",
+    ),
+    ("kotl_working_orders", "cancel_status", "ADD COLUMN cancel_status VARCHAR(24) NULL"),
+    (
+        "kotl_working_orders",
+        "rejection_reason",
+        "ADD COLUMN rejection_reason VARCHAR(255) NULL",
+    ),
 )
 
 
@@ -378,7 +393,8 @@ class MysqlKotlStore:
                 SELECT flex_order_id, submit_id, trade_date, symbol, side, fund,
                        position_group, sent_qty, filled_qty, leaves_qty, status,
                        last_seen_at, avg_fill_px, flex_batch_id, broker, algo,
-                       order_type
+                       order_type, finalization_status, cancel_status,
+                       rejection_reason
                 FROM kotl_working_orders {where}
                 ORDER BY trade_date, flex_order_id
                 """,
@@ -398,7 +414,8 @@ class MysqlKotlStore:
                 SELECT flex_order_id, submit_id, trade_date, symbol, side, fund,
                        position_group, sent_qty, filled_qty, leaves_qty, status,
                        last_seen_at, avg_fill_px, flex_batch_id, broker, algo,
-                       order_type
+                       order_type, finalization_status, cancel_status,
+                       rejection_reason
                 FROM kotl_working_orders WHERE flex_order_id = %s
                 """,
                 (flex_order_id,),
@@ -421,8 +438,10 @@ class MysqlKotlStore:
                     (flex_order_id, submit_id, trade_date, symbol, side, fund,
                      position_group, sent_qty, filled_qty, leaves_qty, status,
                      last_seen_at, avg_fill_px, flex_batch_id, broker, algo,
-                     order_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     order_type, finalization_status, cancel_status,
+                     rejection_reason)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     submit_id = VALUES(submit_id),
                     trade_date = VALUES(trade_date),
@@ -439,7 +458,10 @@ class MysqlKotlStore:
                     flex_batch_id = VALUES(flex_batch_id),
                     broker = VALUES(broker),
                     algo = VALUES(algo),
-                    order_type = VALUES(order_type)
+                    order_type = VALUES(order_type),
+                    finalization_status = VALUES(finalization_status),
+                    cancel_status = VALUES(cancel_status),
+                    rejection_reason = VALUES(rejection_reason)
                 """,
                 rows,
             )
@@ -641,6 +663,10 @@ class MysqlKotlStore:
             order.broker,
             order.algo,
             order.order_type,
+            order.finalization_status,
+            order.cancel_status,
+            # Column is VARCHAR(255); Flex descriptions can run longer.
+            (order.rejection_reason or None) and order.rejection_reason[:255],
         )
 
     @staticmethod
@@ -663,6 +689,9 @@ class MysqlKotlStore:
             broker,
             algo,
             order_type,
+            finalization_status,
+            cancel_status,
+            rejection_reason,
         ) = row
         return WorkingOrder(
             flex_order_id=flex_order_id,
@@ -682,4 +711,7 @@ class MysqlKotlStore:
             broker=broker or None,
             algo=algo or None,
             order_type=order_type or None,
+            finalization_status=finalization_status or None,
+            cancel_status=cancel_status or None,
+            rejection_reason=rejection_reason or None,
         )

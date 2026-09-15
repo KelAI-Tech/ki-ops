@@ -121,3 +121,109 @@ def test_default_dest_strategy_vs_local(tmp_path):
 
     local = default_trade_file_dest(trade_date=TD, submit_id="sub-1", data_dir=tmp_path)
     assert local == str(tmp_path / "trades" / "20260806" / "trades_sub-1.csv")
+
+
+# --- ledger dispositions ----------------------------------------------------
+
+
+def _wo(order_id: str, *, filled="0", status=None, finalization=None, cancel=None, reason=None):
+    from datetime import datetime, timezone
+
+    from ki_ops.kotl.enums import OrderStatus
+    from ki_ops.kotl.models import WorkingOrder
+
+    return WorkingOrder(
+        flex_order_id=order_id,
+        submit_id="sub-1",
+        trade_date=TD,
+        symbol="AAPL.US",
+        side="BUY",
+        fund="KELAI",
+        position_group="USATop2000_strategy_v1",
+        sent_qty=Decimal("30"),
+        filled_qty=Decimal(filled),
+        leaves_qty=Decimal("30") - Decimal(filled),
+        status=status or OrderStatus.OPEN,
+        last_seen_at=datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc),
+        finalization_status=finalization,
+        cancel_status=cancel,
+        rejection_reason=reason,
+    )
+
+
+def test_final_disposition_mapping():
+    from ki_ops.kotl.enums import OrderStatus
+    from ki_ops.kotl.trade_file import final_disposition
+
+    assert final_disposition(_wo("A", filled="30", status=OrderStatus.DONE)) == "filled"
+    assert final_disposition(_wo("B", filled="10", status=OrderStatus.PARTIAL)) == "partial"
+    assert final_disposition(_wo("C", status=OrderStatus.OPEN, finalization="FINALIZED")) == "working"
+    # Risk-rejected order: KOTL bucket says CANCELLED but Flex holds it
+    # UNFINALIZED with no cancel workflow — parked and revivable.
+    assert (
+        final_disposition(
+            _wo("D", status=OrderStatus.CANCELLED, finalization="UNFINALIZED", cancel="CANCEL_ORIGINAL")
+        )
+        == "unfinalized"
+    )
+    # Explicit terminal cancel ack is the only confirmed-dead cancel state.
+    assert (
+        final_disposition(_wo("E", status=OrderStatus.CANCELLED, cancel="CANCELED")) == "cancelled"
+    )
+    assert (
+        final_disposition(_wo("F", status=OrderStatus.CANCELLED, cancel="CANCEL_PENDING"))
+        == "cancel_pending"
+    )
+    assert (
+        final_disposition(_wo("G", status=OrderStatus.PARTIAL, filled="10", finalization="UNFINALIZED"))
+        == "partial_unfinalized"
+    )
+
+
+def test_apply_ledger_dispositions_backfills_rows(tmp_path):
+    from ki_ops.kotl.enums import OrderStatus
+    from ki_ops.kotl.trade_file import apply_ledger_dispositions, read_trade_file
+
+    rows = build_trade_file_rows(
+        trade_date=TD, submit_id="sub-1", payloads=PAYLOADS, results=RESULTS
+    )
+    dest = tmp_path / "trades.csv"
+    write_trade_file(rows, dest)
+
+    orders = [
+        _wo("FLEX-1", filled="30", status=OrderStatus.DONE, finalization="FINALIZED"),
+        _wo(
+            "FLEX-2",
+            status=OrderStatus.CANCELLED,
+            finalization="UNFINALIZED",
+            cancel="CANCEL_ORIGINAL",
+            reason="risk: restricted list",
+        ),
+    ]
+    written, matched = apply_ledger_dispositions(dest, orders)
+    assert matched == 2
+
+    updated = {r["flex_order_id"]: r for r in read_trade_file(written)}
+    assert updated["FLEX-1"]["final_status"] == "filled"
+    assert updated["FLEX-1"]["filled_qty"] == "30"
+    # Gateway verdict column is untouched…
+    assert updated["FLEX-2"]["status"] == "rejected"
+    # …but the disposition shows the truth: parked, not dead.
+    assert updated["FLEX-2"]["final_status"] == "unfinalized"
+    assert updated["FLEX-2"]["rejection_reason"] == "risk: restricted list"
+
+
+def test_apply_ledger_dispositions_leaves_unmatched_rows(tmp_path):
+    from ki_ops.kotl.trade_file import apply_ledger_dispositions, read_trade_file
+
+    rows = build_trade_file_rows(
+        trade_date=TD, submit_id="sub-1", payloads=PAYLOADS, results=RESULTS
+    )
+    dest = tmp_path / "trades.csv"
+    write_trade_file(rows, dest)
+
+    _, matched = apply_ledger_dispositions(dest, [])
+    assert matched == 0
+    updated = read_trade_file(dest)
+    assert all(r["final_status"] == "" for r in updated)
+    assert [r["status"] for r in updated] == ["submitted", "rejected"]

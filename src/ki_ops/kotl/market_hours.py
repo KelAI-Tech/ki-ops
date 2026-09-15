@@ -1,5 +1,10 @@
 """NYSE market-hours gate for live KOTL submits (rules-based, stdlib-only).
 
+Besides gating submits, the same calendar answers "is this trade date's
+session over?" (:func:`session_expired`) — KOTL orders are good-for-day, so
+once a trade date's close has passed, an unfilled remainder can never
+execute, whatever a stale Flex record still claims.
+
 Live orders may only go out on NYSE trading days, from :data:`OPEN_GATE`
 (03:00 America/New_York — early pre-open staging: the overnight pipeline
 naturally reaches the submit around 03:30–04:00 ET, and FlexTrade parks the
@@ -126,6 +131,47 @@ def market_close(d: date) -> time | None:
     if d in nyse_holidays(d.year):
         return None
     return EARLY_CLOSE if is_early_close(d) else REGULAR_CLOSE
+
+
+#: Grace period past the close before :func:`session_expired` fires: keeps
+#: the rule strictly out of the live session and absorbs fill reporting that
+#: lags right at the bell. Flex's EOD purge sweep runs ~17:45 ET, so by the
+#: time a purged order can even be observed the rule has long since armed.
+SESSION_EXPIRY_BUFFER = timedelta(minutes=30)
+
+
+def session_expired(
+    trade_date: date,
+    now: datetime | None = None,
+    *,
+    buffer: timedelta = SESSION_EXPIRY_BUFFER,
+) -> bool:
+    """True once *trade_date*'s NYSE session is over beyond doubt (GFD expiry).
+
+    KOTL orders are good-for-day: past the trade date's close (16:00 ET, or
+    13:00 on early-close days) plus *buffer*, an unfilled remainder can never
+    execute. Live-observed on PROD 2026-09-14: Flex's ~17:45 ET EOD sweep
+    PURGES never-routed orders from the working set while their queryable
+    ``GetOrderInfo2`` records stay ``TRADABLE / UNFINALIZED`` forever and
+    ``CancelOrders`` refuses them ("Cancel on missing orders is not
+    supported") — no Flex-side transition will ever mark them dead, so the
+    calendar has to.
+
+    Conservative edges: a future or same-day-still-open session is never
+    expired, and a non-trading *trade_date* (weekend/holiday — no session
+    close is defined) returns False rather than guess. Naive *now* is taken
+    as UTC (the ledger convention); ``None`` uses the real clock
+    (:func:`_now_utc` — tests pin it).
+    """
+    close = market_close(trade_date)
+    if close is None:
+        return False
+    if now is None:
+        now = _now_utc()
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    close_et = datetime.combine(trade_date, close, tzinfo=EASTERN)
+    return now >= close_et + buffer
 
 
 def market_hours_verdict(now: datetime | None = None) -> tuple[bool, str]:

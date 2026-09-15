@@ -312,13 +312,167 @@ def test_sent_from_flex_rows_kotl_stamped_only():
     assert sent == {"AAPL.US": D("30"), "MSFT.US": D("-10")}
 
 
-def test_sent_from_flex_rows_excludes_rejected_and_subtracts_fills():
+def test_sent_from_flex_rows_rejected_is_unfinalized_and_counts_full():
+    # Flex "REJECTED" is an unfinalized order that can still be worked and
+    # filled later (live-observed 2026-09-14) — it counts exactly like a
+    # working order, leaves protected.
     rows = [
         _flex_row("s1-1", "AAPL.US", 0, 30.0, filled=12.0),
         _flex_row("s1-2", "MSFT.US", 0, 10.0, status=6),  # 6 = REJECTED
     ]
-    assert sent_from_flex_rows(rows) == {"AAPL.US": D("30")}
-    assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("18")}
+    assert sent_from_flex_rows(rows) == {"AAPL.US": D("30"), "MSFT.US": D("10")}
+    assert sent_from_flex_rows(rows, subtract_fills=True) == {
+        "AAPL.US": D("18"),
+        "MSFT.US": D("10"),
+    }
+
+
+def test_sent_from_flex_rows_cancelled_counts_full_by_default():
+    # Conservative default: a cancelled remainder is never auto-resendable.
+    rows = [_flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3)]  # CANCELLED
+    assert sent_from_flex_rows(rows) == {"AAPL.US": D("50")}
+    assert sent_from_flex_rows(rows, subtract_fills=True) == {"AAPL.US": D("30")}
+
+
+def test_sent_from_flex_rows_forced_frees_only_confirmed_cancelled_remainder():
+    # resend_cancelled_remainder (forced re-runs): ONLY a confirmed CANCELLED
+    # order frees its remainder (final fills still count). REJECTED and
+    # LOCATE_FAILED are unfinalized — potentially alive — and stay fully
+    # counted; the retry flow for them is cancel-in-Flex → confirm → force.
+    rows = [
+        _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3),  # CANCELLED
+        _flex_row("s1-2", "MSFT.US", 1, 30.0, filled=5.0, status=4),  # working
+        _flex_row("s1-3", "IBM.US", 0, 10.0, status=7),  # LOCATE_FAILED
+        _flex_row("s1-4", "GE.US", 1, 8.0, status=6),  # REJECTED (unfinalized)
+    ]
+    # flat/snapshot SOD (fills NOT in the book): cancelled counts its fills.
+    assert sent_from_flex_rows(rows, resend_cancelled_remainder=True) == {
+        "AAPL.US": D("20"),  # fills only — 30 dead shares resendable
+        "MSFT.US": D("-30"),  # working: FULL sent qty, leaves protected
+        "IBM.US": D("10"),  # locate-failed: unfinalized, fully protected
+        "GE.US": D("-8"),  # rejected: unfinalized, fully protected
+    }
+    # flex SOD (fills already inside the live book): cancelled contributes 0.
+    assert sent_from_flex_rows(
+        rows, subtract_fills=True, resend_cancelled_remainder=True
+    ) == {"MSFT.US": D("-25"), "IBM.US": D("10"), "GE.US": D("-8")}
+
+
+def test_cancel_window_keeps_order_alive_until_terminal_ack():
+    """cancelStatus (Orders.proto) is independent of OrderStatus: a cancel
+    still REQUESTED/PENDING/REJECTED keeps the order alive — in-flight
+    executions can land until the terminal CANCELED ack."""
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    def row(**extra):
+        return _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3) | extra
+
+    # Lifecycle CANCELLED + no cancel workflow (GFD expiry) or terminal ack: dead.
+    assert is_confirmed_dead(row())  # cancelStatus absent from older rows
+    assert is_confirmed_dead(row(cancelStatus=0))  # CANCEL_ORIGINAL
+    assert is_confirmed_dead(row(cancelStatus=4))  # CANCELED (confirmed ack)
+    # Cancel window still open: ALIVE, remainder stays protected.
+    for pending in (1, 2, 3):  # REQUESTED / PENDING / REJECTED
+        assert not is_confirmed_dead(row(cancelStatus=pending))
+        assert sent_from_flex_rows(
+            [row(cancelStatus=pending)], resend_cancelled_remainder=True
+        ) == {"AAPL.US": D("50")}
+    # Non-CANCELLED lifecycle is never dead, whatever cancelStatus claims.
+    working = _flex_row("s1-2", "MSFT.US", 0, 10.0, status=2) | {"cancelStatus": 4}
+    assert not is_confirmed_dead(working)
+
+
+def test_session_expired_row_frees_remainder_under_forced_resend():
+    """PROD 2026-09-14 purge signature: Flex's EOD sweep removed never-routed
+    orders from the working set but their queryable rows stay TRADABLE /
+    UNFINALIZED / CANCEL_ORIGINAL and CancelOrders refuses them. Post-close
+    the fills are final, so a forced re-run counts only the fills; during the
+    live session the row stays fully protected."""
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    # Mon 2026-09-14 (EDT): close 16:00 ET = 20:00 UTC, buffer through 20:30.
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)  # 18:00 ET
+    live_session = datetime(2026, 9, 14, 18, 0, tzinfo=timezone.utc)  # 14:00 ET
+    row = _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0) | {
+        "finalizationStatus": 0,
+        "cancelStatus": 0,
+        "tradeDate": "2026-09-14",
+    }
+
+    assert is_confirmed_dead(row, now=after_close)
+    assert not is_confirmed_dead(row, now=live_session)
+    # Forced resend semantics: only the final fills count post-close.
+    assert sent_from_flex_rows(
+        [row], resend_cancelled_remainder=True, now=after_close
+    ) == {"AAPL.US": D("20")}
+    # Live session under --force: still fully counted as sent.
+    assert sent_from_flex_rows(
+        [row], resend_cancelled_remainder=True, now=live_session
+    ) == {"AAPL.US": D("50")}
+    # Unforced runs keep the conservative full count even post-close.
+    assert sent_from_flex_rows([row], now=after_close) == {"AAPL.US": D("50")}
+
+    # The exact PROD shape — zero fills: nothing counts, full delta resendable.
+    unfilled = row | {"filledQuantity": 0.0}
+    assert (
+        sent_from_flex_rows([unfilled], resend_cancelled_remainder=True, now=after_close)
+        == {}
+    )
+
+
+def test_session_expiry_is_conservative_on_uncertain_trade_date():
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    late = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
+    base = _flex_row("s1-1", "AAPL.US", 0, 50.0)
+    # Missing / unparseable / non-trading trade dates → ALIVE.
+    assert not is_confirmed_dead(base, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": ""}, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": "garbage"}, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": "2026-09-12"}, now=late)  # Saturday
+    # Fully filled row is DONE — expiry never marks it dead.
+    done = base | {"tradeDate": "2026-09-14", "filledQuantity": 50.0}
+    assert not is_confirmed_dead(done, now=late)
+
+
+def test_session_expiry_overrides_pending_cancel_window():
+    # An in-flight cancel keeps an order alive DURING the session, but once
+    # the session has closed nothing can land — the row is dead either way.
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)
+    row = _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3) | {
+        "cancelStatus": 1,  # CANCEL_REQUESTED — alive intra-session
+        "tradeDate": "2026-09-14",
+    }
+    assert not is_confirmed_dead(row)  # pinned clock: 2026-08-06, pre-session
+    assert is_confirmed_dead(row, now=after_close)
+
+
+def test_summarize_marks_session_expired_rows_dead():
+    from ki_ops.kotl.target_mode import summarize_flex_row_states
+
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        _flex_row("s1-1", "AAPL.US", 0, 50.0)
+        | {"finalizationStatus": 0, "cancelStatus": 0, "tradeDate": "2026-09-14"}
+    ]
+    out = summarize_flex_row_states(rows, now=after_close)
+    assert "1 × TRADABLE / UNFINALIZED / CANCEL_ORIGINAL — confirmed dead" in out
+
+
+def test_summarize_flex_row_states_flags_unfinalized_as_alive():
+    from ki_ops.kotl.target_mode import summarize_flex_row_states
+
+    rows = [
+        _flex_row("s1-1", "AAPL.US", 0, 50.0, status=6) | {"finalizationStatus": 0},
+        _flex_row("s1-2", "MSFT.US", 0, 10.0, status=3, filled=4.0),
+        _flex_row("MANUAL", "IBM.US", 0, 5.0, notes="desk order"),  # not KOTL
+    ]
+    out = summarize_flex_row_states(rows)
+    assert "1 × REJECTED / UNFINALIZED / - — ALIVE" in out
+    assert "1 × CANCELLED" in out and "remainder resendable" in out
+    assert "IBM" not in out
 
 
 # ---------------------------------------------------------------------------

@@ -551,6 +551,16 @@ def flatten_order_info(order) -> dict[str, Any]:
         "filledQuantity": float(order.filledQuantity),
         "weightedAvgPrice": float(getattr(order, "weightedAvgPrice", 0) or 0),
         "status": order.status,
+        # Independent status dimensions (Orders.proto): finalization is a
+        # separate reversible workflow (UNFINALIZED=0/FINALIZED=1/
+        # FINALIZATION_COMPLIANCE_FAILED=2), cancelStatus tracks the cancel
+        # workflow (CANCEL_ORIGINAL=0/REQUESTED=1/PENDING=2/REJECTED=3/
+        # CANCELED=4), complianceStatus is the Passed/Warning/Failed column.
+        # A risk-failed order is UNFINALIZED — parked and revivable — NOT dead.
+        "finalizationStatus": getattr(order, "finalizationStatus", None),
+        "cancelStatus": getattr(order, "cancelStatus", None),
+        "complianceStatus": getattr(order, "complianceStatus", None),
+        "rejectionReason": str(getattr(order, "rejectionReason", "") or ""),
         "tradeDate": str(getattr(order, "tradeDate", "") or ""),
         "notes": str(getattr(order, "notes", "") or ""),
         "clientBatchIdentifier": str(getattr(order, "clientBatchIdentifier", "") or ""),
@@ -646,6 +656,18 @@ def aggregate_split_order_rows(
             status=least_done.get("status"),
             childOrderIds=sorted(str(c.get("orderId")) for c in children),
         )
+        # Workflow-status dimensions merge conservatively: keep a value only
+        # when the children are unanimous, otherwise report the alive-leaning
+        # default (a parent is only confirmed-cancelled/finalized if EVERY
+        # child is — a disagreeing split must keep the parent "in flight").
+        for key, disagree_default in (
+            ("cancelStatus", 1),  # CANCEL_REQUESTED: still in flight
+            ("finalizationStatus", 0),  # UNFINALIZED
+            ("complianceStatus", None),
+        ):
+            if any(key in c for c in children):
+                values = {c.get(key) for c in children}
+                merged[key] = values.pop() if len(values) == 1 else disagree_default
         for key in ("fund", "fund_acc_tgt"):
             if key in merged:
                 merged[key] = fund_value
