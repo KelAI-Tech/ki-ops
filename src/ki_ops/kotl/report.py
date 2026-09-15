@@ -87,6 +87,85 @@ def build_status_report(
     )
 
 
+def fills_rows(orders: Sequence[WorkingOrder]) -> list[WorkingOrder]:
+    """Orders sorted for the fills view: most recently updated first."""
+    return sorted(orders, key=lambda o: (o.last_seen_at, o.symbol), reverse=True)
+
+
+def fills_to_dicts(orders: Sequence[WorkingOrder]) -> list[dict]:
+    return [
+        {
+            "flex_order_id": o.flex_order_id,
+            "submit_id": o.submit_id,
+            "trade_date": o.trade_date.isoformat(),
+            "symbol": o.symbol,
+            "side": o.side,
+            "sent_qty": str(o.sent_qty),
+            "filled_qty": str(o.filled_qty),
+            "leaves_qty": str(o.leaves_qty),
+            "avg_fill_px": str(o.avg_fill_px) if o.avg_fill_px is not None else None,
+            "status": o.status.value,
+            "finalization_status": o.finalization_status,
+            "cancel_status": o.cancel_status,
+            "last_seen_at": o.last_seen_at.isoformat(),
+        }
+        for o in fills_rows(orders)
+    ]
+
+
+def format_fills_table(
+    orders: Sequence[WorkingOrder],
+    *,
+    trade_date: date,
+    header_note: str = "",
+) -> str:
+    """Fills view: one row per working order, most recently updated first."""
+    header = f"KOTL fills — {trade_date.isoformat()}"
+    if header_note:
+        header = f"{header} ({header_note})"
+    cols = ("symbol", "side", "sent", "filled", "left", "avg_px", "status", "last_update")
+    rows = [
+        (
+            o.symbol,
+            o.side,
+            str(o.sent_qty),
+            str(o.filled_qty),
+            str(o.leaves_qty),
+            str(o.avg_fill_px) if o.avg_fill_px is not None else "-",
+            o.status.value,
+            o.last_seen_at.strftime("%Y-%m-%d %H:%M:%SZ"),
+        )
+        for o in fills_rows(orders)
+    ]
+    widths = [len(c) for c in cols]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt_row(cells: tuple[str, ...]) -> str:
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells))
+
+    lines = [
+        header,
+        fmt_row(cols),
+        fmt_row(tuple("-" * w for w in widths)),
+    ]
+    lines.extend(fmt_row(r) for r in rows)
+
+    counts = {s: 0 for s in ("open", "partial", "done", "cancelled")}
+    total_abs_filled = Decimal("0")
+    for o in orders:
+        counts[o.status.value] = counts.get(o.status.value, 0) + 1
+        total_abs_filled += abs(o.filled_qty)
+    lines.append("")
+    lines.append(
+        f"summary: orders={len(orders)} open={counts['open']} "
+        f"partial={counts['partial']} done={counts['done']} "
+        f"cancelled={counts['cancelled']} total_abs_filled={total_abs_filled}"
+    )
+    return "\n".join(lines)
+
+
 def format_status_table(report: StatusReport) -> str:
     header = f"KOTL status — {report.trade_date.isoformat()}"
     cols = ("symbol", "side", "sent", "done", "left", "status")

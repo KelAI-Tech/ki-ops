@@ -51,6 +51,8 @@ class KotlStoreProtocol(Protocol):
         self, env: str, *, before: date | None = None
     ) -> "tuple[date, dict[str, Decimal]] | None": ...
 
+    def latest_trade_date(self) -> "date | None": ...
+
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = ROOT / "data" / "kotl"
 
@@ -175,6 +177,11 @@ class KotlStore:
             if row.flex_order_id == flex_order_id:
                 return row
         return None
+
+    def latest_trade_date(self) -> date | None:
+        """Most recent ``trade_date`` in the working-orders ledger."""
+        rows = self._load_all_working_orders()
+        return max((r.trade_date for r in rows), default=None)
 
     def upsert_working_orders(self, orders: Iterable[WorkingOrder]) -> None:
         """Insert or replace rows keyed by ``flex_order_id``."""

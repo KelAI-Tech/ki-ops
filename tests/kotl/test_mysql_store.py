@@ -287,6 +287,15 @@ def test_csv_mysql_store_parity(tmp_path, mysql_store):
     assert flex1.leaves_qty == Decimal("0")
 
 
+def test_mysql_latest_trade_date(tmp_path, mysql_store):
+    csv_store = KotlStore(tmp_path)
+    assert mysql_store.latest_trade_date() is None
+    assert csv_store.latest_trade_date() is None
+    mysql_store.upsert_working_orders(_sample_orders())
+    csv_store.upsert_working_orders(_sample_orders())
+    assert mysql_store.latest_trade_date() == csv_store.latest_trade_date() == TD
+
+
 def test_mysql_book_snapshot_parity(tmp_path, mysql_store):
     def _ex(store):
         return (
