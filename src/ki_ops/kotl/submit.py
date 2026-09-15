@@ -305,6 +305,17 @@ def _bare_ticker(symbol: str, *, suffix: str = ".US") -> str:
     return sym[: -len(suffix)] if suffix and sym.endswith(suffix) else sym
 
 
+def _scope_key(symbol: str, *, suffix: str = ".US") -> str:
+    """Vocabulary-insensitive join key for scope↔recon matching.
+
+    The recon diff speaks whatever vocabulary its baseline does (canonical
+    Flex symbols against a book snapshot, bare ds2 tickers against a prior
+    target file) while the scope is typed in ds2 — normalize class-share
+    spellings so ``BF/B.US``, ``BF.B`` and ``BFB`` all join (→ ``BFB``).
+    """
+    return _bare_ticker(symbol, suffix=suffix).replace("/", "").replace(".", "")
+
+
 def _sod_from_shares(
     shares_by_ticker: dict[str, Decimal],
     snapshot,
@@ -946,7 +957,14 @@ def submit_kelai_shares(
     BEFORE resolution and target mode, so every safety rail still runs on
     the scoped set; already-sent symbols outside the scope are ignored for
     residual purposes (no orders are generated for them, and no overshoot
-    noise is reported about them). With *retry_unresolved* and no explicit
+    noise is reported about them). The **SOD recon guard blocks on the
+    scoped tickers' rows only**: the full-book diff is still printed (it is
+    the systemic-health signal), but out-of-scope divergence — normal
+    intraday fills on the rest of the book — is informational, so a
+    retry-unresolved run whose names were never sent passes the strict
+    ``0/0`` default clean, while a scoped name whose own book row moved
+    (e.g. a cancelled order's fills) still requires explicit thresholds
+    covering exactly that movement. With *retry_unresolved* and no explicit
     *trade_file_out*, the trade file — and therefore every sidecar (the new
     unresolved report, the residual audit) — defaults into the SAME folder
     as the retry report, keeping the day's artifacts together instead of
@@ -1065,6 +1083,22 @@ def submit_kelai_shares(
     targets = targets_from_shares(shares, snapshot)
     target_tickers = set(shares)
 
+    # --- resend scope keys (resolved early: the recon guard needs them) ------
+    scoped = bool(only_tickers) or retry_unresolved is not None
+    retry_tickers: Sequence[str] = ()
+    if retry_unresolved is not None:
+        from ki_ops.kotl.flex_symbols import load_unresolved_tickers
+
+        retry_tickers = load_unresolved_tickers(retry_unresolved, cache_dir=cache)
+        print(
+            f"resend scope: {len(retry_tickers)} ticker(s) from unresolved "
+            f"report {retry_unresolved}"
+        )
+    scope_keys = {
+        _scope_key(t, suffix=symbol_suffix)
+        for t in tuple(only_tickers or ()) + tuple(retry_tickers)
+    }
+
     def _prior_target_book() -> "tuple[dict[str, Decimal], str] | None":
         from ki_ops.gate import find_prior_file
 
@@ -1129,16 +1163,48 @@ def submit_kelai_shares(
         # needs a deliberate threshold override.
         def _recon_guard(recon: ReconReport) -> None:
             print(recon.format_table())
-            if recon.breached and not dry_run:
+            effective = recon
+            if scoped and recon.diffs:
+                # Scoped resend: the full-book diff stays on screen (it is the
+                # systemic-health signal — wrong account scope, symbol-map
+                # regression, book reload), but only the SCOPED tickers' rows
+                # decide the block. An intraday resend always shows today's
+                # fills on the rest of the book; forcing an operator override
+                # for that known, unrelated divergence adds no protection to
+                # the scoped names, whose own rows must still be explainable
+                # (retry-unresolved names were never sent → zero diff expected;
+                # a cancelled remainder shows exactly its fills).
+                in_scope = tuple(
+                    d for d in recon.diffs
+                    if _scope_key(d[0], suffix=symbol_suffix) in scope_keys
+                )
+                outside = recon.names_diverged - len(in_scope)
+                if outside:
+                    print(
+                        f"resend scope: {outside} diverged name(s) outside the "
+                        "scoped tickers — informational only; the recon "
+                        "thresholds apply to the scoped tickers' rows"
+                    )
+                effective = ReconReport(
+                    baseline=f"{recon.baseline} — scoped tickers only",
+                    diffs=in_scope,
+                    total_abs_diff=sum((abs(d[3]) for d in in_scope), Decimal("0")),
+                    names_diverged=len(in_scope),
+                    max_shares=recon.max_shares,
+                    max_names=recon.max_names,
+                )
+                if in_scope:
+                    print(effective.format_table())
+            if effective.breached and not dry_run:
                 raise ReconDivergenceError(
-                    f"live Flex book diverges from {recon.baseline}: "
-                    f"total_abs_diff={recon.total_abs_diff} shares over "
-                    f"{recon.names_diverged} names (max_shares={recon_max_shares}, "
+                    f"live Flex book diverges from {effective.baseline}: "
+                    f"total_abs_diff={effective.total_abs_diff} shares over "
+                    f"{effective.names_diverged} names (max_shares={recon_max_shares}, "
                     f"max_names={recon_max_names}) — raise --recon-max-shares/"
                     "--recon-max-names deliberately, or fix the book",
-                    recon,
+                    effective,
                 )
-            if recon.breached:
+            if effective.breached:
                 print("DRY RUN: recon thresholds breached — a live submit would abort (exit 4)")
 
         snap = store.load_latest_book_snapshot(env, before=trade_date)
@@ -1210,18 +1276,9 @@ def submit_kelai_shares(
         submit_id=pending.submit_id,
     )
 
-    # --- resend scope: restrict the run to specific tickers (see docstring) --
-    scoped = bool(only_tickers) or retry_unresolved is not None
+    # --- resend scope: restrict the run to the scoped tickers ----------------
     if scoped:
-        retry_tickers: Sequence[str] = ()
         if retry_unresolved is not None:
-            from ki_ops.kotl.flex_symbols import load_unresolved_tickers
-
-            retry_tickers = load_unresolved_tickers(retry_unresolved, cache_dir=cache)
-            print(
-                f"resend scope: {len(retry_tickers)} ticker(s) from unresolved "
-                f"report {retry_unresolved}"
-            )
             if trade_file_out is None:
                 # Default the trade file (and therefore every sidecar — the
                 # new unresolved report, the residual audit) into the SAME

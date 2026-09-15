@@ -77,24 +77,29 @@ covered no-op. Note: without `--retry-unresolved` the trade file follows the
 pass `--trade-file-out` if the day's artifacts live elsewhere (e.g. the
 canary pipeline's `trades/canary/<strategy-id>/` folder).
 
-## Intraday recon: expected divergence, deliberate override
+## Recon on a scoped resend: only your tickers' rows block
 
 The SOD recon guard compares the live Flex book against the overnight book
-snapshot (or, with no snapshot in the ledger, yesterday's target file). An
-**intraday** resend therefore always shows today's fills as divergence and
-blocks with exit 4 under the strict `0/0` default. Inspect the printed diff
-table — every line should look like a plausible fill (the names that traded
-today, fill-sized quantities) — then re-run with explicit thresholds:
+snapshot (or, with no snapshot in the ledger, yesterday's target file). On a
+**scoped resend** the full-book diff is still printed — it is the
+systemic-health signal (wrong account scope, symbol-map regression, a
+Flex-side book reload) and one name with a huge unexplained move is a real
+alarm — but the **block decision applies only to the scoped tickers' rows**:
 
-```bash
-  --recon-max-shares 50000 --recon-max-names 2500
-```
+- **Retry-unresolved**: the scoped names were never sent, so their book rows
+  should not have moved — the run passes the strict `0/0` default clean,
+  while today's fills on the rest of the book print as
+  `informational only`. No recon flags needed.
+- **`--ticker` after a cancel**: the scoped name's own fills show as its
+  divergence, so acknowledge exactly that movement, e.g. a 20-share fill →
+  `--recon-max-shares 20 --recon-max-names 1`. The thresholds are an
+  operator acknowledgment, not a send cap — the send stays bounded by
+  target mode to the scoped names' residuals regardless.
 
-The thresholds are an operator acknowledgment, not a send cap: the actual
-send stays bounded by target mode to the scoped names' residuals. One name
-with a huge unexplained diff is a real alarm — stop and investigate instead
-of raising the limits. (First submit of the day, pre-fills, should pass at
-`0/0` against the nightly snapshot; a breach there means real book drift.)
+An **unscoped** `submit-kelai`, by contrast, blocks on the whole book: the
+day's first submit runs pre-fills and should pass at `0/0` against the
+nightly snapshot — a breach there means real book drift; investigate before
+overriding.
 
 ## Airflow (kelaidata pipeline)
 
