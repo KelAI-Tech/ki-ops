@@ -17,8 +17,16 @@ name: release
 # (`--find-links /usr/local/airflow/plugins --no-index`), so the artifact of
 # record is the pure-python wheel attached to the GitHub release. kelaidata
 # vendors it with scripts/fetch_ki_ops_wheel.sh and pins `ki-ops==X.Y.Z` in
-# requirements_airflow.txt. No AWS credentials are needed here; publishing
-# uses only the workflow's GITHUB_TOKEN.
+# requirements_airflow.txt. The release job needs no AWS credentials;
+# publishing uses only the workflow's GITHUB_TOKEN.
+#
+# Releasing the wheel and deploying the Batch image go hand in hand: the
+# deploy-image job (self-hosted runner, label kelai-deploy) rebuilds the
+# kelaidata/kotl-submit image FROM THE WHEEL THIS RUN JUST RELEASED and
+# pushes it to ECR :latest — the tag the active `kotl-submit` Batch job
+# definition points at, used by BOTH canary and prod DAGs. So every uat →
+# main promotion ships the released code to the next scheduled Batch job
+# with no manual build step.
 
 on:
   push:
@@ -44,6 +52,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -160,3 +171,55 @@ jobs:
             dist/*.whl dist/*.tar.gz dist/SHA256SUMS \
             --title "ki-ops $TAG" \
             --notes "Auto-release from main @ ${GITHUB_SHA}. Pure-python wheel for the MWAA wheelhouse; verify with SHA256SUMS. Consume in kelaidata via scripts/fetch_ki_ops_wheel.sh $TAG."
+
+  deploy-image:
+    # Build and push the kotl-submit AWS Batch image from the wheel the
+    # release job just published. Runs on the self-hosted dev-box runner
+    # (label kelai-deploy): unlike GitHub-hosted runners it has docker, AWS
+    # credentials with S3 read (Brooklyn SDK sync) + ECR push rights, and gh
+    # auth that can clone the private kelaidata repo. The Dockerfile and
+    # build.sh stay in kelaidata (single source of truth); this job only
+    # stages the released wheel and drives them.
+    #
+    # Tags pushed: :latest and :<kelaidata-sha> (by build.sh, the tags the
+    # Batch job definition and rollbacks use) plus :ki-ops-<release-tag> for
+    # release-to-image traceability.
+    needs: release
+    runs-on: [self-hosted, kelai-deploy]
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      VERSION: ${{ needs.release.outputs.version }}
+      AWS_REGION: us-east-1
+    steps:
+      - name: Build and push kotl-submit image from released wheel
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          # kelaidata uat is the deployed docker context convention.
+          gh repo clone KelAI-Tech/kelaidata "$work/kelaidata" -- --depth 1 --branch uat
+
+          # Stage EXACTLY the wheel this run released (build.sh picks the
+          # first plugins/ki_ops-*.whl, so clear any vendored ones first).
+          rm -f "$work/kelaidata/plugins"/ki_ops-*.whl
+          gh release download "$TAG" --repo KelAI-Tech/ki-ops \
+            --pattern 'ki_ops-*.whl' --dir "$work/kelaidata/plugins"
+          ls -l "$work/kelaidata/plugins"/ki_ops-*.whl
+
+          "$work/kelaidata/docker/kotl-submit/build.sh"
+
+          # Release-traceable extra tag.
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          docker tag kelaidata/kotl-submit:latest \
+            "${registry}/kelaidata/kotl-submit:ki-ops-${TAG}"
+          docker push "${registry}/kelaidata/kotl-submit:ki-ops-${TAG}"
+
+      - name: Verify deployed image version
+        run: |
+          set -euo pipefail
+          info="$(docker run --rm --entrypoint pip kelaidata/kotl-submit:latest show ki-ops)"
+          printf '%s\n' "$info"
+          printf '%s\n' "$info" | grep -qx "Version: ${VERSION}"
+          echo "kotl-submit:latest now runs the released ki-ops ${VERSION}"
