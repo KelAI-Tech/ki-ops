@@ -382,6 +382,85 @@ def test_cancel_window_keeps_order_alive_until_terminal_ack():
     assert not is_confirmed_dead(working)
 
 
+def test_session_expired_row_frees_remainder_under_forced_resend():
+    """PROD 2026-09-14 purge signature: Flex's EOD sweep removed never-routed
+    orders from the working set but their queryable rows stay TRADABLE /
+    UNFINALIZED / CANCEL_ORIGINAL and CancelOrders refuses them. Post-close
+    the fills are final, so a forced re-run counts only the fills; during the
+    live session the row stays fully protected."""
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    # Mon 2026-09-14 (EDT): close 16:00 ET = 20:00 UTC, buffer through 20:30.
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)  # 18:00 ET
+    live_session = datetime(2026, 9, 14, 18, 0, tzinfo=timezone.utc)  # 14:00 ET
+    row = _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0) | {
+        "finalizationStatus": 0,
+        "cancelStatus": 0,
+        "tradeDate": "2026-09-14",
+    }
+
+    assert is_confirmed_dead(row, now=after_close)
+    assert not is_confirmed_dead(row, now=live_session)
+    # Forced resend semantics: only the final fills count post-close.
+    assert sent_from_flex_rows(
+        [row], resend_cancelled_remainder=True, now=after_close
+    ) == {"AAPL.US": D("20")}
+    # Live session under --force: still fully counted as sent.
+    assert sent_from_flex_rows(
+        [row], resend_cancelled_remainder=True, now=live_session
+    ) == {"AAPL.US": D("50")}
+    # Unforced runs keep the conservative full count even post-close.
+    assert sent_from_flex_rows([row], now=after_close) == {"AAPL.US": D("50")}
+
+    # The exact PROD shape — zero fills: nothing counts, full delta resendable.
+    unfilled = row | {"filledQuantity": 0.0}
+    assert (
+        sent_from_flex_rows([unfilled], resend_cancelled_remainder=True, now=after_close)
+        == {}
+    )
+
+
+def test_session_expiry_is_conservative_on_uncertain_trade_date():
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    late = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
+    base = _flex_row("s1-1", "AAPL.US", 0, 50.0)
+    # Missing / unparseable / non-trading trade dates → ALIVE.
+    assert not is_confirmed_dead(base, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": ""}, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": "garbage"}, now=late)
+    assert not is_confirmed_dead(base | {"tradeDate": "2026-09-12"}, now=late)  # Saturday
+    # Fully filled row is DONE — expiry never marks it dead.
+    done = base | {"tradeDate": "2026-09-14", "filledQuantity": 50.0}
+    assert not is_confirmed_dead(done, now=late)
+
+
+def test_session_expiry_overrides_pending_cancel_window():
+    # An in-flight cancel keeps an order alive DURING the session, but once
+    # the session has closed nothing can land — the row is dead either way.
+    from ki_ops.kotl.target_mode import is_confirmed_dead
+
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)
+    row = _flex_row("s1-1", "AAPL.US", 0, 50.0, filled=20.0, status=3) | {
+        "cancelStatus": 1,  # CANCEL_REQUESTED — alive intra-session
+        "tradeDate": "2026-09-14",
+    }
+    assert not is_confirmed_dead(row)  # pinned clock: 2026-08-06, pre-session
+    assert is_confirmed_dead(row, now=after_close)
+
+
+def test_summarize_marks_session_expired_rows_dead():
+    from ki_ops.kotl.target_mode import summarize_flex_row_states
+
+    after_close = datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc)
+    rows = [
+        _flex_row("s1-1", "AAPL.US", 0, 50.0)
+        | {"finalizationStatus": 0, "cancelStatus": 0, "tradeDate": "2026-09-14"}
+    ]
+    out = summarize_flex_row_states(rows, now=after_close)
+    assert "1 × TRADABLE / UNFINALIZED / CANCEL_ORIGINAL — confirmed dead" in out
+
+
 def test_summarize_flex_row_states_flags_unfinalized_as_alive():
     from ki_ops.kotl.target_mode import summarize_flex_row_states
 

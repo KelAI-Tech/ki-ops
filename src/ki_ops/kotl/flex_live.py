@@ -302,6 +302,16 @@ class LiveFlexAdapter:
             proto.broker = str(order.get("broker") or "")
             proto.tradingCurrency = str(order.get("tradingCurrency") or "USD")
             proto.settlementCurrency = str(order.get("settlementCurrency") or "USD")
+            # Desk requirement (2026-09-15): Flex rejects orders without
+            # Account Type = Swap. AccountType enum (DomainCommons.proto):
+            # PRIME=0 (the proto default when unset — the rejection cause),
+            # SWAP=1, OTC=2. Payloads built by flex_map always carry the key;
+            # the SWAP fallback covers hand-built payloads.
+            proto.accountType = _enum_value(
+                DomainCommons_pb2.AccountType,
+                order.get("accountType"),
+                default=DomainCommons_pb2.AccountType.Value("SWAP"),
+            )
             proto.fixTags = str(order.get("fixTags") or "")
             proto.manualFill = bool(order.get("manualFill", False))
             proto.algo = str(order.get("algo") or "")

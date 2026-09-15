@@ -15,6 +15,7 @@ from ki_ops.kotl.market_hours import (
     market_close,
     market_hours_verdict,
     nyse_holidays,
+    session_expired,
 )
 
 UTC = timezone.utc
@@ -131,6 +132,48 @@ def test_verdict_default_clock_seam():
     # The autouse conftest fixture pins _now_utc inside the window.
     market_open, _ = market_hours_verdict()
     assert market_open
+
+
+# ---------------------------------------------------------------------------
+# session expiry: GFD orders die once their trade session has closed
+# ---------------------------------------------------------------------------
+
+
+def test_session_expired_boundaries():
+    # Thu 2026-08-06 is EDT: close 16:00 ET = 20:00 UTC, +30m buffer = 20:30.
+    td = date(2026, 8, 6)
+    assert not session_expired(td, datetime(2026, 8, 6, 14, 0, tzinfo=UTC))  # live session
+    assert not session_expired(td, datetime(2026, 8, 6, 20, 0, tzinfo=UTC))  # at the bell
+    assert not session_expired(td, datetime(2026, 8, 6, 20, 29, tzinfo=UTC))  # inside buffer
+    assert session_expired(td, datetime(2026, 8, 6, 20, 30, tzinfo=UTC))  # close + buffer
+    assert session_expired(td, datetime(2026, 9, 14, 12, 0, tzinfo=UTC))  # any later day
+
+
+def test_session_expired_early_close():
+    # Fri 2026-11-27 closes 13:00 ET (EST): 18:00 UTC, +30m = 18:30.
+    td = date(2026, 11, 27)
+    assert not session_expired(td, datetime(2026, 11, 27, 18, 29, tzinfo=UTC))
+    assert session_expired(td, datetime(2026, 11, 27, 18, 30, tzinfo=UTC))
+
+
+def test_session_expired_future_and_naive_now():
+    assert not session_expired(date(2026, 8, 7), datetime(2026, 8, 6, 23, 0, tzinfo=UTC))
+    # Naive datetimes are UTC (ledger convention).
+    assert session_expired(date(2026, 8, 6), datetime(2026, 8, 6, 20, 30))
+    assert not session_expired(date(2026, 8, 6), datetime(2026, 8, 6, 14, 0))
+
+
+def test_session_expired_non_trading_date_never_expires():
+    # No session close is defined → conservative False, however late `now` is.
+    late = datetime(2026, 12, 31, 12, 0, tzinfo=UTC)
+    assert not session_expired(date(2026, 8, 8), late)  # Saturday
+    assert not session_expired(date(2026, 11, 26), late)  # Thanksgiving
+
+
+def test_session_expired_default_clock_seam():
+    # The autouse conftest fixture pins _now_utc to 2026-08-06 14:00 UTC.
+    assert session_expired(date(2026, 8, 5))
+    assert not session_expired(date(2026, 8, 6))
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +317,10 @@ def test_cli_market_closed_exit_code(tmp_path, monkeypatch):
                 assume_flat_sod=False,
                 sod_source="flat",
                 flex_env="UAT",
+                # csv store: this test exercises the market-hours gate only —
+                # the live-env MySQL ledger default would hit Secrets Manager
+                # before the gate (no AWS creds in CI).
+                store="csv",
                 data_dir=tmp_path / "kotl",
                 cache_dir=tmp_path / "cache",
             )

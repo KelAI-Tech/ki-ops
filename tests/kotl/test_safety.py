@@ -273,6 +273,8 @@ def test_no_route_blanks_broker_algo_and_stays_live(env_setup, capsys):
         assert p["broker"] == ""
         assert p["algo"] == ""
         assert p["brokerAutomationType"] == "NO_AUTOMATION"
+        # Desk requirement: Account Type = Swap regardless of routing mode.
+        assert p["accountType"] == "SWAP"
     # Still a real submit: claim taken, ledger written (broker/algo blank).
     assert has_ok_submit(env_setup["store"], TD, "UAT") is not None
     orders = env_setup["store"].load_working_orders(trade_date=TD)
@@ -296,6 +298,7 @@ def test_default_submit_routing_unchanged(env_setup):
         assert p["broker"] == "KEL-GS-EQ-LT"
         assert p["algo"] == "VWAP_AMRS"
         assert p["brokerAutomationType"] == "AUTOROUTE"
+        assert p["accountType"] == "SWAP"  # desk requirement, all orders
 
 
 # ---------------------------------------------------------------------------

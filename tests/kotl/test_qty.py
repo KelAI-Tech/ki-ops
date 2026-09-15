@@ -62,6 +62,26 @@ def test_derive_status(sent, filled, flex_status, expected):
     assert derive_status(sent, filled, flex_status=flex_status) == expected
 
 
+@pytest.mark.parametrize(
+    ("sent", "filled", "flex_status", "expected"),
+    [
+        # Session over, remainder unfilled → CANCELLED (expired), whatever
+        # the stale Flex lifecycle claims (TRADABLE purge, PROD 2026-09-14).
+        (Decimal("100"), Decimal("0"), 2, OrderStatus.CANCELLED),
+        (Decimal("100"), Decimal("0"), None, OrderStatus.CANCELLED),
+        (Decimal("100"), Decimal("40"), 4, OrderStatus.CANCELLED),
+        (Decimal("-100"), Decimal("-40"), None, OrderStatus.CANCELLED),
+        # Fully filled stays DONE — nothing left to expire.
+        (Decimal("100"), Decimal("100"), 5, OrderStatus.DONE),
+        (Decimal("-100"), Decimal("-100"), None, OrderStatus.DONE),
+        # A Flex-cancelled order is CANCELLED either way.
+        (Decimal("100"), Decimal("40"), 3, OrderStatus.CANCELLED),
+    ],
+)
+def test_derive_status_session_expired(sent, filled, flex_status, expected):
+    assert derive_status(sent, filled, flex_status=flex_status, session_expired=True) == expected
+
+
 def test_leaves_qty_open_and_done():
     assert leaves_qty(Decimal("100"), Decimal("0"), OrderStatus.OPEN) == Decimal("100")
     assert leaves_qty(Decimal("100"), Decimal("60"), OrderStatus.PARTIAL) == Decimal("40")

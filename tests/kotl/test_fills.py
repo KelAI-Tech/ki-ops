@@ -225,6 +225,7 @@ def test_merge_order_snapshots_pure():
     updated = merge_order_snapshots(
         stored,
         [{"orderId": "F1", "filledQuantity": 60, "weightedAvgPrice": 190.0}],
+        trade_date=TS.date(),  # same session → no expiry derivation
         last_seen_at=TS,
     )
     assert len(updated) == 1
