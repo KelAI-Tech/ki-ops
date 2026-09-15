@@ -36,6 +36,7 @@ def test_order_to_flex_dict_buy():
     assert payload["positionGroup"] == "USATop2000_strategy_v1"
     assert payload["orderType"] == "MARKET"
     assert payload["algo"] == "VWAP_AMRS"
+    assert payload["accountType"] == "SWAP"  # desk requirement: Flex rejects non-Swap
     assert "submit_id=sub-abc" in payload["notes"]
     assert "intent_id=intent-amzn-buy" in payload["notes"]
 
@@ -53,6 +54,7 @@ def test_flex_orders_from_example_rebalance_csv():
     for p in payloads:
         assert p["fund"] == "KELAI"
         assert p["timeInForce"] == "GFD"
+        assert p["accountType"] == "SWAP"  # every order, buy and sell alike
         assert "submit_id=sub-1" in p["notes"]
 
 
@@ -70,6 +72,7 @@ def test_no_route_defaults_blanks_only_routing_fields():
     assert cfg.position_group == base.position_group
     assert cfg.order_type == base.order_type
     assert cfg.time_in_force == base.time_in_force
+    assert cfg.account_type == "SWAP"  # account type applies in no-route mode too
 
     custom = FlexOrderDefaults(position_group="OtherGroup")
     assert no_route_defaults(custom).position_group == "OtherGroup"
@@ -82,3 +85,20 @@ def test_no_route_payload_has_blank_broker_and_algo():
     assert payload["algo"] == ""
     assert payload["brokerAutomationType"] == "NO_AUTOMATION"
     assert payload["symbol"] == "AMZN.US"  # everything else unchanged
+    assert payload["accountType"] == "SWAP"  # the requirement applies regardless of routing
+
+
+def test_account_type_default_is_swap_env_and_kwarg_override(monkeypatch):
+    order = Order("AMZN", Side.BUY, Decimal("12"), Decimal("186"), None)
+
+    monkeypatch.delenv("KOTL_FLEX_ACCOUNT_TYPE", raising=False)
+    assert FlexOrderDefaults().account_type == "SWAP"
+
+    # Env override (no code edit needed if the desk changes the requirement).
+    monkeypatch.setenv("KOTL_FLEX_ACCOUNT_TYPE", "otc")
+    assert FlexOrderDefaults().account_type == "OTC"
+    assert order_to_flex_dict(order)["accountType"] == "OTC"
+
+    # Explicit defaults (e.g. --account-type) beat the env.
+    explicit = FlexOrderDefaults(account_type="PRIME")
+    assert order_to_flex_dict(order, defaults=explicit)["accountType"] == "PRIME"

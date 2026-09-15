@@ -170,6 +170,39 @@ def test_kotl_cli_submit_kelai_no_route(tmp_path):
     assert "NO-ROUTE MODE" in out
     assert '"no_route": true' in out
     assert (tmp_path / "kotl" / "working_orders.csv").exists()
+    # Desk requirement: Account Type = Swap on every order, no-route included.
+    from ki_ops.kotl.store import KotlStore
+
+    (submit,) = KotlStore(tmp_path / "kotl").load_submits()
+    assert submit.payload
+    assert all(p["accountType"] == "SWAP" for p in submit.payload)
+
+
+def test_kotl_cli_submit_kelai_account_type_flag(tmp_path):
+    import pytest
+
+    pytest.importorskip("h5py")
+    from tests.kotl.test_kelaidata_source import make_ds2_h5
+
+    h5 = make_ds2_h5(tmp_path / "ds2_data.h5")
+    shares_dir = tmp_path / "shares"
+    shares_dir.mkdir()
+    shares = shares_dir / "Portfolio_20260806.csv"
+    shares.write_text("AAPL,50,VWAP\nMSFT,-30,VWAP\n")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(
+            _kelai_args(
+                tmp_path, shares, h5, sod_source="flat", account_type="otc"
+            )
+        )
+    assert rc == 0
+    from ki_ops.kotl.store import KotlStore
+
+    (submit,) = KotlStore(tmp_path / "kotl").load_submits()
+    assert submit.payload
+    assert all(p["accountType"] == "OTC" for p in submit.payload)
 
 
 def test_kotl_cli_submit_kelai_flex_sod_recon_exit_code(tmp_path, monkeypatch):
