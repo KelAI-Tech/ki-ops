@@ -946,7 +946,11 @@ def submit_kelai_shares(
     BEFORE resolution and target mode, so every safety rail still runs on
     the scoped set; already-sent symbols outside the scope are ignored for
     residual purposes (no orders are generated for them, and no overshoot
-    noise is reported about them). Typical flows: a submit ran with
+    noise is reported about them). With *retry_unresolved* and no explicit
+    *trade_file_out*, the trade file — and therefore every sidecar (the new
+    unresolved report, the residual audit) — defaults into the SAME folder
+    as the retry report, keeping the day's artifacts together instead of
+    falling back to the local data dir. Typical flows: a submit ran with
     ``--unresolved skip`` and FlexTrade has since seeded the master → resend
     with the unresolved report; or an order was cancelled in Flex and its
     dead remainder should go out again → resend with ``--ticker`` under
@@ -1218,6 +1222,22 @@ def submit_kelai_shares(
                 f"resend scope: {len(retry_tickers)} ticker(s) from unresolved "
                 f"report {retry_unresolved}"
             )
+            if trade_file_out is None:
+                # Default the trade file (and therefore every sidecar — the
+                # new unresolved report, the residual audit) into the SAME
+                # folder as the retry report: that folder is the day's trade
+                # artifact home, and the local data-dir fallback of an
+                # installed wheel is effectively invisible.
+                base = str(retry_unresolved)
+                folder = base.rsplit("/", 1)[0] if "/" in base else "."
+                trade_file_out = (
+                    f"{folder}/trades_{pending.submit_id}"
+                    f"{'_dryrun' if dry_run else ''}.csv"
+                )
+                print(
+                    "trade file defaults next to the unresolved report: "
+                    f"{trade_file_out}"
+                )
         payloads, orders = _apply_ticker_scope(
             payloads,
             orders,

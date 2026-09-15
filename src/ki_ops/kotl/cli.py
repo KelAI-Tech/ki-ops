@@ -260,7 +260,9 @@ def register_kotl_parser(sub) -> None:
         metavar="CSV",
         help="unresolved_<submit_id>.csv (local or s3://) written by a prior "
         "submit — re-send its tickers now that FlexTrade seeded the master; "
-        "tickers that dropped out of today's target only warn",
+        "tickers that dropped out of today's target only warn. Unless "
+        "--trade-file-out is given, the resend trade file (and any new "
+        "unresolved report) is written to the same folder as this CSV",
     )
     _add_submit_kelai_args(rs, resend=True)
 

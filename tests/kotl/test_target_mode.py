@@ -677,6 +677,36 @@ def test_e2e_resend_retry_unresolved_after_master_seeded(e2e, capsys):
     assert "2 ticker(s) from unresolved report" in out
     assert "no trade intent today (skipped): GONE" in out
     assert "ignoring 1 already-sent symbol(s) outside the scope (AAPL.US" in out
+    # the resend trade file defaults into the retry report's folder
+    assert "trade file defaults next to the unresolved report" in out
+    assert (unresolved_csv.parent / f"trades_{resent.submit_id}.csv").is_file()
+
+
+def test_e2e_resend_still_unresolved_writes_new_report_next_to_retry_csv(e2e):
+    """A retried name STILL missing from the master: nothing is sent, and the
+    fresh unresolved report lands in the same folder as the retry CSV (the
+    defaulted trade-file destination), ready to chain into the next retry."""
+    from ki_ops.kotl.submit import UnresolvedSecuritiesError
+
+    _echo_create_results(e2e)
+    from tests.kotl.fake_flex_sdk import make_security
+
+    e2e["backend"].security_master = [make_security("AAPL.US", 15)]  # no MSFT
+    first = _e2e_submit(e2e, unresolved="skip")
+    assert [p["symbol"] for p in first.payload] == ["AAPL.US"]
+    trades_dir = e2e["store"].data_dir / "trades" / "20260806"
+    (retry_csv,) = trades_dir.glob("unresolved_*.csv")
+    _mirror_to_backend(e2e)
+
+    # master still has no MSFT → every scoped name unresolved → exit-6 path
+    with pytest.raises(UnresolvedSecuritiesError, match="no order symbol resolved"):
+        _e2e_submit(
+            e2e, force=True, retry_unresolved=str(retry_csv), unresolved="skip"
+        )
+    reports = sorted(trades_dir.glob("unresolved_*.csv"))
+    assert len(reports) == 2  # the original + the fresh one, side by side
+    fresh = next(p for p in reports if p != retry_csv)
+    assert "MSFT" in fresh.read_text()
 
 
 def test_e2e_dry_run_prints_residual_audit_without_grpc(e2e, capsys):
