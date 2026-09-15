@@ -27,3 +27,15 @@ def _no_network_sedol_source(monkeypatch):
     explicitly with ``sedol_source="snowflake"``.
     """
     monkeypatch.setenv("KOTL_SEDOL_SOURCE", "none")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_ops_env(monkeypatch):
+    """Tests never inherit the machine's KI_OPS_ENV.
+
+    Operator boxes export KI_OPS_ENV=canary, which flips env-aware defaults
+    (shares root, submit ledger). Tests that exercise those defaults set the
+    variable explicitly with monkeypatch.setenv.
+    """
+    monkeypatch.delenv("KI_OPS_ENV", raising=False)
+    monkeypatch.delenv("KOTL_DB_SCHEMA", raising=False)

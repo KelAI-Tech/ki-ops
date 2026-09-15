@@ -34,8 +34,10 @@ def _add_store_args(parser) -> None:
     parser.add_argument(
         "--store",
         choices=("csv", "mysql"),
-        default="csv",
-        help="ledger backend (default csv under --data-dir; mysql needs ki-ops[db])",
+        default=None,
+        help="ledger backend (default csv under --data-dir; live submit-kelai/"
+        "resend default to the KI_OPS_ENV preset's MySQL ledger instead; "
+        "mysql needs ki-ops[db])",
     )
     parser.add_argument(
         "--db-secret",
@@ -428,6 +430,50 @@ def _build_store(args):
     return KotlStore(args.data_dir)
 
 
+def _build_submit_store(args):
+    """Ledger for ``submit-kelai`` / ``resend`` — env-aware default.
+
+    Explicit ``--store`` always wins. With no ``--store``, a LIVE env
+    (``--flex-env UAT/PROD``) defaults to the ``KI_OPS_ENV`` preset's MySQL
+    ledger (canary → ``kelai/kotl/db-canary``): a live submit recorded in a
+    stray local CSV ledger is invisible to recon baselines, claims, fills
+    and EOD (live-observed 2026-09-15). ``FAKE`` stays csv under
+    ``--data-dir`` (offline testing). Inside the MySQL path the usual
+    precedence applies: ``--db-secret``/``--db-schema`` flags >
+    ``KOTL_DB_*`` env vars > the preset.
+    """
+    import os
+
+    choice = getattr(args, "store", None)
+    flex_env = str(getattr(args, "flex_env", "FAKE") or "FAKE").upper()
+    live = flex_env in ("UAT", "PROD")
+    if choice == "csv" or (choice is None and not live):
+        if choice == "csv" and live:
+            print(
+                "WARNING: --store csv on a live env — this submit will be "
+                "recorded in a LOCAL ledger only, invisible to the env's "
+                "MySQL ledger (recon baselines, claims, fills, EOD)"
+            )
+        return KotlStore(args.data_dir)
+
+    from ki_ops.kotl.mysql_store import MysqlKotlStore
+    from ki_ops.opsenv import resolve_ops_env
+
+    ops_env = resolve_ops_env(None)
+    db_secret = getattr(args, "db_secret", None) or ops_env.kotl_db_secret
+    db_schema = (
+        getattr(args, "db_schema", None)
+        or os.environ.get("KOTL_DB_SCHEMA")
+        or ops_env.kotl_db_schema
+    )
+    if choice is None:
+        print(
+            f"ledger: mysql via {db_secret} schema={db_schema} "
+            f"(live-env default, KI_OPS_ENV={ops_env.name}; --store csv opts out)"
+        )
+    return MysqlKotlStore.from_env_or_secret(db_secret=db_secret, db_schema=db_schema)
+
+
 def _build_fills_store(args, ops_env):
     """Fills default to the env preset's MySQL ledger; ``--store csv`` opts out.
 
@@ -549,7 +595,12 @@ def run_kotl(args) -> int:
         # fills resolves its own store (env-preset MySQL default, not csv)
         return _run_fills(args)
 
-    store = _build_store(args)
+    # submit-kelai / resend: live envs default to the env preset's MySQL
+    # ledger; everything else keeps the plain csv-under---data-dir default.
+    if cmd in ("submit-kelai", "resend"):
+        store = _build_submit_store(args)
+    else:
+        store = _build_store(args)
 
     if cmd == "submit-rebalance":
         submit = submit_rebalance_csv(

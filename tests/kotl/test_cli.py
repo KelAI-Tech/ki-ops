@@ -172,6 +172,50 @@ def test_kotl_cli_submit_kelai_no_route(tmp_path):
     assert (tmp_path / "kotl" / "working_orders.csv").exists()
 
 
+def test_build_submit_store_env_aware_defaults(tmp_path, monkeypatch, capsys):
+    """submit-kelai/resend ledger: FAKE → csv; live env → KI_OPS_ENV preset
+    MySQL by default; explicit --store always wins (csv on live warns)."""
+    import ki_ops.kotl.mysql_store as mysql_store
+    from ki_ops.kotl.cli import _build_submit_store
+    from ki_ops.kotl.store import KotlStore
+
+    calls = {}
+
+    class FakeMysql:
+        @classmethod
+        def from_env_or_secret(cls, *, db_secret=None, db_schema=None):
+            calls["args"] = (db_secret, db_schema)
+            return "MYSQL-STORE"
+
+    monkeypatch.setattr(mysql_store, "MysqlKotlStore", FakeMysql)
+    monkeypatch.setenv("KI_OPS_ENV", "canary")
+
+    # FAKE (offline) keeps the csv/data-dir default
+    assert isinstance(_build_submit_store(Args(data_dir=tmp_path)), KotlStore)
+
+    # live env, no --store → the env preset's MySQL ledger
+    assert _build_submit_store(Args(data_dir=tmp_path, flex_env="UAT")) == "MYSQL-STORE"
+    assert calls["args"] == ("kelai/kotl/db-canary", "kotl")
+    assert "live-env default, KI_OPS_ENV=canary" in capsys.readouterr().out
+
+    monkeypatch.setenv("KI_OPS_ENV", "prod")
+    _build_submit_store(Args(data_dir=tmp_path, flex_env="PROD"))
+    assert calls["args"] == ("kelai/kotl/db-prod", "kotl")
+
+    # explicit flags beat the preset
+    _build_submit_store(
+        Args(data_dir=tmp_path, flex_env="UAT", store="mysql", db_secret="x/y", db_schema="z")
+    )
+    assert calls["args"] == ("x/y", "z")
+
+    # explicit csv on a live env is honored but loud
+    capsys.readouterr()
+    assert isinstance(
+        _build_submit_store(Args(data_dir=tmp_path, flex_env="UAT", store="csv")), KotlStore
+    )
+    assert "WARNING: --store csv on a live env" in capsys.readouterr().out
+
+
 def test_kotl_cli_resend_offline(tmp_path):
     import pytest
 
