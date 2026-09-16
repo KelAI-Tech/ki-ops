@@ -194,6 +194,11 @@ jobs:
       - name: Build and push kotl-submit image from released wheel
         run: |
           set -euo pipefail
+          # Self-hosted runner: the runner service's PATH is minimal — gh is
+          # a user-dir install (v0.3.6 release: `gh: command not found`,
+          # exit 127, no image pushed). docker/aws are system-wide.
+          export PATH="/udata/home/jercoh/.local/bin:$HOME/.local/bin:$PATH"
+          command -v gh >/dev/null || { echo "gh not on runner PATH" >&2; exit 1; }
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
 
