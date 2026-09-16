@@ -205,6 +205,101 @@ def test_kotl_cli_submit_kelai_account_type_flag(tmp_path):
     assert all(p["accountType"] == "OTC" for p in submit.payload)
 
 
+def test_build_submit_store_env_aware_defaults(tmp_path, monkeypatch, capsys):
+    """submit-kelai/resend ledger: FAKE → csv; live env → KI_OPS_ENV preset
+    MySQL by default; explicit --store always wins (csv on live warns)."""
+    import ki_ops.kotl.mysql_store as mysql_store
+    from ki_ops.kotl.cli import _build_submit_store
+    from ki_ops.kotl.store import KotlStore
+
+    calls = {}
+
+    class FakeMysql:
+        @classmethod
+        def from_env_or_secret(cls, *, db_secret=None, db_schema=None):
+            calls["args"] = (db_secret, db_schema)
+            return "MYSQL-STORE"
+
+    monkeypatch.setattr(mysql_store, "MysqlKotlStore", FakeMysql)
+    monkeypatch.setenv("KI_OPS_ENV", "canary")
+
+    # FAKE (offline) keeps the csv/data-dir default
+    assert isinstance(_build_submit_store(Args(data_dir=tmp_path)), KotlStore)
+
+    # live env, no --store → the env preset's MySQL ledger
+    assert _build_submit_store(Args(data_dir=tmp_path, flex_env="UAT")) == "MYSQL-STORE"
+    assert calls["args"] == ("kelai/kotl/db-canary", "kotl")
+    assert "live-env default, KI_OPS_ENV=canary" in capsys.readouterr().out
+
+    monkeypatch.setenv("KI_OPS_ENV", "prod")
+    _build_submit_store(Args(data_dir=tmp_path, flex_env="PROD"))
+    assert calls["args"] == ("kelai/kotl/db-prod", "kotl")
+
+    # explicit flags beat the preset
+    _build_submit_store(
+        Args(data_dir=tmp_path, flex_env="UAT", store="mysql", db_secret="x/y", db_schema="z")
+    )
+    assert calls["args"] == ("x/y", "z")
+
+    # explicit csv on a live env is honored but loud
+    capsys.readouterr()
+    assert isinstance(
+        _build_submit_store(Args(data_dir=tmp_path, flex_env="UAT", store="csv")), KotlStore
+    )
+    assert "WARNING: --store csv on a live env" in capsys.readouterr().out
+
+
+def test_kotl_cli_resend_offline(tmp_path):
+    import pytest
+
+    pytest.importorskip("h5py")
+    from tests.kotl.test_kelaidata_source import make_ds2_h5
+
+    h5 = make_ds2_h5(tmp_path / "ds2_data.h5")
+    shares_dir = tmp_path / "shares"
+    shares_dir.mkdir()
+    shares = shares_dir / "Portfolio_20260806.csv"
+    shares.write_text("AAPL,50,VWAP\nMSFT,-30,VWAP\n")
+
+    rc = run_kotl(_kelai_args(tmp_path, shares, h5, sod_source="flat"))
+    assert rc == 0
+
+    def _resend_args(**kwargs):
+        base = dict(
+            kotl_command="resend",
+            sod_source="flat",
+            ticker=None,
+            retry_unresolved=None,
+        )
+        base.update(kwargs)
+        return _kelai_args(tmp_path, shares, h5, **base)
+
+    # no scope → usage error
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args())
+    assert rc == 2
+    assert "resend needs a scope" in buf.getvalue()
+
+    # scoped to one ticker (FAKE env: no target mode; the filter still applies)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args(ticker=["AAPL"]))
+    assert rc == 0
+    out = buf.getvalue()
+    assert "RESEND" in out
+    assert "resend scope: 1 of 2 order(s) kept (AAPL)" in out
+    assert '"order_count": 1' in out
+    assert '"resend": true' in out
+
+    # unknown ticker → refusal, exit 5
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run_kotl(_resend_args(ticker=["ZZZZ"]))
+    assert rc == EXIT_SUBMIT_REFUSED
+    assert "no trade intent" in buf.getvalue()
+
+
 def test_kotl_cli_submit_kelai_flex_sod_recon_exit_code(tmp_path, monkeypatch):
     import pytest
 

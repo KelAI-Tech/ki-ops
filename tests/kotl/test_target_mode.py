@@ -646,6 +646,42 @@ def test_e2e_forced_rerun_sends_exactly_the_residual(e2e, capsys):
     assert any("AAPL.US,80.0,50.0,30.0,partial" in p.read_text() for p in audits)
 
 
+def test_e2e_verdict_summary_distinguishes_calc_warnings(e2e, capsys):
+    """A gateway reject whose reason is a Flex exposure-calc warning (missing
+    analytics inputs, 0.00% tolerance) is separated from true rejections in
+    the table, the verdict summary, and the recorded ledger reason."""
+    backend = e2e["backend"]
+    original = backend.CreateOrders
+    calc_msg = (
+        "Error: Calc failed for 13.9187% (298/2141) of securities. "
+        "See exception report email."
+    )
+
+    def create_orders(request, timeout=None, metadata=None):
+        backend.create_results = [
+            e2e["make_create_result"](
+                order.originId,
+                success="MSFT" not in order.symbol,
+                description="" if "MSFT" not in order.symbol else calc_msg,
+            )
+            for order in request.orders
+        ]
+        yield from original(request, timeout=timeout, metadata=metadata)
+
+    backend.CreateOrders = create_orders
+    submit = _e2e_submit(e2e)
+    assert not submit.ok
+
+    out = capsys.readouterr().out
+    assert "rejected (calc-warning)" in out
+    assert "CreateOrders verdicts: 1 submitted, 1 rejected — 1 exposure-calc warning(s)" in out
+    assert "0 true rejection(s)" in out
+
+    orders = {o.symbol: o for o in e2e["store"].load_working_orders(trade_date=date(2026, 8, 6))}
+    assert orders["MSFT.US"].rejection_reason == calc_msg
+    assert orders["AAPL.US"].rejection_reason is None
+
+
 def test_e2e_sent_source_flex_recovers_lost_ledger(e2e):
     """Ledger lost the first submit: cross-check aborts, --sent-source flex
     recomputes already-sent from Flex and still refuses to double-trade."""
@@ -669,6 +705,123 @@ def test_e2e_sent_source_flex_recovers_lost_ledger(e2e):
     recovered = _e2e_submit(e2e, sent_source="flex")
     assert (recovered.flex_response or {}).get("target_covered") is True
     assert e2e["store"].load_submits() == []
+
+
+def test_e2e_resend_ticker_frees_only_cancelled_remainder(e2e, capsys):
+    """kotl resend --ticker: forced re-submit scoped to one name — the
+    confirmed-cancelled remainder goes out, everything else stays untouched
+    (and out-of-scope sends produce no overshoot noise)."""
+    from tests.kotl.fake_flex_sdk import make_order_info
+
+    _echo_create_results(e2e)
+    first = _e2e_submit(e2e)
+    assert first.ok and len(first.payload) == 2
+
+    stored = e2e["store"].load_working_orders(trade_date=date(2026, 8, 6))
+    by_symbol = {o.symbol: o for o in stored}
+    aapl, msft = by_symbol["AAPL.US"], by_symbol["MSFT.US"]
+    # Operator cancelled the AAPL order in Flex after 20 of 50 filled; the
+    # MSFT order is still working.
+    e2e["backend"].order_infos = [
+        make_order_info(
+            aapl.flex_order_id, "AAPL.US", side=0, quantity=50.0,
+            filled_quantity=20.0, status=3, notes=f"submit_id={aapl.submit_id}",
+        ),
+        make_order_info(
+            msft.flex_order_id, "MSFT.US", side=1, quantity=30.0,
+            notes=f"submit_id={msft.submit_id}",
+        ),
+    ]
+
+    resent = _e2e_submit(e2e, force=True, only_tickers=["AAPL"])
+    assert resent.ok
+    assert len(resent.payload) == 1
+    assert resent.payload[0]["symbol"] == "AAPL.US"
+    assert resent.payload[0]["side"] == "BUY"
+    assert resent.payload[0]["quantity"] == 30.0  # 50 target − 20 final fills
+    out = capsys.readouterr().out
+    assert "resend scope: 1 of 2 order(s) kept (AAPL)" in out
+    assert "ignoring 1 already-sent symbol(s) outside the scope (MSFT.US" in out
+    assert "PAST today's delta" not in out  # no overshoot noise about MSFT
+
+
+def test_e2e_resend_unknown_or_absent_ticker_refuses(e2e):
+    """--ticker names must have a residual trade intent — typo protection."""
+    from ki_ops.kotl.submit import SubmitRefusedError
+
+    _echo_create_results(e2e)
+    _e2e_submit(e2e)
+    _mirror_to_backend(e2e)
+
+    with pytest.raises(SubmitRefusedError, match="no trade intent for ticker\\(s\\) ZZZZ"):
+        _e2e_submit(e2e, force=True, only_tickers=["ZZZZ"])
+    # a fully-working scoped name is a clean covered no-op, not a resend
+    covered = _e2e_submit(e2e, force=True, only_tickers=["AAPL"])
+    assert (covered.flex_response or {}).get("target_covered") is True
+
+
+def test_e2e_resend_retry_unresolved_after_master_seeded(e2e, capsys):
+    """kotl resend --retry-unresolved: names skipped by --unresolved skip go
+    out once FlexTrade seeds the master; names that dropped out of the target
+    only warn; already-sent names outside the scope are ignored."""
+    from tests.kotl.fake_flex_sdk import make_security
+
+    _echo_create_results(e2e)
+    e2e["backend"].security_master = [make_security("AAPL.US", 15)]  # no MSFT yet
+    first = _e2e_submit(e2e, unresolved="skip")
+    assert first.ok
+    assert [p["symbol"] for p in first.payload] == ["AAPL.US"]
+
+    trades_dir = e2e["store"].data_dir / "trades" / "20260806"
+    (unresolved_csv,) = trades_dir.glob("unresolved_*.csv")
+    assert "MSFT" in unresolved_csv.read_text()
+    # a ticker that dropped out of today's target must only warn on retry
+    with unresolved_csv.open("a", encoding="utf-8") as fh:
+        fh.write("GONE,GONE.US,BUY,10,GONE.US\n")
+
+    _mirror_to_backend(e2e)
+    e2e["backend"].security_master.append(make_security("MSFT.US", 540))
+
+    resent = _e2e_submit(e2e, force=True, retry_unresolved=str(unresolved_csv))
+    assert resent.ok
+    assert len(resent.payload) == 1
+    assert resent.payload[0]["symbol"] == "MSFT.US"
+    assert resent.payload[0]["side"] == "SELL"
+    assert resent.payload[0]["quantity"] == 30.0
+    out = capsys.readouterr().out
+    assert "2 ticker(s) from unresolved report" in out
+    assert "no trade intent today (skipped): GONE" in out
+    assert "ignoring 1 already-sent symbol(s) outside the scope (AAPL.US" in out
+    # the resend trade file defaults into the retry report's folder
+    assert "trade file defaults next to the unresolved report" in out
+    assert (unresolved_csv.parent / f"trades_{resent.submit_id}.csv").is_file()
+
+
+def test_e2e_resend_still_unresolved_writes_new_report_next_to_retry_csv(e2e):
+    """A retried name STILL missing from the master: nothing is sent, and the
+    fresh unresolved report lands in the same folder as the retry CSV (the
+    defaulted trade-file destination), ready to chain into the next retry."""
+    from ki_ops.kotl.submit import UnresolvedSecuritiesError
+
+    _echo_create_results(e2e)
+    from tests.kotl.fake_flex_sdk import make_security
+
+    e2e["backend"].security_master = [make_security("AAPL.US", 15)]  # no MSFT
+    first = _e2e_submit(e2e, unresolved="skip")
+    assert [p["symbol"] for p in first.payload] == ["AAPL.US"]
+    trades_dir = e2e["store"].data_dir / "trades" / "20260806"
+    (retry_csv,) = trades_dir.glob("unresolved_*.csv")
+    _mirror_to_backend(e2e)
+
+    # master still has no MSFT → every scoped name unresolved → exit-6 path
+    with pytest.raises(UnresolvedSecuritiesError, match="no order symbol resolved"):
+        _e2e_submit(
+            e2e, force=True, retry_unresolved=str(retry_csv), unresolved="skip"
+        )
+    reports = sorted(trades_dir.glob("unresolved_*.csv"))
+    assert len(reports) == 2  # the original + the fresh one, side by side
+    fresh = next(p for p in reports if p != retry_csv)
+    assert "MSFT" in fresh.read_text()
 
 
 def test_e2e_dry_run_prints_residual_audit_without_grpc(e2e, capsys):

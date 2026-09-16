@@ -59,6 +59,7 @@ from ki_ops.kotl.flex_map import (
     no_route_defaults,
     orders_to_flex_dicts,
 )
+from ki_ops.kotl.flex_reasons import is_exposure_calc_warning, rejection_reason_from_result
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
 from ki_ops.kotl.qty import signed_qty
 from ki_ops.kotl.store import KotlStore
@@ -303,6 +304,17 @@ def submit_rebalance_csv(
 def _bare_ticker(symbol: str, *, suffix: str = ".US") -> str:
     sym = str(symbol).strip().upper()
     return sym[: -len(suffix)] if suffix and sym.endswith(suffix) else sym
+
+
+def _scope_key(symbol: str, *, suffix: str = ".US") -> str:
+    """Vocabulary-insensitive join key for scope↔recon matching.
+
+    The recon diff speaks whatever vocabulary its baseline does (canonical
+    Flex symbols against a book snapshot, bare ds2 tickers against a prior
+    target file) while the scope is typed in ds2 — normalize class-share
+    spellings so ``BF/B.US``, ``BF.B`` and ``BFB`` all join (→ ``BFB``).
+    """
+    return _bare_ticker(symbol, suffix=suffix).replace("/", "").replace(".", "")
 
 
 def _sod_from_shares(
@@ -759,6 +771,63 @@ def _resolve_payload_symbols(
     return [p for p, _ in kept], [o for _, o in kept]
 
 
+def _apply_ticker_scope(
+    payloads: list[dict],
+    orders: list,
+    *,
+    strict_tickers: Sequence[str],
+    lenient_tickers: Sequence[str],
+    symbol_suffix: str,
+) -> tuple[list[dict], list]:
+    """Restrict the parallel payload/order lists to the requested tickers.
+
+    The resend scope (``kotl resend``). *strict_tickers* (operator-typed
+    ``--ticker``) must each match a derived trade intent — a miss refuses the
+    submit (typo protection, and "nothing left to send for this name" is an
+    explicit verdict, never a silent no-op). *lenient_tickers* (from a prior
+    unresolved report) may legitimately have dropped out of today's target,
+    so their misses only warn.
+    """
+    strict = {_bare_ticker(t, suffix=symbol_suffix) for t in strict_tickers}
+    lenient = {_bare_ticker(t, suffix=symbol_suffix) for t in lenient_tickers}
+    wanted = strict | lenient
+
+    def _payload_ticker(payload: dict) -> str:
+        return _bare_ticker(
+            str(payload.get("sourceSymbol") or payload["symbol"]), suffix=symbol_suffix
+        )
+
+    kept = [
+        (payload, order)
+        for payload, order in zip(payloads, orders)
+        if _payload_ticker(payload) in wanted
+    ]
+    matched = {_payload_ticker(payload) for payload, _ in kept}
+    missing_strict = sorted(strict - matched)
+    if missing_strict:
+        raise SubmitRefusedError(
+            "resend scope: no trade intent for ticker(s) "
+            f"{', '.join(missing_strict)} — not in today's target − SOD delta "
+            "(target already met, or the name is not in the book)"
+        )
+    skipped = sorted(lenient - matched - strict)
+    if skipped:
+        shown = ", ".join(skipped[:20])
+        print(
+            f"resend scope: {len(skipped)} unresolved-report ticker(s) have no "
+            f"trade intent today (skipped): {shown}{' …' if len(skipped) > 20 else ''}"
+        )
+    if not kept:
+        raise SubmitRefusedError(
+            "resend scope: no order matches the requested tickers — nothing to send"
+        )
+    print(
+        f"resend scope: {len(kept)} of {len(payloads)} order(s) kept "
+        f"({', '.join(sorted(matched))})"
+    )
+    return [p for p, _ in kept], [o for _, o in kept]
+
+
 def submit_kelai_shares(
     store,
     *,
@@ -790,6 +859,8 @@ def submit_kelai_shares(
     sent_source: str = "ledger",
     allow_outside_market_hours: bool = False,
     no_route: bool = False,
+    only_tickers: Sequence[str] | None = None,
+    retry_unresolved: str | Path | None = None,
 ) -> Submit:
     """kelaidata shares trade file (S3) + ds2 H5 prices + SOD source → submit.
 
@@ -876,6 +947,34 @@ def submit_kelai_shares(
     flex order ids; everything else (recon table, residual audit, trade file,
     caps report) is still produced — but no claim is taken and the live
     cross-check is skipped (no gRPC).
+
+    **Resend scope** (*only_tickers* / *retry_unresolved* — the ``kotl
+    resend`` command): restrict the run to specific tickers after the day's
+    main submit. *only_tickers* is the operator-picked list (ds2 vocabulary;
+    every name must have a trade intent today or the submit refuses — typo
+    protection); *retry_unresolved* is a prior ``unresolved_<submit_id>.csv``
+    report whose tickers are retried leniently (names that dropped out of
+    the target only warn). The scope is applied to the derived intents
+    BEFORE resolution and target mode, so every safety rail still runs on
+    the scoped set; already-sent symbols outside the scope are ignored for
+    residual purposes (no orders are generated for them, and no overshoot
+    noise is reported about them). The **SOD recon guard blocks on the
+    scoped tickers' rows only**: the full-book diff is still printed (it is
+    the systemic-health signal), but out-of-scope divergence — normal
+    intraday fills on the rest of the book — is informational, so a
+    retry-unresolved run whose names were never sent passes the strict
+    ``0/0`` default clean, while a scoped name whose own book row moved
+    (e.g. a cancelled order's fills) still requires explicit thresholds
+    covering exactly that movement. With *retry_unresolved* and no explicit
+    *trade_file_out*, the trade file — and therefore every sidecar (the new
+    unresolved report, the residual audit) — defaults into the SAME folder
+    as the retry report, keeping the day's artifacts together instead of
+    falling back to the local data dir. Typical flows: a submit ran with
+    ``--unresolved skip`` and FlexTrade has since seeded the master → resend
+    with the unresolved report; or an order was cancelled in Flex and its
+    dead remainder should go out again → resend with ``--ticker`` under
+    *force* (only confirmed-CANCELLED remainders are freed — working and
+    unfinalized orders stay fully protected).
 
     **No-route mode** (*no_route*): every order goes out with a **blank
     broker, blank algo and ``NO_AUTOMATION``** — per FlexTrade, such orders
@@ -985,6 +1084,22 @@ def submit_kelai_shares(
     targets = targets_from_shares(shares, snapshot)
     target_tickers = set(shares)
 
+    # --- resend scope keys (resolved early: the recon guard needs them) ------
+    scoped = bool(only_tickers) or retry_unresolved is not None
+    retry_tickers: Sequence[str] = ()
+    if retry_unresolved is not None:
+        from ki_ops.kotl.flex_symbols import load_unresolved_tickers
+
+        retry_tickers = load_unresolved_tickers(retry_unresolved, cache_dir=cache)
+        print(
+            f"resend scope: {len(retry_tickers)} ticker(s) from unresolved "
+            f"report {retry_unresolved}"
+        )
+    scope_keys = {
+        _scope_key(t, suffix=symbol_suffix)
+        for t in tuple(only_tickers or ()) + tuple(retry_tickers)
+    }
+
     def _prior_target_book() -> "tuple[dict[str, Decimal], str] | None":
         from ki_ops.gate import find_prior_file
 
@@ -1049,16 +1164,48 @@ def submit_kelai_shares(
         # needs a deliberate threshold override.
         def _recon_guard(recon: ReconReport) -> None:
             print(recon.format_table())
-            if recon.breached and not dry_run:
+            effective = recon
+            if scoped and recon.diffs:
+                # Scoped resend: the full-book diff stays on screen (it is the
+                # systemic-health signal — wrong account scope, symbol-map
+                # regression, book reload), but only the SCOPED tickers' rows
+                # decide the block. An intraday resend always shows today's
+                # fills on the rest of the book; forcing an operator override
+                # for that known, unrelated divergence adds no protection to
+                # the scoped names, whose own rows must still be explainable
+                # (retry-unresolved names were never sent → zero diff expected;
+                # a cancelled remainder shows exactly its fills).
+                in_scope = tuple(
+                    d for d in recon.diffs
+                    if _scope_key(d[0], suffix=symbol_suffix) in scope_keys
+                )
+                outside = recon.names_diverged - len(in_scope)
+                if outside:
+                    print(
+                        f"resend scope: {outside} diverged name(s) outside the "
+                        "scoped tickers — informational only; the recon "
+                        "thresholds apply to the scoped tickers' rows"
+                    )
+                effective = ReconReport(
+                    baseline=f"{recon.baseline} — scoped tickers only",
+                    diffs=in_scope,
+                    total_abs_diff=sum((abs(d[3]) for d in in_scope), Decimal("0")),
+                    names_diverged=len(in_scope),
+                    max_shares=recon.max_shares,
+                    max_names=recon.max_names,
+                )
+                if in_scope:
+                    print(effective.format_table())
+            if effective.breached and not dry_run:
                 raise ReconDivergenceError(
-                    f"live Flex book diverges from {recon.baseline}: "
-                    f"total_abs_diff={recon.total_abs_diff} shares over "
-                    f"{recon.names_diverged} names (max_shares={recon_max_shares}, "
+                    f"live Flex book diverges from {effective.baseline}: "
+                    f"total_abs_diff={effective.total_abs_diff} shares over "
+                    f"{effective.names_diverged} names (max_shares={recon_max_shares}, "
                     f"max_names={recon_max_names}) — raise --recon-max-shares/"
                     "--recon-max-names deliberately, or fix the book",
-                    recon,
+                    effective,
                 )
-            if recon.breached:
+            if effective.breached:
                 print("DRY RUN: recon thresholds breached — a live submit would abort (exit 4)")
 
         snap = store.load_latest_book_snapshot(env, before=trade_date)
@@ -1130,7 +1277,35 @@ def submit_kelai_shares(
         submit_id=pending.submit_id,
     )
 
+    # --- resend scope: restrict the run to the scoped tickers ----------------
+    if scoped:
+        if retry_unresolved is not None:
+            if trade_file_out is None:
+                # Default the trade file (and therefore every sidecar — the
+                # new unresolved report, the residual audit) into the SAME
+                # folder as the retry report: that folder is the day's trade
+                # artifact home, and the local data-dir fallback of an
+                # installed wheel is effectively invisible.
+                base = str(retry_unresolved)
+                folder = base.rsplit("/", 1)[0] if "/" in base else "."
+                trade_file_out = (
+                    f"{folder}/trades_{pending.submit_id}"
+                    f"{'_dryrun' if dry_run else ''}.csv"
+                )
+                print(
+                    "trade file defaults next to the unresolved report: "
+                    f"{trade_file_out}"
+                )
+        payloads, orders = _apply_ticker_scope(
+            payloads,
+            orders,
+            strict_tickers=only_tickers or (),
+            lenient_tickers=retry_tickers,
+            symbol_suffix=symbol_suffix,
+        )
+
     # --- pre-submit security resolution (live envs; see docstring) -----------
+    unresolved_skipped = 0
     if env.upper() in ("UAT", "PROD"):
         payload_tickers = {_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads}
         sedols = _load_book_sedols(
@@ -1143,6 +1318,7 @@ def submit_kelai_shares(
             env=env,
             cache_dir=cache,
         )
+        payloads_before_resolution = len(payloads)
         payloads, orders = _resolve_payload_symbols(
             payloads,
             orders,
@@ -1158,6 +1334,9 @@ def submit_kelai_shares(
             trade_file_out=trade_file_out,
             sedols=sedols,
         )
+        # Resolution only ever drops (skipped unresolved names) — canonical
+        # rewrites keep the row.
+        unresolved_skipped = payloads_before_resolution - len(payloads)
 
     # --- target mode: cross-check + residual guard (see docstring) -----------
     if live:
@@ -1217,6 +1396,22 @@ def submit_kelai_shares(
             sent = target_mode.sent_from_ledger(
                 all_submits, today_working, env=env, subtract_fills=subtract_fills
             )
+
+        if scoped:
+            # Out-of-scope symbols get no orders this run, so their sends are
+            # not this run's business: drop them from the residual input to
+            # avoid spurious overshoot warnings about names we never touch.
+            scope_symbols = {str(p["symbol"]).upper() for p in payloads}
+            outside = sorted(set(sent) - scope_symbols)
+            if outside:
+                shown = ", ".join(outside[:10])
+                print(
+                    f"resend scope: ignoring {len(outside)} already-sent "
+                    f"symbol(s) outside the scope ({shown}"
+                    f"{' …' if len(outside) > 10 else ''}) — no orders are "
+                    "generated for them"
+                )
+                sent = {s: q for s, q in sent.items() if s in scope_symbols}
 
         deltas = {
             str(p["symbol"]).upper(): signed_qty(p["side"], p["quantity"]) for p in payloads
@@ -1293,6 +1488,8 @@ def submit_kelai_shares(
             )
 
     # --- dry run: print + trade file, no gRPC, no ledger write ---------------
+    emitted: dict[str, str] = {}
+
     def _emit_trade_file(submit: Submit, results, *, is_dry: bool) -> None:
         if not write_trade_file:
             return
@@ -1304,6 +1501,20 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         print(trade_file_mod.format_trade_table(rows))
+        if results is not None:
+            reasons = [rejection_reason_from_result(r) for r in results]
+            rejected = [reason for reason in reasons if reason]
+            calc_warnings = [r for r in rejected if is_exposure_calc_warning(r)]
+            if rejected:
+                print(
+                    f"CreateOrders verdicts: {len(results) - len(rejected)} submitted, "
+                    f"{len(rejected)} rejected — {len(calc_warnings)} exposure-calc "
+                    "warning(s) (missing analytics inputs on the Flex side; the "
+                    "0.00% aggregate-calc error tolerance fails the rule — see the "
+                    "FlexTrade exception report email; typically retryable "
+                    f"intraday), {len(rejected) - len(calc_warnings)} true "
+                    "rejection(s)"
+                )
         dest = trade_file_out or trade_file_mod.default_trade_file_dest(
             trade_date=trade_date,
             submit_id=submit.submit_id,
@@ -1312,7 +1523,42 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         written = trade_file_mod.write_trade_file(rows, dest)
+        emitted["trade_file"] = written
         print(f"trade file: {written}")
+
+    def _ops_summary(submit: Submit, results, *, is_dry: bool) -> None:
+        """Stats block in the log; Slack #ops post on live sends (best-effort)."""
+        from ki_ops.kotl import submit_summary
+
+        try:
+            stats = submit_summary.build_submit_stats(
+                orders=orders,
+                payloads=payloads,
+                results=results,
+                sod=sod,
+                unresolved_skipped=unresolved_skipped,
+            )
+            meta = {
+                "trade_date": trade_date.isoformat(),
+                "env": env,
+                "no_route": no_route,
+                "dry_run": is_dry,
+                "resend": scoped,
+                "strategy_id": strategy_id,
+                "submit_id": submit.submit_id,
+                "trade_file": emitted.get("trade_file"),
+            }
+            body = submit_summary.format_ops_summary(stats, meta=meta)
+            print(body)
+            # #ops delivery only for real sends against a live gateway: FAKE
+            # stays fully offline (tests, rehearsals) and dry runs are local.
+            if not is_dry and env.upper() in ("UAT", "PROD"):
+                submit_summary.post_ops_summary(
+                    subject=submit_summary.ops_summary_subject(stats, meta=meta),
+                    body=body,
+                )
+        except Exception as exc:  # noqa: BLE001 — reporting never fails a submit
+            print(f"ops summary failed (ignored): {exc}")
 
     if dry_run:
         dry = Submit(
@@ -1326,6 +1572,7 @@ def submit_kelai_shares(
             trade_date=trade_date,
         )
         _emit_trade_file(dry, None, is_dry=True)
+        _ops_summary(dry, None, is_dry=True)
         return dry
 
     submit = submit_flex_orders(
@@ -1340,6 +1587,7 @@ def submit_kelai_shares(
     )
     results = (submit.flex_response or {}).get("results")
     _emit_trade_file(submit, results, is_dry=False)
+    _ops_summary(submit, results, is_dry=False)
     return submit
 
 
@@ -1364,10 +1612,7 @@ def _working_order_from_submit(
     # Gateway verdict: a failed CreateOrders result is still booked in Flex
     # (UNFINALIZED, revivable) — record why, and let the first refresh sync
     # the live workflow statuses.
-    rejection_reason: str | None = None
-    if not result.get("success", True):
-        issues = "; ".join(str(i) for i in (result.get("issues") or []) if str(i))
-        rejection_reason = str(result.get("description") or "") or issues or "create rejected"
+    rejection_reason = rejection_reason_from_result(result)
     return WorkingOrder(
         flex_order_id=row.flex_order_id,
         submit_id=row.submit_id,
