@@ -1305,6 +1305,7 @@ def submit_kelai_shares(
         )
 
     # --- pre-submit security resolution (live envs; see docstring) -----------
+    unresolved_skipped = 0
     if env.upper() in ("UAT", "PROD"):
         payload_tickers = {_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads}
         sedols = _load_book_sedols(
@@ -1317,6 +1318,7 @@ def submit_kelai_shares(
             env=env,
             cache_dir=cache,
         )
+        payloads_before_resolution = len(payloads)
         payloads, orders = _resolve_payload_symbols(
             payloads,
             orders,
@@ -1332,6 +1334,9 @@ def submit_kelai_shares(
             trade_file_out=trade_file_out,
             sedols=sedols,
         )
+        # Resolution only ever drops (skipped unresolved names) — canonical
+        # rewrites keep the row.
+        unresolved_skipped = payloads_before_resolution - len(payloads)
 
     # --- target mode: cross-check + residual guard (see docstring) -----------
     if live:
@@ -1483,6 +1488,8 @@ def submit_kelai_shares(
             )
 
     # --- dry run: print + trade file, no gRPC, no ledger write ---------------
+    emitted: dict[str, str] = {}
+
     def _emit_trade_file(submit: Submit, results, *, is_dry: bool) -> None:
         if not write_trade_file:
             return
@@ -1516,7 +1523,42 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         written = trade_file_mod.write_trade_file(rows, dest)
+        emitted["trade_file"] = written
         print(f"trade file: {written}")
+
+    def _ops_summary(submit: Submit, results, *, is_dry: bool) -> None:
+        """Stats block in the log; Slack #ops post on live sends (best-effort)."""
+        from ki_ops.kotl import submit_summary
+
+        try:
+            stats = submit_summary.build_submit_stats(
+                orders=orders,
+                payloads=payloads,
+                results=results,
+                sod=sod,
+                unresolved_skipped=unresolved_skipped,
+            )
+            meta = {
+                "trade_date": trade_date.isoformat(),
+                "env": env,
+                "no_route": no_route,
+                "dry_run": is_dry,
+                "resend": scoped,
+                "strategy_id": strategy_id,
+                "submit_id": submit.submit_id,
+                "trade_file": emitted.get("trade_file"),
+            }
+            body = submit_summary.format_ops_summary(stats, meta=meta)
+            print(body)
+            # #ops delivery only for real sends against a live gateway: FAKE
+            # stays fully offline (tests, rehearsals) and dry runs are local.
+            if not is_dry and env.upper() in ("UAT", "PROD"):
+                submit_summary.post_ops_summary(
+                    subject=submit_summary.ops_summary_subject(stats, meta=meta),
+                    body=body,
+                )
+        except Exception as exc:  # noqa: BLE001 — reporting never fails a submit
+            print(f"ops summary failed (ignored): {exc}")
 
     if dry_run:
         dry = Submit(
@@ -1530,6 +1572,7 @@ def submit_kelai_shares(
             trade_date=trade_date,
         )
         _emit_trade_file(dry, None, is_dry=True)
+        _ops_summary(dry, None, is_dry=True)
         return dry
 
     submit = submit_flex_orders(
@@ -1544,6 +1587,7 @@ def submit_kelai_shares(
     )
     results = (submit.flex_response or {}).get("results")
     _emit_trade_file(submit, results, is_dry=False)
+    _ops_summary(submit, results, is_dry=False)
     return submit
 
 
