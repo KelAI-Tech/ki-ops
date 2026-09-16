@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -39,3 +40,19 @@ def _no_ambient_ops_env(monkeypatch):
     """
     monkeypatch.delenv("KI_OPS_ENV", raising=False)
     monkeypatch.delenv("KOTL_DB_SCHEMA", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ops_slack_ssm(monkeypatch):
+    """Tests never resolve the #ops webhook through SSM.
+
+    Operator boxes and the self-hosted runner carry real AWS credentials — an
+    SSM lookup would find the real webhook and post test submits to the real
+    #ops channel. The env-var path stays live so tests can opt in explicitly
+    (setting KI_OPS_SLACK_WEBHOOK_URL and patching send_slack).
+    """
+    monkeypatch.delenv("KI_OPS_SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(
+        "ki_ops.kotl.submit_summary.resolve_ops_webhook",
+        lambda: (os.environ.get("KI_OPS_SLACK_WEBHOOK_URL") or "").strip() or None,
+    )

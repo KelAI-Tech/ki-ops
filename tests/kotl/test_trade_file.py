@@ -55,6 +55,26 @@ def test_build_rows_with_results():
     assert all(r["dry_run"] == "false" for r in rows)
     assert rows[0]["trade_date"] == "2026-08-06"
     assert rows[0]["position_group"] == "USATop2000_strategy_v1"
+    # Gateway reason lands in the file at submit time (refresh may enrich it
+    # later); an unexplained failure records the bare marker.
+    assert rows[0]["rejection_reason"] == ""
+    assert rows[1]["rejection_reason"] == "create rejected"
+
+
+def test_build_rows_records_gateway_description():
+    results = [
+        {"orderId": "FLEX-1", "success": True},
+        {
+            "orderId": "FLEX-2",
+            "success": False,
+            "description": "Error: Missing Beta for security MSFT.US",
+        },
+    ]
+    rows = build_trade_file_rows(
+        trade_date=TD, submit_id="sub-1", payloads=PAYLOADS, results=results
+    )
+    assert rows[1]["status"] == "rejected"
+    assert rows[1]["rejection_reason"] == "Error: Missing Beta for security MSFT.US"
 
 
 def test_build_rows_dry_run():
@@ -72,7 +92,30 @@ def test_format_table_readable():
     assert "AAPL.US" in table
     assert "FLEX-2" in table
     assert "rejected" in table
+    # Bare "create rejected" is a true rejection — no calc-warning marker.
+    assert "calc-warning" not in table
     assert table.splitlines()[0].startswith("symbol")
+
+
+def test_format_table_marks_exposure_calc_warnings():
+    results = [
+        {"orderId": "FLEX-1", "success": True},
+        {
+            "orderId": "FLEX-2",
+            "success": False,
+            "description": (
+                "Error: Calc failed for 13.9187% (298/2141) of securities. "
+                "See exception report email."
+            ),
+        },
+    ]
+    rows = build_trade_file_rows(
+        trade_date=TD, submit_id="sub-1", payloads=PAYLOADS, results=results
+    )
+    table = format_trade_table(rows)
+    assert "rejected (calc-warning)" in table
+    # The CSV keeps the plain gateway verdict.
+    assert rows[1]["status"] == "rejected"
 
 
 def test_write_local(tmp_path):

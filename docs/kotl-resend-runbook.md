@@ -130,6 +130,24 @@ semantics: `KOTL_SUBMIT_APPROVAL` in kelaidata's
   booked in Flex as **unfinalized** — it can still be worked later, so
   target mode keeps protecting its quantity. The retry flow is: cancel it in
   Flex, confirm the cancel, then `resend --ticker <name>`.
+- **Exposure-calc warnings vs true rejections**: FlexTrade's pre-trade
+  exposure rule runs an aggregate calculation over the whole basket plus
+  existing positions/open orders; securities with missing analytics inputs
+  (price, delta, volume, Beta, …) emit *calc warnings* — e.g. `Calc failed
+  for 13.9187% (298/2141) of securities`, `Missing Beta for security X`,
+  `Missing ExposurePrice`, `invalid Avg Volume (90D) = NaN` — and the
+  account's **0.00% error tolerance** turns any warning into an order
+  reject. These are data-availability hiccups (typically pre-market, before
+  the day's analytics load), not compliance verdicts: the same order
+  usually goes through on an intraday resend (verified 2026-09-15: the
+  06:57 ET submit had all 878 shorts calc-rejected; the 13:13 ET forced
+  resend sent 872 of them). The tooling separates the two: the submit table
+  and verdict summary mark `rejected (calc-warning)`, `kotl fills --json`
+  carries `rejection_kind` (`calc_warning` / `rejection`), and the fills
+  table summary counts `create_rejected=N (calc_warnings=M,
+  true_rejections=K)`. Chase persistent calc warnings with FlexTrade (their
+  "exception report email" has the per-security detail), not by resending
+  blindly.
 
 ## Exit codes
 
