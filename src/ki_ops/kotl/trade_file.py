@@ -8,12 +8,17 @@ final_status, finalization_status, cancel_status, rejection_reason``
 
 ``status`` is the CreateOrders gateway verdict at submit time (``submitted``
 / ``rejected``) — a Flex risk "rejected" order is still booked UNFINALIZED
-and can be revived, so it is NOT the final word. The trailing disposition
-columns start empty and are back-filled from the ledger by
-:func:`apply_ledger_dispositions` (``kotl refresh --trade-file-out``):
-``final_status`` is the order's live disposition (``filled`` / ``partial`` /
-``working`` / ``unfinalized`` / ``cancel_pending`` / ``cancelled`` …), and
-``filled_qty`` the unsigned filled quantity.
+and can be revived, so it is NOT the final word. ``rejection_reason`` starts
+with the gateway's own message for rejected rows (the human-readable table
+additionally renders exposure-calc warnings — missing Beta/price/volume
+analytics on the Flex side, see :mod:`ki_ops.kotl.flex_reasons` — as
+``rejected (calc-warning)`` to separate them from true rejections). The
+remaining disposition columns start empty and are back-filled from the
+ledger by :func:`apply_ledger_dispositions` (``kotl refresh
+--trade-file-out``): ``final_status`` is the order's live disposition
+(``filled`` / ``partial`` / ``working`` / ``unfinalized`` /
+``cancel_pending`` / ``cancelled`` …), and ``filled_qty`` the unsigned
+filled quantity.
 
 Written locally or to S3 (``boto3 put_object``). Default destination when a
 ``--strategy-id`` is given:
@@ -29,6 +34,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
+from ki_ops.kotl.flex_reasons import is_exposure_calc_warning, rejection_reason_from_result
 from ki_ops.kotl.kelaidata_source import parse_s3_url
 
 TRADE_FILE_FIELDS = (
@@ -69,12 +75,14 @@ def build_trade_file_rows(
     rows: list[dict[str, Any]] = []
     for i, payload in enumerate(payloads):
         result = results[i] if results is not None else None
+        rejection_reason = None
         if dry_run:
             status = "dry_run"
         elif result is None:
             status = "unknown"
         else:
             status = "submitted" if result.get("success", True) else "rejected"
+            rejection_reason = rejection_reason_from_result(result)
         rows.append(
             {
                 "trade_date": trade_date.isoformat(),
@@ -90,14 +98,27 @@ def build_trade_file_rows(
                 "flex_order_id": str(result.get("orderId") or "") if result else "",
                 "status": status,
                 "dry_run": "true" if dry_run else "false",
+                "rejection_reason": rejection_reason or "",
             }
         )
     return rows
 
 
+def _display_status(row: dict[str, Any]) -> str:
+    """Table status cell: separate Flex exposure-calc warnings (transient
+    analytics gaps, retryable intraday) from true rejections. CSV ``status``
+    stays the plain gateway verdict."""
+    status = str(row.get("status", ""))
+    if status == "rejected" and is_exposure_calc_warning(row.get("rejection_reason")):
+        return "rejected (calc-warning)"
+    return status
+
+
 def format_trade_table(rows: Sequence[dict[str, Any]]) -> str:
     cols = ("symbol", "side", "quantity", "order_type", "algo", "broker", "flex_order_id", "status")
-    table = [[str(r.get(c, "")) for c in cols] for r in rows]
+    table = [
+        [_display_status(r) if c == "status" else str(r.get(c, "")) for c in cols] for r in rows
+    ]
     widths = [len(c) for c in cols]
     for line in table:
         for i, cell in enumerate(line):

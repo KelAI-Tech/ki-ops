@@ -59,6 +59,7 @@ from ki_ops.kotl.flex_map import (
     no_route_defaults,
     orders_to_flex_dicts,
 )
+from ki_ops.kotl.flex_reasons import is_exposure_calc_warning, rejection_reason_from_result
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
 from ki_ops.kotl.qty import signed_qty
 from ki_ops.kotl.store import KotlStore
@@ -1304,6 +1305,7 @@ def submit_kelai_shares(
         )
 
     # --- pre-submit security resolution (live envs; see docstring) -----------
+    unresolved_skipped = 0
     if env.upper() in ("UAT", "PROD"):
         payload_tickers = {_bare_ticker(p["symbol"], suffix=symbol_suffix) for p in payloads}
         sedols = _load_book_sedols(
@@ -1316,6 +1318,7 @@ def submit_kelai_shares(
             env=env,
             cache_dir=cache,
         )
+        payloads_before_resolution = len(payloads)
         payloads, orders = _resolve_payload_symbols(
             payloads,
             orders,
@@ -1331,6 +1334,9 @@ def submit_kelai_shares(
             trade_file_out=trade_file_out,
             sedols=sedols,
         )
+        # Resolution only ever drops (skipped unresolved names) — canonical
+        # rewrites keep the row.
+        unresolved_skipped = payloads_before_resolution - len(payloads)
 
     # --- target mode: cross-check + residual guard (see docstring) -----------
     if live:
@@ -1482,6 +1488,8 @@ def submit_kelai_shares(
             )
 
     # --- dry run: print + trade file, no gRPC, no ledger write ---------------
+    emitted: dict[str, str] = {}
+
     def _emit_trade_file(submit: Submit, results, *, is_dry: bool) -> None:
         if not write_trade_file:
             return
@@ -1493,6 +1501,20 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         print(trade_file_mod.format_trade_table(rows))
+        if results is not None:
+            reasons = [rejection_reason_from_result(r) for r in results]
+            rejected = [reason for reason in reasons if reason]
+            calc_warnings = [r for r in rejected if is_exposure_calc_warning(r)]
+            if rejected:
+                print(
+                    f"CreateOrders verdicts: {len(results) - len(rejected)} submitted, "
+                    f"{len(rejected)} rejected — {len(calc_warnings)} exposure-calc "
+                    "warning(s) (missing analytics inputs on the Flex side; the "
+                    "0.00% aggregate-calc error tolerance fails the rule — see the "
+                    "FlexTrade exception report email; typically retryable "
+                    f"intraday), {len(rejected) - len(calc_warnings)} true "
+                    "rejection(s)"
+                )
         dest = trade_file_out or trade_file_mod.default_trade_file_dest(
             trade_date=trade_date,
             submit_id=submit.submit_id,
@@ -1501,7 +1523,42 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         written = trade_file_mod.write_trade_file(rows, dest)
+        emitted["trade_file"] = written
         print(f"trade file: {written}")
+
+    def _ops_summary(submit: Submit, results, *, is_dry: bool) -> None:
+        """Stats block in the log; Slack #ops post on live sends (best-effort)."""
+        from ki_ops.kotl import submit_summary
+
+        try:
+            stats = submit_summary.build_submit_stats(
+                orders=orders,
+                payloads=payloads,
+                results=results,
+                sod=sod,
+                unresolved_skipped=unresolved_skipped,
+            )
+            meta = {
+                "trade_date": trade_date.isoformat(),
+                "env": env,
+                "no_route": no_route,
+                "dry_run": is_dry,
+                "resend": scoped,
+                "strategy_id": strategy_id,
+                "submit_id": submit.submit_id,
+                "trade_file": emitted.get("trade_file"),
+            }
+            body = submit_summary.format_ops_summary(stats, meta=meta)
+            print(body)
+            # #ops delivery only for real sends against a live gateway: FAKE
+            # stays fully offline (tests, rehearsals) and dry runs are local.
+            if not is_dry and env.upper() in ("UAT", "PROD"):
+                submit_summary.post_ops_summary(
+                    subject=submit_summary.ops_summary_subject(stats, meta=meta),
+                    body=body,
+                )
+        except Exception as exc:  # noqa: BLE001 — reporting never fails a submit
+            print(f"ops summary failed (ignored): {exc}")
 
     if dry_run:
         dry = Submit(
@@ -1515,6 +1572,7 @@ def submit_kelai_shares(
             trade_date=trade_date,
         )
         _emit_trade_file(dry, None, is_dry=True)
+        _ops_summary(dry, None, is_dry=True)
         return dry
 
     submit = submit_flex_orders(
@@ -1529,6 +1587,7 @@ def submit_kelai_shares(
     )
     results = (submit.flex_response or {}).get("results")
     _emit_trade_file(submit, results, is_dry=False)
+    _ops_summary(submit, results, is_dry=False)
     return submit
 
 
@@ -1553,10 +1612,7 @@ def _working_order_from_submit(
     # Gateway verdict: a failed CreateOrders result is still booked in Flex
     # (UNFINALIZED, revivable) — record why, and let the first refresh sync
     # the live workflow statuses.
-    rejection_reason: str | None = None
-    if not result.get("success", True):
-        issues = "; ".join(str(i) for i in (result.get("issues") or []) if str(i))
-        rejection_reason = str(result.get("description") or "") or issues or "create rejected"
+    rejection_reason = rejection_reason_from_result(result)
     return WorkingOrder(
         flex_order_id=row.flex_order_id,
         submit_id=row.submit_id,

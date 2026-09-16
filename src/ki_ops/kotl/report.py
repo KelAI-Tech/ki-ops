@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Sequence
 
+from ki_ops.kotl.flex_reasons import is_exposure_calc_warning, rejection_kind
 from ki_ops.kotl.models import WorkingOrder
 from ki_ops.kotl.qty import is_flat
 
@@ -107,6 +108,10 @@ def fills_to_dicts(orders: Sequence[WorkingOrder]) -> list[dict]:
             "status": o.status.value,
             "finalization_status": o.finalization_status,
             "cancel_status": o.cancel_status,
+            "rejection_reason": o.rejection_reason,
+            # calc_warning: Flex exposure-calc data gap (retryable) vs a
+            # true rejection — see ki_ops.kotl.flex_reasons.
+            "rejection_kind": rejection_kind(o.rejection_reason),
             "last_seen_at": o.last_seen_at.isoformat(),
         }
         for o in fills_rows(orders)
@@ -158,11 +163,22 @@ def format_fills_table(
         counts[o.status.value] = counts.get(o.status.value, 0) + 1
         total_abs_filled += abs(o.filled_qty)
     lines.append("")
-    lines.append(
+    summary = (
         f"summary: orders={len(orders)} open={counts['open']} "
         f"partial={counts['partial']} done={counts['done']} "
         f"cancelled={counts['cancelled']} total_abs_filled={total_abs_filled}"
     )
+    create_rejected = [o for o in orders if o.rejection_reason]
+    if create_rejected:
+        calc_warnings = sum(
+            1 for o in create_rejected if is_exposure_calc_warning(o.rejection_reason)
+        )
+        summary += (
+            f" create_rejected={len(create_rejected)} "
+            f"(calc_warnings={calc_warnings}, "
+            f"true_rejections={len(create_rejected) - calc_warnings})"
+        )
+    lines.append(summary)
     return "\n".join(lines)
 
 

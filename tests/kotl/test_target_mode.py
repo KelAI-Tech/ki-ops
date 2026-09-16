@@ -646,6 +646,42 @@ def test_e2e_forced_rerun_sends_exactly_the_residual(e2e, capsys):
     assert any("AAPL.US,80.0,50.0,30.0,partial" in p.read_text() for p in audits)
 
 
+def test_e2e_verdict_summary_distinguishes_calc_warnings(e2e, capsys):
+    """A gateway reject whose reason is a Flex exposure-calc warning (missing
+    analytics inputs, 0.00% tolerance) is separated from true rejections in
+    the table, the verdict summary, and the recorded ledger reason."""
+    backend = e2e["backend"]
+    original = backend.CreateOrders
+    calc_msg = (
+        "Error: Calc failed for 13.9187% (298/2141) of securities. "
+        "See exception report email."
+    )
+
+    def create_orders(request, timeout=None, metadata=None):
+        backend.create_results = [
+            e2e["make_create_result"](
+                order.originId,
+                success="MSFT" not in order.symbol,
+                description="" if "MSFT" not in order.symbol else calc_msg,
+            )
+            for order in request.orders
+        ]
+        yield from original(request, timeout=timeout, metadata=metadata)
+
+    backend.CreateOrders = create_orders
+    submit = _e2e_submit(e2e)
+    assert not submit.ok
+
+    out = capsys.readouterr().out
+    assert "rejected (calc-warning)" in out
+    assert "CreateOrders verdicts: 1 submitted, 1 rejected — 1 exposure-calc warning(s)" in out
+    assert "0 true rejection(s)" in out
+
+    orders = {o.symbol: o for o in e2e["store"].load_working_orders(trade_date=date(2026, 8, 6))}
+    assert orders["MSFT.US"].rejection_reason == calc_msg
+    assert orders["AAPL.US"].rejection_reason is None
+
+
 def test_e2e_sent_source_flex_recovers_lost_ledger(e2e):
     """Ledger lost the first submit: cross-check aborts, --sent-source flex
     recomputes already-sent from Flex and still refuses to double-trade."""
