@@ -59,6 +59,7 @@ from ki_ops.kotl.flex_map import (
     no_route_defaults,
     orders_to_flex_dicts,
 )
+from ki_ops.kotl.flex_reasons import is_exposure_calc_warning, rejection_reason_from_result
 from ki_ops.kotl.models import Submit, WorkingOrder, _utc
 from ki_ops.kotl.qty import signed_qty
 from ki_ops.kotl.store import KotlStore
@@ -1493,6 +1494,20 @@ def submit_kelai_shares(
             dry_run=is_dry,
         )
         print(trade_file_mod.format_trade_table(rows))
+        if results is not None:
+            reasons = [rejection_reason_from_result(r) for r in results]
+            rejected = [reason for reason in reasons if reason]
+            calc_warnings = [r for r in rejected if is_exposure_calc_warning(r)]
+            if rejected:
+                print(
+                    f"CreateOrders verdicts: {len(results) - len(rejected)} submitted, "
+                    f"{len(rejected)} rejected — {len(calc_warnings)} exposure-calc "
+                    "warning(s) (missing analytics inputs on the Flex side; the "
+                    "0.00% aggregate-calc error tolerance fails the rule — see the "
+                    "FlexTrade exception report email; typically retryable "
+                    f"intraday), {len(rejected) - len(calc_warnings)} true "
+                    "rejection(s)"
+                )
         dest = trade_file_out or trade_file_mod.default_trade_file_dest(
             trade_date=trade_date,
             submit_id=submit.submit_id,
@@ -1553,10 +1568,7 @@ def _working_order_from_submit(
     # Gateway verdict: a failed CreateOrders result is still booked in Flex
     # (UNFINALIZED, revivable) — record why, and let the first refresh sync
     # the live workflow statuses.
-    rejection_reason: str | None = None
-    if not result.get("success", True):
-        issues = "; ".join(str(i) for i in (result.get("issues") or []) if str(i))
-        rejection_reason = str(result.get("description") or "") or issues or "create rejected"
+    rejection_reason = rejection_reason_from_result(result)
     return WorkingOrder(
         flex_order_id=row.flex_order_id,
         submit_id=row.submit_id,

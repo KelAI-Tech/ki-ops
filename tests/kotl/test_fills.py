@@ -135,6 +135,36 @@ def test_fills_table_output(store, capsys):
     assert "env=canary" in out
     assert "AAPL.US" in out and "MSFT.US" in out
     assert "total_abs_filled=90" in out
+    # no create-rejects in the ledger → no rejection summary segment
+    assert "create_rejected" not in out
+
+
+def test_fills_distinguishes_calc_warnings_from_true_rejections(store, capsys):
+    from dataclasses import replace
+
+    orders = {o.symbol: o for o in store.load_working_orders(trade_date=TD_NEW)}
+    store.upsert_working_orders(
+        [
+            replace(
+                orders["AAPL.US"],
+                rejection_reason=(
+                    "Error: Calc failed for 13.9187% (298/2141) of securities. "
+                    "See exception report email."
+                ),
+            ),
+            replace(orders["MSFT.US"], rejection_reason="create rejected"),
+        ]
+    )
+    assert _fills(store) == 0
+    out = json.loads(capsys.readouterr().out)
+    by_symbol = {row["symbol"]: row for row in out["fills"]}
+    assert by_symbol["AAPL.US"]["rejection_kind"] == "calc_warning"
+    assert by_symbol["MSFT.US"]["rejection_kind"] == "rejection"
+    assert by_symbol["MSFT.US"]["rejection_reason"] == "create rejected"
+
+    assert _fills(store, as_json=False) == 0
+    table = capsys.readouterr().out
+    assert "create_rejected=2 (calc_warnings=1, true_rejections=1)" in table
 
 
 def test_fills_table_sorted_most_recent_first(store, capsys):
