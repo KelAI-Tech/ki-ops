@@ -58,6 +58,29 @@ def test_flex_config_from_env(monkeypatch):
     assert cfg.metadata == [("authorization", "Bearer envtok")]
 
 
+def test_flex_config_per_env_endpoints_resolve_by_flex_env(monkeypatch, capsys):
+    """KOTL_FLEX_<ENV>_ENDPOINT is env-safe: each is only consulted for its
+    own environment, so both proxy routes can coexist on one box and
+    --flex-env picks the right one; the env-blind legacy KOTL_FLEX_ENDPOINT
+    is the fallback (2026-09-16: a stale UAT legacy override routed a PROD
+    run's queries to UAT)."""
+    monkeypatch.setenv("KOTL_FLEX_TOKEN", "envtok")
+    monkeypatch.setenv("KOTL_FLEX_UAT_ENDPOINT", "172.31.88.47:50051")
+    monkeypatch.setenv("KOTL_FLEX_PROD_ENDPOINT", "172.31.88.47:50052")
+    monkeypatch.delenv("KOTL_FLEX_ENDPOINT", raising=False)
+    assert load_flex_config(flex_env="UAT").endpoint == "172.31.88.47:50051"
+    assert load_flex_config(flex_env="PROD").endpoint == "172.31.88.47:50052"
+    out = capsys.readouterr().out
+    assert "(KOTL_FLEX_UAT_ENDPOINT)" in out and "(KOTL_FLEX_PROD_ENDPOINT)" in out
+
+    # per-env beats legacy; legacy still works as the fallback (Batch jobs)
+    monkeypatch.setenv("KOTL_FLEX_ENDPOINT", "10.0.0.1:9999")
+    assert load_flex_config(flex_env="PROD").endpoint == "172.31.88.47:50052"
+    monkeypatch.delenv("KOTL_FLEX_PROD_ENDPOINT")
+    assert load_flex_config(flex_env="PROD").endpoint == "10.0.0.1:9999"
+    assert "env-blind legacy override" in capsys.readouterr().out
+
+
 def test_flex_config_from_secret(monkeypatch):
     monkeypatch.delenv("KOTL_FLEX_ENDPOINT", raising=False)
     monkeypatch.delenv("KOTL_FLEX_TOKEN", raising=False)
