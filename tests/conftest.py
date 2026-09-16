@@ -40,6 +40,10 @@ def _no_ambient_ops_env(monkeypatch):
     """
     monkeypatch.delenv("KI_OPS_ENV", raising=False)
     monkeypatch.delenv("KOTL_DB_SCHEMA", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_ENV", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_ENDPOINT", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_UAT_ENDPOINT", raising=False)
+    monkeypatch.delenv("KOTL_FLEX_PROD_ENDPOINT", raising=False)
 
 
 @pytest.fixture(autouse=True)

@@ -135,12 +135,29 @@ def load_flex_config(
 ) -> FlexConfig:
     """Build a :class:`FlexConfig` from env vars, falling back to Secrets Manager.
 
-    - endpoint: ``KOTL_FLEX_ENDPOINT`` (host:port) else the secret's
-      ``uat_endpoint`` / ``prod_endpoint`` picked by *flex_env*.
+    - endpoint: ``KOTL_FLEX_<UAT|PROD>_ENDPOINT`` for *flex_env* (host:port —
+      the env-safe overrides: each is only ever consulted for its own
+      environment, so an operator box can hold both proxy routes at once and
+      ``--flex-env`` picks the right one automatically), else the legacy
+      env-blind ``KOTL_FLEX_ENDPOINT`` (kept for the Batch jobs; dangerous
+      interactively — live-observed 2026-09-16: a stale UAT override routed a
+      PROD run's queries to UAT), else the secret's ``uat_endpoint`` /
+      ``prod_endpoint`` picked by *flex_env*.
     - token: ``KOTL_FLEX_TOKEN`` else the secret's ``token``.
     - ``metadata_key`` / ``scheme`` honor the secret when it is consulted.
     """
-    endpoint = os.environ.get("KOTL_FLEX_ENDPOINT") or None
+    env_key = str(flex_env).strip().upper()
+    endpoint = os.environ.get(f"KOTL_FLEX_{env_key}_ENDPOINT") or None
+    if endpoint:
+        print(f"flex {env_key} endpoint: {endpoint} (KOTL_FLEX_{env_key}_ENDPOINT)")
+    else:
+        endpoint = os.environ.get("KOTL_FLEX_ENDPOINT") or None
+        if endpoint:
+            print(
+                f"flex {env_key} endpoint: {endpoint} (KOTL_FLEX_ENDPOINT — "
+                "env-blind legacy override; prefer KOTL_FLEX_"
+                f"{env_key}_ENDPOINT)"
+            )
     token = os.environ.get("KOTL_FLEX_TOKEN") or None
     metadata_key = DEFAULT_METADATA_KEY
     scheme = DEFAULT_SCHEME
@@ -156,7 +173,8 @@ def load_flex_config(
 
     if not endpoint:
         raise ValueError(
-            "no Flex endpoint: set KOTL_FLEX_ENDPOINT (host:port) or provide "
+            f"no Flex endpoint: set KOTL_FLEX_{env_key}_ENDPOINT (host:port, "
+            "env-safe) or KOTL_FLEX_ENDPOINT, or provide "
             f"uat_endpoint/prod_endpoint in secret {secret_id}"
         )
     if not token:

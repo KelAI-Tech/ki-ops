@@ -205,6 +205,95 @@ def test_kotl_cli_submit_kelai_account_type_flag(tmp_path):
     assert all(p["accountType"] == "OTC" for p in submit.payload)
 
 
+def test_apply_env_selection_one_flag_env(monkeypatch, capsys):
+    """--env picks flex env + pins KI_OPS_ENV; explicit --flex-env wins;
+    ambient KI_OPS_ENV alone never makes a submit live."""
+    import os
+
+    from ki_ops.kotl.cli import _apply_env_selection
+
+    # no flags → offline FAKE, even with ambient KI_OPS_ENV
+    monkeypatch.setenv("KI_OPS_ENV", "prod")
+    args = Args()
+    _apply_env_selection(args)
+    assert args.flex_env == "FAKE"
+
+    # --env canary → UAT + KI_OPS_ENV pinned for downstream defaults
+    args = Args(ki_env="canary")
+    _apply_env_selection(args)
+    assert args.flex_env == "UAT"
+    assert os.environ["KI_OPS_ENV"] == "canary"
+    assert "env: canary → flex UAT" in capsys.readouterr().out
+
+    # --env prod → PROD
+    args = Args(ki_env="prod")
+    _apply_env_selection(args)
+    assert args.flex_env == "PROD"
+    assert os.environ["KI_OPS_ENV"] == "prod"
+
+    # explicit --flex-env always wins over the preset
+    args = Args(ki_env="prod", flex_env="UAT")
+    _apply_env_selection(args)
+    assert args.flex_env == "UAT"
+
+
+def test_kotl_cli_target_lookup(tmp_path, capsys):
+    from ki_ops.kotl.cli import run_kotl
+
+    shares = tmp_path / "Portfolio_20260916.csv"
+    shares.write_text("AAPL,50,VWAP\nMSFT,-30,VWAP\nBF.B,7,VWAP\n")
+
+    rc = run_kotl(
+        Args(
+            kotl_command="target",
+            tickers=["aapl.us", "MSFT", "BFB", "ZZZZ"],
+            trade_date=date(2026, 9, 16),
+            strategy_id=None,
+            shares=str(shares),
+            cache_dir=tmp_path / "cache",
+            json=False,
+        )
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "AAPL.US  50      BUY" in out
+    assert "MSFT     -30     SELL" in out
+    assert "BFB      7       BUY  (book row: BF.B)" in out
+    assert "ZZZZ     -       not in book" in out
+
+    rc = run_kotl(
+        Args(
+            kotl_command="target",
+            tickers=["ARIS"],
+            trade_date=date(2026, 9, 16),
+            strategy_id=None,
+            shares=str(shares),
+            cache_dir=tmp_path / "cache",
+            json=True,
+        )
+    )
+    assert rc == 0
+    import json as json_mod
+
+    payload = json_mod.loads(capsys.readouterr().out)
+    assert payload["targets"] == [
+        {"ticker": "ARIS", "matched_row": None, "target": None}
+    ]
+
+
+def test_expand_strategy_alias(capsys):
+    from ki_ops.kotl.cli import _expand_strategy_alias
+    from ki_ops.strategies import NEUTRALIZED_SUFFIX, STRATEGY_ALIASES
+
+    expanded = _expand_strategy_alias("KelAIV2")
+    assert expanded == STRATEGY_ALIASES["kelaiv2"] + NEUTRALIZED_SUFFIX
+    assert "strategy alias: KelAIV2 →" in capsys.readouterr().out
+    # raw ids pass through untouched, with or without the suffix
+    assert _expand_strategy_alias("SID_neutralized") == "SID_neutralized"
+    assert _expand_strategy_alias("SID") == "SID"
+    assert _expand_strategy_alias(None) is None
+
+
 def test_build_submit_store_env_aware_defaults(tmp_path, monkeypatch, capsys):
     """submit-kelai/resend ledger: FAKE → csv; live env → KI_OPS_ENV preset
     MySQL by default; explicit --store always wins (csv on live warns)."""
