@@ -205,6 +205,19 @@ def test_kotl_cli_submit_kelai_account_type_flag(tmp_path):
     assert all(p["accountType"] == "OTC" for p in submit.payload)
 
 
+def test_expand_strategy_alias(capsys):
+    from ki_ops.kotl.cli import _expand_strategy_alias
+    from ki_ops.strategies import NEUTRALIZED_SUFFIX, STRATEGY_ALIASES
+
+    expanded = _expand_strategy_alias("KelAIV2")
+    assert expanded == STRATEGY_ALIASES["kelaiv2"] + NEUTRALIZED_SUFFIX
+    assert "strategy alias: KelAIV2 →" in capsys.readouterr().out
+    # raw ids pass through untouched, with or without the suffix
+    assert _expand_strategy_alias("SID_neutralized") == "SID_neutralized"
+    assert _expand_strategy_alias("SID") == "SID"
+    assert _expand_strategy_alias(None) is None
+
+
 def test_build_submit_store_env_aware_defaults(tmp_path, monkeypatch, capsys):
     """submit-kelai/resend ledger: FAKE → csv; live env → KI_OPS_ENV preset
     MySQL by default; explicit --store always wins (csv on live warns)."""

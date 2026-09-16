@@ -45,7 +45,8 @@ root applies and a live submit still defaults to the canary preset ledger
 ## Retry the unresolved report (minimal)
 
 ```bash
-S=<strategy-id>   # e.g. df_combo_lseg_..._neutralized
+S=<strategy-id>   # e.g. df_combo_lseg_..._neutralized — or a friendly name:
+                  # --strategy-id KelAIV2 expands to the hashed id + _neutralized
 
 ki-ops kotl resend --trade-date 2026-09-16 --flex-env UAT --sod-source flex \
   --strategy-id $S \

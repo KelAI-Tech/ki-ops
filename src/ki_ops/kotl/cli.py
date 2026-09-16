@@ -92,7 +92,9 @@ def _add_submit_kelai_args(parser, *, resend: bool = False) -> None:
         "--strategy-id",
         default=None,
         help="pipeline strategy subfolder (e.g. USATop2000_neutralized); also "
-        "routes the trade file to s3://kelaitrading/trades/<strategy-id>/…",
+        "routes the trade file to s3://kelaitrading/trades/<strategy-id>/…. "
+        "Friendly names work too (KelAIV2/KelaiV0/KelaiV1 → the hashed id "
+        "+ _neutralized, the tradeable book folder)",
     )
     parser.add_argument(
         "--sod-source",
@@ -437,6 +439,27 @@ def _build_store(args):
     return KotlStore(args.data_dir)
 
 
+def _expand_strategy_alias(value: str | None) -> str | None:
+    """Friendly strategy name → tradeable book folder id, else unchanged.
+
+    ``--strategy-id KelAIV2`` should just work: the alias resolves to the
+    hashed pipeline id (``ki_ops.strategies.STRATEGY_ALIASES``) and gets the
+    ``_neutralized`` suffix — the tradeable book folder convention the
+    kelaidata DAGs use (``NEUTRALIZED_BOOK_ID``). Raw ids pass through
+    untouched, suffixed or not.
+    """
+    if not value:
+        return value
+    from ki_ops.strategies import NEUTRALIZED_SUFFIX, STRATEGY_ALIASES
+
+    alias = STRATEGY_ALIASES.get(str(value).strip().lower())
+    if alias is None:
+        return value
+    expanded = alias + NEUTRALIZED_SUFFIX
+    print(f"strategy alias: {value} → {expanded}")
+    return expanded
+
+
 def _build_submit_store(args):
     """Ledger for ``submit-kelai`` / ``resend`` — env-aware default.
 
@@ -679,7 +702,7 @@ def run_kotl(args) -> int:
                 sod_csv=args.sod,
                 assume_flat_sod=args.assume_flat_sod,
                 sod_source=getattr(args, "sod_source", None),
-                strategy_id=getattr(args, "strategy_id", None),
+                strategy_id=_expand_strategy_alias(getattr(args, "strategy_id", None)),
                 env=flex_env,
                 defaults=defaults,
                 adapter=adapter,
