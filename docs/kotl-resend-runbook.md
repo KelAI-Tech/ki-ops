@@ -24,11 +24,18 @@ remainders are eligible.
 
 ## Environment defaults (operator box)
 
-With `KI_OPS_ENV=canary` exported (the operator-box boot service in
-kelai-infra sets this, plus `KOTL_FLEX_SDK_PATH` and the Flex UAT proxy
-endpoint), the env-aware defaults kick in and commands stay short:
+One flag selects the whole environment: `--env canary|prod` (alias
+`--ki-env`) picks the Flex venue (canary→UAT, prod→PROD), the ledger, the
+shares root and the secmaster schema together — no cross-environment
+mixtures. Explicit `--flex-env`/`--store`/`--db-secret`/`--shares` still win.
+The Flex endpoint resolves per environment from
+`KOTL_FLEX_UAT_ENDPOINT`/`KOTL_FLEX_PROD_ENDPOINT` (the operator-box boot
+service in kelai-infra exports both win-proxy routes, ports 50051/50052),
+falling back to the api-token secret; each per-env variable is only ever
+consulted for its own environment, so a stale override can never route one
+environment's traffic to another.
 
-| Setting | Default under `KI_OPS_ENV=canary` | Override |
+| Setting | Default under `--env canary` | Override |
 | --- | --- | --- |
 | Ledger (live envs) | MySQL via secret `kelai/kotl/db-canary`, schema `kotl` | `--store` / `--db-secret` / `--db-schema` |
 | Shares trade file | `s3://kelaitrading/portfolio_canary/shares/[<strategy-id>/]Portfolio_<yyyymmdd>.csv` | `--shares` |
@@ -36,11 +43,9 @@ endpoint), the env-aware defaults kick in and commands stay short:
 | Unresolved mode | `skip` (a still-missing name never blocks the rest of the scope) | `--unresolved block` |
 | Force | always on (resend implies it) | — |
 
-`--flex-env` is never defaulted for submits: say `UAT` (or `PROD`)
-explicitly. `FAKE` (the default) keeps everything offline, including a
-csv/`--data-dir` ledger. Without `KI_OPS_ENV` set, the legacy prod shares
-root applies and a live submit still defaults to the canary preset ledger
-(`KI_OPS_ENV` merely *selects* the preset; canary is the base default).
+Without `--env` (and without an explicit `--flex-env`) the submit stays
+offline (`FAKE`, csv/`--data-dir` ledger) — the ambient `KI_OPS_ENV`
+variable alone never makes a submit live.
 
 ## Retry the unresolved report (minimal)
 
@@ -48,7 +53,7 @@ root applies and a live submit still defaults to the canary preset ledger
 S=<strategy-id>   # e.g. df_combo_lseg_..._neutralized — or a friendly name:
                   # --strategy-id KelAIV2 expands to the hashed id + _neutralized
 
-ki-ops kotl resend --trade-date 2026-09-16 --flex-env UAT --sod-source flex \
+ki-ops kotl resend --trade-date 2026-09-16 --env canary --sod-source flex \
   --strategy-id $S \
   --retry-unresolved s3://kelaitrading/trades/canary/$S/unresolved_<submit_id>.csv
 ```
@@ -66,8 +71,11 @@ the trade file gets a `_dryrun` suffix).
 ## Re-send one ticker (minimal)
 
 ```bash
-ki-ops kotl resend --trade-date 2026-09-16 --flex-env UAT --sod-source flex \
+ki-ops kotl resend --trade-date 2026-09-16 --env canary --sod-source flex \
   --strategy-id $S --ticker PVLA
+
+# check a name's target first (read-only, same shares-file resolution):
+ki-ops kotl target PVLA --strategy-id $S
 ```
 
 `--ticker` is strict: a name with no residual trade intent refuses the

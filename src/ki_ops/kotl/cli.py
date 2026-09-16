@@ -78,6 +78,19 @@ def _add_submit_kelai_args(parser, *, resend: bool = False) -> None:
     """
     parser.add_argument("--trade-date", type=date.fromisoformat, required=True)
     parser.add_argument(
+        "--env",
+        "--ki-env",
+        dest="ki_env",
+        choices=("canary", "prod"),
+        default=None,
+        help="one-flag environment selection: canary → Flex UAT + ledger "
+        "kelai/kotl/db-canary + portfolio_canary shares root; prod → Flex "
+        "PROD + db-prod + prod root. Explicit --flex-env/--store/--db-secret/"
+        "--shares still win. Without --env and without --flex-env the submit "
+        "stays offline (FAKE) — the ambient KI_OPS_ENV variable alone never "
+        "makes a submit live",
+    )
+    parser.add_argument(
         "--shares",
         default=None,
         help="shares trade file, s3:// or local (default: "
@@ -114,8 +127,10 @@ def _add_submit_kelai_args(parser, *, resend: bool = False) -> None:
     parser.add_argument(
         "--flex-env",
         choices=("FAKE", "UAT", "PROD"),
-        default="FAKE",
-        help="FAKE (default, offline adapter) or UAT/PROD via the live gRPC adapter",
+        default=None,
+        help="FAKE (offline adapter) or UAT/PROD via the live gRPC adapter "
+        "(default: --env's preset — canary→UAT, prod→PROD; FAKE when no "
+        "--env is given)",
     )
     parser.add_argument(
         "--dry-run",
@@ -328,6 +343,38 @@ def register_kotl_parser(sub) -> None:
     _add_live_source_args(rf)
     _add_store_args(rf)
 
+    tg = ks.add_parser(
+        "target",
+        help="target position for ticker(s) from the day's shares trade file "
+        "(env-aware root via KI_OPS_ENV; strategy aliases accepted)",
+    )
+    tg.add_argument(
+        "tickers",
+        nargs="+",
+        metavar="TICKER",
+        help="ds2 ticker(s); AAPL and AAPL.US both match, class shares in "
+        "any spelling (BF.B / BF/B.US / BFB)",
+    )
+    tg.add_argument(
+        "--trade-date",
+        type=date.fromisoformat,
+        default=None,
+        help="default: today in America/New_York",
+    )
+    tg.add_argument(
+        "--strategy-id",
+        default=None,
+        help="pipeline strategy subfolder or friendly name (KelAIV2/KelaiV0/KelaiV1)",
+    )
+    tg.add_argument(
+        "--shares",
+        default=None,
+        help="explicit shares trade file, s3:// or local (default: the "
+        "KI_OPS_ENV portfolio root + [<strategy-id>/]Portfolio_<yyyymmdd>.csv)",
+    )
+    tg.add_argument("--cache-dir", type=Path, default=None, help="S3 download cache")
+    tg.add_argument("--json", action="store_true", help="JSON instead of table")
+
     st = ks.add_parser("status", help="sent / done / left report")
     st.add_argument("--trade-date", type=date.fromisoformat, required=True)
     st.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
@@ -458,6 +505,36 @@ def _expand_strategy_alias(value: str | None) -> str | None:
     expanded = alias + NEUTRALIZED_SUFFIX
     print(f"strategy alias: {value} → {expanded}")
     return expanded
+
+
+def _apply_env_selection(args) -> None:
+    """Resolve ``--env``/``--flex-env`` into one coherent environment.
+
+    Precedence: explicit ``--flex-env`` > the ``--env`` preset (canary→UAT,
+    prod→PROD, honoring ``KOTL_FLEX_ENV``) > offline ``FAKE``. An explicit
+    ``--env`` also pins ``KI_OPS_ENV`` for this process so every downstream
+    env-aware default — ledger preset, shares root, secmaster schema — follows
+    the same environment: one flag, one env, no cross-environment mixtures.
+    The ambient ``KI_OPS_ENV`` variable alone never makes a submit live.
+    """
+    import os
+
+    ki_env = getattr(args, "ki_env", None)
+    if ki_env:
+        from ki_ops.opsenv import ENV_VAR
+
+        os.environ[ENV_VAR] = ki_env
+    if not getattr(args, "flex_env", None):
+        if ki_env:
+            from ki_ops.opsenv import resolve_flex_env, resolve_ops_env
+
+            args.flex_env = resolve_flex_env(None, resolve_ops_env(ki_env))
+            print(
+                f"env: {ki_env} → flex {args.flex_env}, ledger + shares root "
+                "from the preset"
+            )
+        else:
+            args.flex_env = "FAKE"
 
 
 def _build_submit_store(args):
@@ -610,6 +687,77 @@ def _run_fills(args) -> int:
     return 0
 
 
+def _run_target(args) -> int:
+    """``kotl target``: look up ticker targets in the day's shares trade file.
+
+    Read-only and store-free — resolves the same shares file the submit path
+    would (env-aware root, strategy alias, ``--shares`` override) and prints
+    the requested tickers' signed target positions. A name absent from the
+    book is shown explicitly (``target=None`` in JSON): "no row" means the
+    strategy wants a zero/flat position, not an error.
+    """
+    from zoneinfo import ZoneInfo
+
+    from ki_ops.kotl.kelaidata_source import (
+        DEFAULT_CACHE_DIR,
+        default_shares_path,
+        fetch,
+        load_shares_trade_file,
+    )
+    from ki_ops.kotl.submit import _scope_key
+
+    trade_date = args.trade_date or datetime.now(ZoneInfo("America/New_York")).date()
+    strategy_id = _expand_strategy_alias(getattr(args, "strategy_id", None))
+    shares_url = str(
+        args.shares or default_shares_path(trade_date, strategy_id=strategy_id)
+    )
+    path = fetch(shares_url, cache_dir=args.cache_dir or DEFAULT_CACHE_DIR)
+    book = load_shares_trade_file(path)
+
+    by_key: dict[str, tuple[str, object]] = {}
+    for ticker, qty in book.items():
+        by_key.setdefault(_scope_key(ticker), (ticker, qty))
+
+    rows = []
+    for want in args.tickers:
+        hit = by_key.get(_scope_key(want))
+        rows.append(
+            {
+                "ticker": str(want).strip().upper(),
+                "matched_row": hit[0] if hit else None,
+                "target": str(hit[1]) if hit else None,
+            }
+        )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "shares_file": shares_url,
+                    "book_rows": len(book),
+                    "targets": rows,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"targets — {shares_url} ({len(book)} rows)")
+    width = max(len("ticker"), *(len(r["ticker"]) for r in rows))
+    print(f"{'ticker'.ljust(width)}  target  side")
+    print(f"{'-' * width}  ------  ----")
+    for row in rows:
+        if row["target"] is None:
+            print(f"{row['ticker'].ljust(width)}  -       not in book (flat/zero target)")
+            continue
+        qty = Decimal(row["target"])
+        side = "BUY" if qty > 0 else "SELL" if qty < 0 else "flat"
+        note = f"  (book row: {row['matched_row']})" if row["matched_row"] != row["ticker"] else ""
+        print(f"{row['ticker'].ljust(width)}  {str(qty).ljust(6)}  {side}{note}")
+    return 0
+
+
 def _build_refresh_source(args):
     """fixture path (default) vs live GetOrderInfo2."""
     if getattr(args, "source", "fixture") == "live":
@@ -624,10 +772,16 @@ def run_kotl(args) -> int:
     if cmd == "fills":
         # fills resolves its own store (env-preset MySQL default, not csv)
         return _run_fills(args)
+    if cmd == "target":
+        # read-only shares-file lookup; no store, no gRPC
+        return _run_target(args)
 
-    # submit-kelai / resend: live envs default to the env preset's MySQL
-    # ledger; everything else keeps the plain csv-under---data-dir default.
+    # submit-kelai / resend: --env resolves the whole environment first
+    # (flex env, then the ledger default below); live envs default to the
+    # env preset's MySQL ledger; everything else keeps the plain
+    # csv-under---data-dir default.
     if cmd in ("submit-kelai", "resend"):
+        _apply_env_selection(args)
         store = _build_submit_store(args)
     else:
         store = _build_store(args)
