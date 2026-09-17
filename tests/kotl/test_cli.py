@@ -236,6 +236,42 @@ def test_apply_env_selection_one_flag_env(monkeypatch, capsys):
     _apply_env_selection(args)
     assert args.flex_env == "UAT"
 
+    # read/refresh commands: legacy UAT flex default without --env; the
+    # preset applies when --env is given; no flex_env attr → untouched
+    args = Args(flex_env=None)
+    _apply_env_selection(args, flex_default="UAT")
+    assert args.flex_env == "UAT"
+    args = Args(ki_env="prod", flex_env=None)
+    _apply_env_selection(args, flex_default="UAT")
+    assert args.flex_env == "PROD"
+
+
+def test_build_store_env_flag_defaults_to_preset_mysql(tmp_path, monkeypatch, capsys):
+    """--env on refresh/status/eod/snapshot-book flips the ledger default to
+    that env's MySQL preset; csv stays the default without the flag."""
+    import ki_ops.kotl.mysql_store as mysql_store
+    from ki_ops.kotl.cli import _build_store
+    from ki_ops.kotl.store import KotlStore
+
+    calls = {}
+
+    class FakeMysql:
+        @classmethod
+        def from_env_or_secret(cls, *, db_secret=None, db_schema=None):
+            calls["args"] = (db_secret, db_schema)
+            return "MYSQL-STORE"
+
+    monkeypatch.setattr(mysql_store, "MysqlKotlStore", FakeMysql)
+
+    assert isinstance(_build_store(Args(data_dir=tmp_path)), KotlStore)
+    assert _build_store(Args(data_dir=tmp_path, ki_env="prod")) == "MYSQL-STORE"
+    assert calls["args"] == ("kelai/kotl/db-prod", "kotl")
+    assert "--env prod" in capsys.readouterr().out
+    # explicit csv wins over the flag
+    assert isinstance(
+        _build_store(Args(data_dir=tmp_path, ki_env="prod", store="csv")), KotlStore
+    )
+
 
 def test_kotl_cli_target_lookup(tmp_path, capsys):
     from ki_ops.kotl.cli import run_kotl
