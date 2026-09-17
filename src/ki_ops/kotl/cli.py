@@ -30,6 +30,20 @@ DEFAULT_TARGETS = ROOT / "examples" / "target_intents.csv"
 DEFAULT_FIXTURE = ROOT / "examples" / "kotl" / "refresh_partial.json"
 
 
+def _add_env_flag(parser, *, help_suffix: str = "") -> None:
+    """``--env canary|prod`` (alias ``--ki-env``) — uniform on every kotl command."""
+    parser.add_argument(
+        "--env",
+        "--ki-env",
+        dest="ki_env",
+        choices=("canary", "prod"),
+        default=None,
+        help="ops environment: canary → Flex UAT + ledger kelai/kotl/db-canary "
+        "+ portfolio_canary root; prod → Flex PROD + db-prod + prod root "
+        "(default: KI_OPS_ENV env var, else canary)" + help_suffix,
+    )
+
+
 def _add_store_args(parser) -> None:
     parser.add_argument(
         "--store",
@@ -62,8 +76,8 @@ def _add_live_source_args(parser) -> None:
     parser.add_argument(
         "--flex-env",
         choices=("UAT", "PROD"),
-        default="UAT",
-        help="Flex environment for --source live (default UAT)",
+        default=None,
+        help="Flex environment for --source live (default: --env preset, else UAT)",
     )
 
 
@@ -77,18 +91,12 @@ def _add_submit_kelai_args(parser, *, resend: bool = False) -> None:
     STILL missing from the master should not block the rest of the scope).
     """
     parser.add_argument("--trade-date", type=date.fromisoformat, required=True)
-    parser.add_argument(
-        "--env",
-        "--ki-env",
-        dest="ki_env",
-        choices=("canary", "prod"),
-        default=None,
-        help="one-flag environment selection: canary → Flex UAT + ledger "
-        "kelai/kotl/db-canary + portfolio_canary shares root; prod → Flex "
-        "PROD + db-prod + prod root. Explicit --flex-env/--store/--db-secret/"
-        "--shares still win. Without --env and without --flex-env the submit "
-        "stays offline (FAKE) — the ambient KI_OPS_ENV variable alone never "
-        "makes a submit live",
+    _add_env_flag(
+        parser,
+        help_suffix=". Explicit --flex-env/--store/--db-secret/--shares still "
+        "win. Without --env and without --flex-env the submit stays offline "
+        "(FAKE) — the ambient KI_OPS_ENV variable alone never makes a submit "
+        "live",
     )
     parser.add_argument(
         "--shares",
@@ -298,11 +306,12 @@ def register_kotl_parser(sub) -> None:
         "next morning's SOD recon baseline. Audits book vs previous snapshot + "
         "ledger fills (exit 8 on unexplained drift; snapshot recorded either way)",
     )
+    _add_env_flag(sb)
     sb.add_argument(
         "--flex-env",
         choices=("UAT", "PROD"),
-        default="UAT",
-        help="Flex environment to snapshot (default UAT)",
+        default=None,
+        help="Flex environment to snapshot (default: --env preset, else UAT)",
     )
     sb.add_argument(
         "--as-of",
@@ -329,6 +338,7 @@ def register_kotl_parser(sub) -> None:
         "refresh",
         help="refresh from KOTL fills JSON / kelai get_orders export, or live GetOrderInfo2",
     )
+    _add_env_flag(rf)
     rf.add_argument("--trade-date", type=date.fromisoformat, required=True)
     rf.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     rf.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
@@ -355,6 +365,7 @@ def register_kotl_parser(sub) -> None:
         help="ds2 ticker(s); AAPL and AAPL.US both match, class shares in "
         "any spelling (BF.B / BF/B.US / BFB)",
     )
+    _add_env_flag(tg)
     tg.add_argument(
         "--trade-date",
         type=date.fromisoformat,
@@ -376,6 +387,7 @@ def register_kotl_parser(sub) -> None:
     tg.add_argument("--json", action="store_true", help="JSON instead of table")
 
     st = ks.add_parser("status", help="sent / done / left report")
+    _add_env_flag(st)
     st.add_argument("--trade-date", type=date.fromisoformat, required=True)
     st.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     st.add_argument("--json", action="store_true", help="JSON instead of table")
@@ -386,12 +398,9 @@ def register_kotl_parser(sub) -> None:
         help="latest fills from the KOTL ledger "
         "(env-aware: canary/prod via KI_OPS_ENV, default canary)",
     )
-    fl.add_argument(
-        "--ki-env",
-        choices=("canary", "prod"),
-        default=None,
-        help="ops environment (default: KI_OPS_ENV env var, else canary); picks "
-        "the ledger db secret (kelai/kotl/db-canary|db-prod) and the Flex env for --live",
+    _add_env_flag(
+        fl,
+        help_suffix="; picks the ledger db secret and the Flex env for --live",
     )
     fl.add_argument(
         "--trade-date",
@@ -444,6 +453,7 @@ def register_kotl_parser(sub) -> None:
         "eod",
         help="end-of-day: refresh, flatness check, immutable snapshot + fills CSV (exit 3 when not flat)",
     )
+    _add_env_flag(eod)
     eod.add_argument("--trade-date", type=date.fromisoformat, required=True)
     eod.add_argument(
         "--fixture",
@@ -476,13 +486,38 @@ def register_kotl_parser(sub) -> None:
 
 
 def _build_store(args):
-    if getattr(args, "store", "csv") == "mysql":
+    """Ledger for refresh/status/eod/snapshot-book/submit-rebalance.
+
+    Default csv under ``--data-dir``; an explicit ``--env`` flag flips the
+    default to that environment's MySQL ledger preset (matching fills and the
+    live-submit default) — ``--store csv`` still opts out, and explicit
+    ``--db-secret``/``--db-schema``/``KOTL_DB_*`` keep their precedence.
+    """
+    import os
+
+    choice = getattr(args, "store", None)
+    ki_env = getattr(args, "ki_env", None)
+    if choice == "mysql" or (choice is None and ki_env):
         from ki_ops.kotl.mysql_store import MysqlKotlStore
 
-        return MysqlKotlStore.from_env_or_secret(
-            db_secret=getattr(args, "db_secret", None),
-            db_schema=getattr(args, "db_schema", None),
-        )
+        db_secret = getattr(args, "db_secret", None)
+        db_schema = getattr(args, "db_schema", None)
+        if ki_env:
+            from ki_ops.opsenv import resolve_ops_env
+
+            ops_env = resolve_ops_env(ki_env)
+            db_secret = db_secret or ops_env.kotl_db_secret
+            db_schema = (
+                db_schema
+                or os.environ.get("KOTL_DB_SCHEMA")
+                or ops_env.kotl_db_schema
+            )
+            if choice is None:
+                print(
+                    f"ledger: mysql via {db_secret} schema={db_schema} "
+                    f"(--env {ops_env.name}; --store csv opts out)"
+                )
+        return MysqlKotlStore.from_env_or_secret(db_secret=db_secret, db_schema=db_schema)
     return KotlStore(args.data_dir)
 
 
@@ -507,15 +542,17 @@ def _expand_strategy_alias(value: str | None) -> str | None:
     return expanded
 
 
-def _apply_env_selection(args) -> None:
+def _apply_env_selection(args, *, flex_default: str = "FAKE") -> None:
     """Resolve ``--env``/``--flex-env`` into one coherent environment.
 
-    Precedence: explicit ``--flex-env`` > the ``--env`` preset (canary→UAT,
-    prod→PROD, honoring ``KOTL_FLEX_ENV``) > offline ``FAKE``. An explicit
-    ``--env`` also pins ``KI_OPS_ENV`` for this process so every downstream
-    env-aware default — ledger preset, shares root, secmaster schema — follows
-    the same environment: one flag, one env, no cross-environment mixtures.
-    The ambient ``KI_OPS_ENV`` variable alone never makes a submit live.
+    Uniform across kotl commands. Precedence: explicit ``--flex-env`` > the
+    ``--env`` preset (canary→UAT, prod→PROD, honoring ``KOTL_FLEX_ENV``) >
+    *flex_default* (``FAKE`` for submits — the ambient ``KI_OPS_ENV`` variable
+    alone never makes a submit live; ``UAT`` for the read/refresh commands,
+    their legacy default). An explicit ``--env`` also pins ``KI_OPS_ENV`` for
+    this process so every downstream env-aware default — ledger preset,
+    shares root, secmaster schema — follows the same environment: one flag,
+    one env, no cross-environment mixtures.
     """
     import os
 
@@ -534,7 +571,7 @@ def _apply_env_selection(args) -> None:
                 "from the preset"
             )
         else:
-            args.flex_env = "FAKE"
+            args.flex_env = flex_default
 
 
 def _build_submit_store(args):
@@ -770,18 +807,22 @@ def _build_refresh_source(args):
 def run_kotl(args) -> int:
     cmd = args.kotl_command
     if cmd == "fills":
-        # fills resolves its own store (env-preset MySQL default, not csv)
+        # fills resolves --env / flex env / store itself (preset-aware).
         return _run_fills(args)
+
+    # --env is uniform: resolve it before anything reads env-aware defaults
+    # (shares root, ledger preset, flex env). Submits stay offline (FAKE)
+    # without an explicit --env/--flex-env; the read/refresh commands keep
+    # their legacy UAT flex default.
+    _apply_env_selection(
+        args, flex_default="FAKE" if cmd in ("submit-kelai", "resend") else "UAT"
+    )
+
     if cmd == "target":
         # read-only shares-file lookup; no store, no gRPC
         return _run_target(args)
 
-    # submit-kelai / resend: --env resolves the whole environment first
-    # (flex env, then the ledger default below); live envs default to the
-    # env preset's MySQL ledger; everything else keeps the plain
-    # csv-under---data-dir default.
     if cmd in ("submit-kelai", "resend"):
-        _apply_env_selection(args)
         store = _build_submit_store(args)
     else:
         store = _build_store(args)
