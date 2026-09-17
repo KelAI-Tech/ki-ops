@@ -43,7 +43,9 @@ def register_strat_parser(sub) -> None:
 
     def _add_common(parser) -> None:
         parser.add_argument(
+            "--env",
             "--ki-env",
+            dest="ki_env",
             choices=("canary", "prod"),
             default=None,
             help="ops environment (default: KI_OPS_ENV env var, else canary)",
